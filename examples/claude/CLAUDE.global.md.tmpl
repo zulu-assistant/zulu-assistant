@@ -1,0 +1,39 @@
+# Global instructions (all projects)
+
+<!-- Global ~/.claude/CLAUDE.md template (Zulu Assistant). `zulu setup` fills <OWNER> and the
+     vault path and installs it once (never overwrites yours). Codex reads the same rules from
+     ~/.codex/AGENTS.md. -->
+
+## Obsidian vault — <OWNER>'s cross-project knowledge base
+
+The org memory lives at `$HOME/<VAULT_NAME>` (one folder per project; conventions in its
+**Vault Guide** note).
+
+**Read side — consult before building.** When starting a NEW project, or designing a new
+subsystem/integration in an existing one, first read:
+- `Home.md` — the project index and the "How these connect" cross-project map
+- `Capabilities.md` — reusable building blocks and the shared-resource constraints list
+
+Look for prior art to reuse and for shared resources you must not conflict with. Follow
+`[[wikilinks]]` into project notes only as needed — don't bulk-read the vault. Skip this for
+routine questions or small fixes.
+
+**Write side — sync after substantive work.** Mirror notable work (new features, live
+changes, architecture decisions, status changes) back to the vault per its Vault Guide, and
+bump the project overview's `last-synced` frontmatter. New reusable capabilities also get an
+entry in `Capabilities.md`.
+
+## Code memory — Graphify
+In a repo with `graphify-out/graph.json`, run `graphify query "<question>"` before grepping
+raw files; `graphify path "<A>" "<B>"` for relationships; `graphify update .` after code
+changes (AST-only, no API cost).
+
+## Agent workforce
+If this Mac runs Zulu Assistant, the board is at http://localhost:3210 and cross-agent work
+goes through its task ledger (`scripts/task.sh`, rules in AGENT-MESH.md). Anything paid,
+outward-facing or destructive escalates to <OWNER> per POLICY.md — never guess.
+
+## Protected paths — never delete during cleanup/disk work
+`~/Library/Application Support/selfheal-runner/` and `~/.cache/selfheal-runner/` hold the
+scheduled jobs' success MARKERS — state, not cache. Deleting them marks every job "never
+succeeded" and triggers catch-up re-runs. Restore from the vault's `.scripts/state-mirror/`.

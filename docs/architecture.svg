@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560" role="img" aria-labelledby="title desc">
+  <title id="title">Zulu Assistant architecture</title>
+  <desc id="desc">macOS sources feed time-bounded collectors, which produce a status snapshot served by server.mjs over SSE to the board UI. The same poll drives the escalation ladder, self-heal, the heartbeat to an off-machine dead-man GitHub Action, and the Agent Mesh reconciler that links cmux sessions to the agent workforce.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#00e676"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ffc400"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "DejaVu Sans Mono", monospace; fill: #00e676; }
+      .h { font-size: 13px; font-weight: bold; }
+      .s { font-size: 11px; fill: #9be7b4; }
+      .l { font-size: 10px; fill: #9be7b4; }
+      .band { font-size: 11px; fill: #3fae6a; letter-spacing: 2px; }
+      .amber { fill: #ffc400; }
+      .box { fill: #061a0c; stroke: #00e676; stroke-width: 1.4; }
+      .box2 { fill: #061a0c; stroke: #1f9e55; stroke-width: 1.2; }
+      .warn { fill: #1a1400; stroke: #ffc400; stroke-width: 1.4; }
+      .edge { stroke: #00e676; stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+      .edge2 { stroke: #00e676; stroke-width: 1.4; fill: none; marker-end: url(#arrow); marker-start: url(#arrow); }
+      .edgeA { stroke: #ffc400; stroke-width: 1.4; fill: none; marker-end: url(#arrow-amber); }
+      .bound { fill: none; stroke: #2e7d4f; stroke-width: 1.2; stroke-dasharray: 6 4; }
+    </style>
+  </defs>
+
+  <!-- solid background so the diagram reads the same in light and dark themes -->
+  <rect x="0" y="0" width="900" height="560" rx="10" fill="#020a04"/>
+
+  <!-- trust boundary: this Mac (notch excludes the off-machine dead-man check) -->
+  <path class="bound" d="M10,30 H890 V205 H638 V272 H890 V475 H10 Z"/>
+  <text x="18" y="22" class="band">THIS MAC · board on :3210 (localhost + Tailscale 100.64/10 only)</text>
+
+  <!-- ================= Band A: fleet monitoring ================= -->
+  <rect class="box" x="20" y="45" width="170" height="210" rx="6"/>
+  <text x="32" y="67" class="h">macOS sources</text>
+  <text x="32" y="92" class="s">launchd jobs</text>
+  <text x="32" y="113" class="s">docker containers</text>
+  <text x="32" y="134" class="s">user crontab lines</text>
+  <text x="32" y="155" class="s">HTTP endpoints</text>
+  <text x="32" y="176" class="s">disk / memory gauges</text>
+  <text x="32" y="197" class="s">bare processes</text>
+  <text x="32" y="218" class="s">agent transcripts</text>
+  <text x="32" y="243" class="l">read-only</text>
+
+  <rect class="box" x="230" y="60" width="180" height="60" rx="6"/>
+  <text x="242" y="84" class="h">src/collect.mjs</text>
+  <text x="242" y="104" class="s">time-bounded reads</text>
+
+  <rect class="box" x="440" y="60" width="170" height="60" rx="6"/>
+  <text x="452" y="84" class="h">src/status.mjs</text>
+  <text x="452" y="104" class="s">status → snapshot</text>
+
+  <rect class="box" x="650" y="45" width="230" height="75" rx="6"/>
+  <text x="662" y="68" class="h">server.mjs</text>
+  <text x="662" y="88" class="s">60s poll · HTTP API</text>
+  <text x="662" y="106" class="s">SSE · actions · guard</text>
+
+  <rect class="box" x="650" y="145" width="230" height="52" rx="6"/>
+  <text x="662" y="167" class="h">Board UI  public/</text>
+  <text x="662" y="185" class="s">browser · phone · ?dock=1</text>
+
+  <path class="edge" d="M190,90 H228"/>
+  <path class="edge" d="M410,90 H438"/>
+  <path class="edge" d="M610,90 H648"/>
+  <path class="edge" d="M765,120 V143"/>
+  <text x="772" y="137" class="l">SSE</text>
+
+  <rect class="warn" x="230" y="145" width="380" height="55" rx="6"/>
+  <text x="242" y="167" class="h amber">src/alerts.mjs  escalation ladder</text>
+  <text x="242" y="187" class="s">cmux notify → email 30m → SMS critical → 08:00</text>
+  <path class="edgeA" d="M525,120 V143"/>
+
+  <rect class="box2" x="230" y="215" width="180" height="45" rx="6"/>
+  <text x="242" y="234" class="s">remediate · heal-cmux</text>
+  <text x="242" y="251" class="s">heal-restore</text>
+
+  <rect class="box2" x="440" y="215" width="170" height="45" rx="6"/>
+  <text x="452" y="234" class="s">heartbeat PATCH</text>
+  <text x="452" y="251" class="s">every 60s</text>
+
+  <rect class="warn" x="650" y="215" width="230" height="50" rx="6" stroke-dasharray="5 3"/>
+  <text x="662" y="236" class="h amber">dead-man Action</text>
+  <text x="662" y="254" class="s">GitHub · emails if silent</text>
+  <path class="edgeA" d="M610,238 H648"/>
+
+  <!-- poll → mesh reconcile -->
+  <path class="edge" d="M650,110 H626 V335 H582"/>
+  <text x="568" y="312" class="l">reconcile</text>
+
+  <!-- self-heal / notify → cmux -->
+  <path class="edge" d="M250,260 V318"/>
+  <text x="258" y="292" class="l">notify · heal socket · retry restore</text>
+
+  <!-- ================= Band B: agent workforce ================= -->
+  <text x="20" y="300" class="band">AGENT WORKFORCE</text>
+
+  <rect class="box" x="20" y="320" width="250" height="140" rx="6"/>
+  <text x="32" y="342" class="h">cmux (separate app)</text>
+  <text x="32" y="365" class="s">workspaces + sessions</text>
+  <text x="32" y="385" class="s">socket API (password)</text>
+  <text x="32" y="405" class="s">notifications / Feed</text>
+  <text x="32" y="425" class="s">pills · colors · progress</text>
+  <text x="32" y="448" class="l">CLI + socket only, unmodified</text>
+
+  <rect class="box" x="330" y="320" width="250" height="140" rx="6"/>
+  <text x="342" y="342" class="h">Agent Mesh</text>
+  <text x="342" y="365" class="s">mesh.mjs  directory</text>
+  <text x="342" y="385" class="s">tasks.mjs ledger data/tasks</text>
+  <text x="342" y="405" class="s">outbox: READY panes only</text>
+  <text x="342" y="425" class="s">chrome.mjs · context.mjs</text>
+  <text x="342" y="448" class="l">board is the single writer</text>
+
+  <rect class="box" x="640" y="320" width="240" height="140" rx="6"/>
+  <text x="652" y="342" class="h">Agents</text>
+  <text x="652" y="365" class="s">Mission Control (master)</text>
+  <text x="652" y="385" class="s">residents (per repo)</text>
+  <text x="652" y="405" class="s">workers (ephemeral)</text>
+  <text x="652" y="425" class="s">headless triage</text>
+  <text x="652" y="448" class="l">POLICY.md gates approvals</text>
+
+  <path class="edge2" d="M272,390 H328"/>
+  <text x="280" y="382" class="l">send</text>
+  <path class="edge2" d="M582,400 H638"/>
+  <text x="590" y="392" class="l">tasks</text>
+
+  <!-- ================= Footer: boundaries ================= -->
+  <text x="20" y="500" class="band">WRITES</text>
+  <text x="100" y="500" class="l">only data/, cmux notifications + chrome, the heartbeat row, opt-in actions</text>
+  <text x="20" y="520" class="band">SECRETS</text>
+  <text x="100" y="520" class="l">data/secrets.env only (mode 600, gitignored) · approvals need the board decision token</text>
+  <text x="20" y="540" class="band">CONFIG</text>
+  <text x="100" y="540" class="l">overlay/ → core → examples/ (src/config.mjs)</text>
+</svg>

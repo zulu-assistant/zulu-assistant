@@ -1,0 +1,52 @@
+{
+  "_doc": "Zulu Assistant example directory (copied to overlay/config/agents.json on first run; the board then maintains it). Identity = the cmux workspace: entries are keyed by workspaceId and the address (`name`) is derived from the live workspace title. New workspaces auto-register (needsOwnership=true); closed ones become status=closed. Edit only the overrides: owns, repo, escalate_to, kind, notes, aliases, domain. Rules: AGENT-MESH.md.",
+  "version": 2,
+  "agents": [
+    {
+      "name": "mission-control",
+      "title": "⌘ MISSION CONTROL",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "vendor": "claude",
+      "kind": "mission-control",
+      "repo": "~/zulu-assistant",
+      "owns": [
+        "Workforce routing, approvals (POLICY.md), cross-domain conflicts",
+        "data/MISSION-STATE.md"
+      ],
+      "escalate_to": "<OWNER>",
+      "status": "active",
+      "aliases": [
+        "mission-control"
+      ],
+      "domain": "ops"
+    },
+    {
+      "name": "my-app",
+      "title": "MY APP",
+      "workspaceId": "00000000-0000-4000-8000-000000000002",
+      "vendor": "claude",
+      "kind": "resident",
+      "repo": "~/my-app",
+      "owns": [
+        "my-app code, deploys and its scheduled jobs"
+      ],
+      "escalate_to": "mission-control",
+      "status": "active",
+      "domain": "platform"
+    },
+    {
+      "name": "fix-nightly-report",
+      "title": "fix: Nightly report",
+      "workspaceId": "00000000-0000-4000-8000-000000000003",
+      "vendor": "claude",
+      "kind": "worker",
+      "repo": "~/my-app",
+      "owns": [
+        "Diagnose the nightly report cron"
+      ],
+      "escalate_to": "mission-control",
+      "status": "closed",
+      "domain": "platform"
+    }
+  ]
+}

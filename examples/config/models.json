@@ -1,0 +1,25 @@
+{
+  "_doc": "Which engine runs each role (claude | codex) and which models. `zulu setup --step engines` writes `engine`; scripts/engine.mjs reads it (resident falls back to worker; default claude). Claude models: master/worker/workerFallback. Codex: codex.model (Mission Control) / codex.workerModel (workers, residents, triage) \u2014 empty = Codex's own default from ~/.codex/config.toml.",
+  "engine": {
+    "master": "claude",
+    "worker": "claude",
+    "triage": "claude"
+  },
+  "master": "claude-fable-5-1",
+  "worker": "claude-opus-5-5",
+  "workerFallback": "claude-opus-5",
+  "contextWindows": {
+    "_doc": "Claude context windows by model-id prefix (src/context.mjs). '[1m]' in a model string forces 1M. See https://docs.anthropic.com/en/docs/about-claude/models",
+    "default": 1000000,
+    "claude-haiku-4-5": 200000,
+    "claude-opus-5": 1000000,
+    "claude-fable-5": 1000000,
+    "claude-sonnet-5": 1000000,
+    "claude-opus-4": 1000000,
+    "claude-sonnet-4-6": 1000000
+  },
+  "codex": {
+    "model": "",
+    "workerModel": ""
+  }
+}

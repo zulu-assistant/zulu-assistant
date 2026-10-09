@@ -1,0 +1,53 @@
+{
+  "_doc": "Agent Mesh switches (Zulu Assistant example; copy to overlay/config/mesh.json). autoRename: the board types `/rename <title-slug>` into idle Claude panes whose session name drifted from their workspace title. chrome: keep cmux workspace colors/descriptions + the task/ctx pills in line with the directory and ledger (hand-set values always win). Groups are CLI-only (mesh-cli.mjs sync-groups). domains: the kinds of work your agents own, in sidebar order ({id, label, color, icon}; codex panes share one violet). repoDomains: repo path (~ or glob) \u2192 domain; scripts/cmux-chrome-config.mjs tints matching workspace groups.",
+  "autoRename": false,
+  "renameMaxPerPass": 3,
+  "renameCooldownMin": 10,
+  "chrome": false,
+  "chromeMaxPerPass": 6,
+  "domains": [
+    {
+      "id": "ops",
+      "label": "OPS",
+      "color": "#28FE14",
+      "icon": "terminal.fill"
+    },
+    {
+      "id": "app",
+      "label": "APP",
+      "color": "#E500E5",
+      "icon": "square.stack.3d.up.fill"
+    },
+    {
+      "id": "web",
+      "label": "WEB",
+      "color": "#4A7CFF",
+      "icon": "globe"
+    },
+    {
+      "id": "data",
+      "label": "DATA",
+      "color": "#E5E500",
+      "icon": "cylinder.split.1x2.fill"
+    },
+    {
+      "id": "platform",
+      "label": "PLATFORM",
+      "color": "#00E5E5",
+      "icon": "cpu.fill"
+    },
+    {
+      "id": "infra",
+      "label": "INFRA",
+      "color": "#999999",
+      "icon": "server.rack"
+    }
+  ],
+  "repoDomains": {
+    "~/zulu-assistant": "ops",
+    "~/my-app": "app",
+    "~/my-app-*-worktree*": "app",
+    "~/website": "web",
+    "~/data-pipeline": "data"
+  }
+}

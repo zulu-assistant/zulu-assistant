@@ -1,0 +1,31 @@
+# MISSION-STATE — Mission Control handoff
+
+<!-- Continuity file for the Mission Control agent. Lives at data/MISSION-STATE.md (gitignored).
+     Mission Control updates it after every material change and checkpoints it BEFORE /compact
+     or a relaunch. After a reboot or resume, re-read this file, then MISSION-CONTROL.md and
+     POLICY.md. Append dated "## Update" sections; prune old ones into the vault weekly. -->
+
+Mission Control address: `mission-control` (plus the slug of its workspace title).
+Contract: `MISSION-CONTROL.md` · Approval authority: `POLICY.md` (owner-owned).
+
+## Fleet snapshot (YYYY-MM-DD HH:MM TZ)
+- Board: <n> cards, <n> red, <n> amber · disk <n>% · memory <ok/warn>
+- Sessions: <n> residents (<n> idle, <n> needs-input), <n> workers, <n> Codex panes
+- Ledger: <n> open, <n> blocked, <n> awaiting approval
+
+## In flight
+<!-- One bullet per workstream: owner agent, task id, state, next checkpoint. -->
+- <workstream> — owner `<agent>`, task #<id>: <state>. Next: <what/when>.
+
+## Standing gates & reminders
+<!-- Dated deadlines, pending owner decisions, things that must not happen before X. -->
+- YYYY-MM-DD: <gate or reminder>
+
+## After a reboot
+- [ ] Board up, `cmux:bridge` green (socket password healed)
+- [ ] Residents resumed (heal-restore ticker lines); list any that came back as bare shells
+- [ ] Codex panes resumed by hand (`codex resume <id>`)
+- [ ] Ledger outbox drained
+
+## Update — YYYY-MM-DD HH:MM TZ
+- <what changed, decisions taken, what the owner must do>

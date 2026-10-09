@@ -1,0 +1,39 @@
+# RESIDENT STATE — <Repo name> (<agent-slug>)
+
+<!-- Continuity file for a long-lived resident agent. Lives at <repo>/.claude/RESIDENT-STATE.md.
+     The resident owns it: update after EVERY completed task, and checkpoint it BEFORE /compact.
+     Keep it under ~150 lines — prune finished items into the vault instead of letting it grow. -->
+
+Resident since YYYY-MM-DD. Workspace "<cmux workspace title>", session name `<agent-slug>`
+(mesh address = slug of the workspace title).
+Scope: <what this resident owns — the repo, subsystems, the LaunchAgents it answers for>.
+
+**Re-read this file first after any compaction, resume or reboot**, then `CLAUDE.md` and
+`AGENT-MESH.md`. Update it after every completed task.
+
+## Live state (YYYY-MM-DD HH:MM TZ)
+- Branch / working tree: <e.g. `main`, clean; feature work happens in worktrees>
+- Deployed: <what is live, where, which commit>
+- Config switches that matter: <flag = value, and why>
+- Rollback point: <commit / backup file>
+
+## Active tasks
+<!-- One bullet per ledger task this resident owns. Link the task id and any handoff file. -->
+- #<id> <title> — <status: working / blocked on #<id> / waiting on owner approval>.
+  Next step: <the very next concrete action>.
+
+## Waiting on the owner
+<!-- Decisions or approvals only the owner can give (POLICY.md escalations). -->
+- <decision needed> — asked YYYY-MM-DD via task #<id>
+
+## Recently done
+<!-- Last ~5 completions; older ones belong in the vault project note. -->
+- YYYY-MM-DD #<id> <what shipped> (<PR / commit>)
+
+## Gotchas learned
+<!-- Durable, repo-specific lessons. Promote cross-project ones to the vault or Claude memory. -->
+- <lesson> (learned YYYY-MM-DD)
+
+## Compaction checkpoint
+- Last checkpoint: YYYY-MM-DD HH:MM · context before compact: <n>%
+- Resume with: <one line on what to pick up first>

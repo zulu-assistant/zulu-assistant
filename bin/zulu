@@ -1,0 +1,4 @@
+#!/bin/bash
+# `zulu <command>` = ./install.sh <command> from anywhere, e.g. `zulu star`, `zulu --demo`.
+# Put it on your PATH: ln -s "$PWD/bin/zulu" ~/.local/bin/zulu
+exec "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)/install.sh" "$@"

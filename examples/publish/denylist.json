@@ -1,0 +1,40 @@
+{
+  "_doc": "Zulu Assistant scrub-gate denylist EXAMPLE \u2014 copy to overlay/publish/denylist.json and replace the <placeholders> with your own names, domains and handles (regex; flags default 'g').",
+  "rules": [
+    {
+      "id": "home-path",
+      "pattern": "/Users/<your-user>",
+      "flags": "g"
+    },
+    {
+      "id": "owner-name",
+      "pattern": "\\b<your first name>\\b",
+      "flags": "gi"
+    },
+    {
+      "id": "business",
+      "pattern": "<your company>|<your store domain>",
+      "flags": "gi"
+    },
+    {
+      "id": "phone",
+      "pattern": "\\+1(?!\\d{3}555)\\d{10}\\b",
+      "flags": "g"
+    },
+    {
+      "id": "tailscale-ip",
+      "pattern": "\\b100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])\\.(?!102\\.103\\b)(?!0\\.0\\b)\\d{1,3}\\.\\d{1,3}\\b",
+      "flags": "g"
+    },
+    {
+      "id": "env-local",
+      "pattern": "\\.env\\.local\\b",
+      "flags": "g"
+    },
+    {
+      "id": "workspace-uuid",
+      "pattern": "\\b(?!00000000-)[0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}\\b",
+      "flags": "g"
+    }
+  ]
+}

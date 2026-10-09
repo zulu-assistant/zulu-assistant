@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Render: scripts/render-tmpl.sh <this> "$VAULT/.scripts/<prefix>.obsidian-backup.plist" -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL_PREFIX__.obsidian-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__VAULT__/.scripts/vault-backup.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VAULT</key>
+    <string>__VAULT__</string>
+  </dict>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/obsidian-backup.launchd.log</string>
+</dict>
+</plist>

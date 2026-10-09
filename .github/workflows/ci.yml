@@ -1,0 +1,38 @@
+# Zulu Assistant CI. Tests run on Linux (cheap; the macOS-only bootstrap test
+# skips itself there). The scrub gate (denylist + gitleaks) runs on macOS, the
+# platform the product targets, as the one small macOS job.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tests
+        run: node --test "test/*.test.mjs"
+      - name: Demo board answers
+        run: |
+          MC_DEMO=1 MC_PORT=3299 node server.mjs > demo.log 2>&1 &
+          for i in $(seq 1 40); do curl -sf localhost:3299/api/status > status.json && break; sleep 0.25; done
+          node -e 'const s=require("./status.json"); if(!s.demo||s.jobs.length<10||!s.sessions.length) process.exit(1); console.log(`demo OK: ${s.jobs.length} cards, ${s.sessions.length} agents`)'
+  gate:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install gitleaks
+        run: brew install gitleaks
+      - name: Scrub gate (denylist + gitleaks)
+        run: node scripts/scrub-gate.mjs . --require-gitleaks --summary

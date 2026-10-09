@@ -1,0 +1,34 @@
+# Homebrew scheme — matched to the Terminal.app "Homebrew" profile:
+# Menlo Regular 14, vivid green text, green blinking block cursor, blue selection.
+# Read by Ghostty and by cmux (which uses this file for theme/font/colors).
+theme = Homebrew
+
+font-family = Menlo
+font-size = 14
+
+background = 000000
+foreground = 28fe14
+cursor-color = 23ff18
+cursor-style = block
+cursor-style-blink = true
+selection-background = 2843c8
+selection-foreground = ffffff
+
+# ANSI palette — Homebrew heritage, normal row brightened so prompts/ls output
+# read vivid on pure black instead of murky
+palette = 0=#000000
+palette = 1=#cc2222
+palette = 2=#00c200
+palette = 3=#b2b200
+palette = 4=#2456d9
+palette = 5=#c222c2
+palette = 6=#00b2c2
+palette = 7=#cfcfcf
+palette = 8=#666666
+palette = 9=#ff3333
+palette = 10=#00e800
+palette = 11=#e5e500
+palette = 12=#4a7cff
+palette = 13=#e500e5
+palette = 14=#00e5e5
+palette = 15=#ffffff

@@ -1,0 +1,48 @@
+# <Project Name>
+
+<!-- Project CLAUDE.md template (Zulu Assistant). Replace the <…> placeholders, keep the two
+     blocks at the bottom verbatim (adjust only the vault path), delete what doesn't apply.
+     Global rules (vault read/write side, protected paths) belong in ~/.claude/CLAUDE.md —
+     see examples/vault/Obsidian-Vault-Replication-Spec.md §6. -->
+
+<One paragraph: what this project is, who uses it, where it runs.>
+
+## What it does
+- <main responsibility>
+- <second responsibility>
+
+## Architecture
+<Stack, entry points, key directories. Keep it short — Graphify holds the detail.>
+
+## Conventions & gotchas
+- <things an agent must know before changing code here>
+
+## Ops
+- Run: `<command>` · Tests: `<command>`
+- Logs: `<path>` · LaunchAgent (if any): `<prefix>.<name>`
+
+## Continuity (residents only)
+If a long-lived resident agent owns this repo, its state file is `.claude/RESIDENT-STATE.md`.
+**Re-read it first after any compaction or resume**, then this file. Update it after every
+completed task. Before `/compact`, checkpoint the state file first.
+
+## Obsidian vault sync
+Mirror notable work on this project to the central Obsidian vault at
+`$HOME/<VAULT_NAME>`, following its **`Vault Guide.md`** note
+(structure, frontmatter, templates). This project maps to the vault folder of the
+same name — create it and an overview note if absent. Keep notes current with the
+live state (don't leave stale pre-execution plans; append a dated
+`## Update — YYYY-MM-DD` section when state changes). Create any missing notes
+yourself; the owner should not have to pre-create them.
+Before designing new subsystems or integrations here, consult the vault's `Home.md` and
+`Capabilities.md` for prior art, reusable services, and cross-project constraints.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

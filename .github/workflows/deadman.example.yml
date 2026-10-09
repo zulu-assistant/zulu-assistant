@@ -1,0 +1,108 @@
+# Dead-man's switch — EXAMPLE (inactive until you enable it)
+#
+# The board PATCHes a single heartbeat row every 60s (HEARTBEAT_URL /
+# HEARTBEAT_KEY in data/secrets.env; see docs/ARCHITECTURE.md). This workflow
+# runs OFF your Mac, reads that row, and emails you when the heartbeat is older
+# than STALE_MIN minutes. It has to be cloud-side: a frozen or powered-off Mac
+# cannot report its own death.
+#
+# To enable:
+#   1. Rename this file to deadman.yml.
+#   2. Uncomment the `schedule:` block below. (While it is commented out, the
+#      workflow only runs when you start it by hand — no surprise runs.)
+#   3. Add these repository secrets (Settings → Secrets and variables → Actions):
+#        HEARTBEAT_READ_URL  full GET URL returning a JSON array whose first row
+#                            has `beat_at` (ISO-8601) and optional `host`, e.g. a
+#                            PostgREST query: <base>/rest/v1/ops_heartbeat?select=beat_at,host&id=eq.1
+#        HEARTBEAT_READ_KEY  read-only key sent as `apikey` + `Authorization: Bearer`
+#                            (leave empty if the endpoint is public)
+#        SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS   STARTTLS SMTP account used to send
+#        ALERT_TO            where the alert email goes
+#   4. Run it once from the Actions tab (workflow_dispatch) and check the log
+#      prints "heartbeat age: N min".
+#
+# Nothing here is repo-specific: every endpoint and recipient comes from secrets.
+# Scheduled runs cost GitHub Actions minutes on private repos (~1 min per run).
+
+name: dead-man's switch
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "*/30 * * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check heartbeat freshness
+        env:
+          HEARTBEAT_READ_URL: ${{ secrets.HEARTBEAT_READ_URL }}
+          HEARTBEAT_READ_KEY: ${{ secrets.HEARTBEAT_READ_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+          STALE_MIN: "40"        # alert when the heartbeat is older than this
+          REALERT_MIN: "360"     # while still dead, re-alert roughly this often
+          SCHEDULE_MIN: "30"     # must match the cron interval above
+        run: |
+          python3 - <<'EOF'
+          import json, os, smtplib, ssl, sys, urllib.request
+          from datetime import datetime, timezone
+          from email.message import EmailMessage
+
+          required = ["HEARTBEAT_READ_URL", "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "ALERT_TO"]
+          missing = [k for k in required if not os.environ.get(k)]
+          if missing:
+              sys.exit(f"missing repository secrets: {', '.join(missing)}")
+
+          headers = {}
+          key = os.environ.get("HEARTBEAT_READ_KEY")
+          if key:
+              headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+          req = urllib.request.Request(os.environ["HEARTBEAT_READ_URL"], headers=headers)
+          with urllib.request.urlopen(req, timeout=30) as r:
+              rows = json.load(r)
+          if isinstance(rows, dict):
+              rows = [rows]
+          if not rows:
+              sys.exit("no heartbeat row found")
+          beat_at = rows[0]["beat_at"]
+          host = rows[0].get("host") or "the board host"
+          beat = datetime.fromisoformat(beat_at.replace("Z", "+00:00"))
+          age_min = (datetime.now(timezone.utc) - beat).total_seconds() / 60
+          print(f"heartbeat age: {age_min:.1f} min (host {host})")
+
+          stale = int(os.environ["STALE_MIN"])
+          realert = int(os.environ["REALERT_MIN"])
+          window = int(os.environ["SCHEDULE_MIN"]) + 5
+          if age_min <= stale:
+              sys.exit(0)
+          # alert on first detection, then re-alert about every REALERT_MIN while dead
+          in_first_window = age_min <= stale + window
+          in_realert_window = (age_min % realert) < window
+          if not (in_first_window or in_realert_window):
+              print("stale but outside alert windows (already alerted)")
+              sys.exit(0)
+
+          m = EmailMessage()
+          m["From"] = os.environ["SMTP_USER"]
+          m["To"] = os.environ["ALERT_TO"]
+          m["Subject"] = f"[Zulu Assistant] {host} silent for {int(age_min)} min: heartbeat stopped"
+          m.set_content(
+              f"The Ops Board heartbeat from {host} was last seen {int(age_min)} minutes ago\n"
+              f"({beat_at}).\n\n"
+              "Likely causes: power outage, frozen Mac, full disk, or network loss.\n"
+              "Everything the board watches may be stopped too.\n\n"
+              "Check: power / reboot the Mac. If auto-restart, auto-login, the board's\n"
+              "LaunchAgent and the cmux login item are set up (docs/INSTALL.md), the\n"
+              "fleet and agent sessions restore themselves on boot.\n")
+          with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"]), timeout=30) as s:
+              s.starttls(context=ssl.create_default_context())
+              s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
+              s.send_message(m)
+          print("ALERT EMAIL SENT")
+          EOF

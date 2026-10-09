@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Render: scripts/render-tmpl.sh <this> "$VAULT/.scripts/<prefix>.obsidian-staleness.plist" -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL_PREFIX__.obsidian-staleness</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__VAULT__/.scripts/vault-staleness-check.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VAULT</key>
+    <string>__VAULT__</string>
+  </dict>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/obsidian-staleness.launchd.log</string>
+</dict>
+</plist>

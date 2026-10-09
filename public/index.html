@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="mesh-decision" content="%%MESH_DECISION%%">
+<meta name="board-boot" content="%%BOOT_ID%%">
+<title>%%BRAND%%</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <h1 id="brand-name">%%BRAND%%</h1>
+    <span class="demo-badge hidden" id="demo-badge" title="synthetic data — nothing real is watched or touched">DEMO</span>
+    <span class="live" id="live" title="live via SSE"><span class="live-dot"></span>LIVE</span>
+  </div>
+  <div class="tiles">
+    <div class="tile" id="tile-ok"><div class="tile-num">–</div><div class="tile-label">Healthy</div></div>
+    <div class="tile" id="tile-attention"><div class="tile-num">–</div><div class="tile-label">Needs attention</div></div>
+    <div class="tile" id="tile-docker"><div class="tile-num">–</div><div class="tile-label">Docker</div></div>
+    <div class="tile" id="tile-agents"><div class="tile-num">–</div><div class="tile-label">Agents</div></div>
+    <a class="tile" id="tile-work" href="#work-row"><div class="tile-num">–</div><div class="tile-label">Work</div></a>
+    <div class="tile tile-spark">
+      <svg id="fleet-spark" viewBox="0 0 240 48" preserveAspectRatio="none" aria-label="fleet health, last hours"></svg>
+      <div class="tile-label">Fleet health</div>
+    </div>
+  </div>
+  <div class="clock" id="clock">–</div>
+</header>
+
+<div class="notice hidden" id="notice" role="status" aria-live="polite"></div>
+
+<section class="timeline-row" id="timeline-row">
+  <h2><span class="glyph">◷</span> OPS TIMELINE <span class="feed-src">−12h ··· +12h</span></h2>
+  <div class="timeline" id="timeline" aria-label="scheduled job slots, past and next 12 hours"></div>
+</section>
+
+<section id="attention-row" class="attention hidden">
+  <h2><span class="glyph">▲</span> NEEDS ATTENTION</h2>
+  <div class="attention-grid" id="attention-grid"></div>
+</section>
+
+<section class="agents-row" id="agents-row">
+  <h2><span class="glyph">◉</span> AGENT SESSIONS <span class="feed-src">cmux</span></h2>
+  <div class="agents-grid" id="agents-grid"></div>
+</section>
+
+<section class="work-row" id="work-row" aria-label="agent task ledger">
+  <h2><span class="glyph">▣</span> WORK <span class="feed-src">agent mesh ledger</span>
+    <span class="work-counts" id="work-counts"></span></h2>
+  <div class="work-cols" id="work-cols"></div>
+</section>
+
+<main>
+  <div id="domains"></div>
+  <aside class="feed-panel">
+    <h2><span class="glyph">◆</span> AGENT ACTIVITY <span class="feed-src">cmux feed</span></h2>
+    <div id="feed"></div>
+  </aside>
+</main>
+
+<div class="drawer hidden" id="drawer">
+  <div class="drawer-head">
+    <h3 id="drawer-title">log</h3>
+    <button id="drawer-close" aria-label="close">✕</button>
+  </div>
+  <pre id="drawer-log">loading…</pre>
+</div>
+
+<footer>
+  <span id="updated">–</span>
+  <span class="sep">·</span>
+  <span>read-only · port 3210</span>
+  <span class="sep">·</span>
+  <span class="hint"><kbd>/</kbd> filter · <a href="?tv" class="tv-link">?tv</a> big-screen</span>
+  <span class="sep share-sep hidden">·</span>
+  <button class="share-link hidden" id="share-btn" title="download a redacted PNG of this board (labels replaced by generic names) — nothing is uploaded">⎙ share your setup</button>
+</footer>
+
+<div class="ticker" id="ticker" aria-label="recent events">
+  <span class="ticker-tag">EVENTS</span>
+  <div class="ticker-clip"><div class="ticker-track" id="ticker-track"></div></div>
+</div>
+
+<div class="palette hidden" id="palette" role="search">
+  <span class="palette-prompt">/</span>
+  <input id="palette-input" autocomplete="off" spellcheck="false"
+         placeholder="filter cards · Enter first match · Esc close">
+  <span class="palette-count" id="palette-count"></span>
+</div>
+
+<div class="tl-tip hidden" id="tl-tip" role="tooltip"></div>
+
+<div class="star-toast hidden" id="star-toast" role="status" aria-live="polite">
+  <span class="star-glyph" aria-hidden="true">★</span>
+  <span class="star-text" id="star-text"></span>
+  <span class="star-actions">
+    <button class="act" id="star-yes">★ STAR</button>
+    <button class="act" id="star-never">NEVER ASK AGAIN</button>
+  </span>
+</div>
+
+<div class="boot" id="boot" aria-hidden="true"><pre id="boot-text"></pre></div>
+
+<script src="decide.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

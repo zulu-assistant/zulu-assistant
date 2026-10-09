@@ -1,0 +1,23 @@
+{
+  "controls": [
+    {
+      "id": "mc-board",
+      "title": "Board",
+      "type": "browser",
+      "url": "http://localhost:3210/?dock=1",
+      "chrome": false,
+      "height": 460
+    },
+    {
+      "id": "mc-feed",
+      "title": "Feed",
+      "command": "CMUX_SOCKET_PASSWORD=\"$(cat \"__REPO__/data/cmux-socket-password\")\" cmux feed tui",
+      "height": 260
+    },
+    {
+      "id": "mc-runner-log",
+      "title": "Runner log",
+      "command": "tail -n 200 -F ~/Library/Logs/selfheal-runner.log"
+    }
+  ]
+}

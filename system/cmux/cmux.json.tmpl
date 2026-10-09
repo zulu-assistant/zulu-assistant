@@ -1,0 +1,31 @@
+{
+  "$schema": "https://raw.githubusercontent.com/manaflow-ai/cmux/main/web/data/cmux.schema.json",
+  "app": {
+    "reorderOnNotification": true
+  },
+  "automation": {
+    "claudeBinaryPath": "__NODE_BIN_DIR__/claude",
+    "claudeCodeIntegration": true,
+    "socketControlMode": "password",
+    "suppressSubagentNotifications": true,
+    "socketPassword": "__FROM_data/cmux-socket-password__"
+  },
+  "notifications": {
+    "agentIdleReminder": true,
+    "agentPermissionPrompt": true,
+    "agentTurnComplete": "whenIdle",
+    "dockBadge": true,
+    "showInMenuBar": true,
+    "sound": "default",
+    "unreadPaneRing": true,
+    "paneFlashColor": "#28FE14"
+  },
+  "sidebar": {
+    "notificationBadgePosition": "trailing",
+    "notificationMessageLineLimit": 2,
+    "showAgentActivity": true,
+    "showNotificationMessage": true
+  },
+  "activePaneBorderColor": "#28FE14",
+  "paneBorderColor": "#0D5F0D"
+}
