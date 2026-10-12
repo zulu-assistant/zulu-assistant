@@ -14,6 +14,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cmux, writeJsonAtomic } from './mesh.mjs';
+import { acrossWindows } from './cmux-windows.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const CHROME_STATE_FILE = path.join(ROOT, 'data', 'mesh-chrome-state.json');
@@ -292,7 +293,7 @@ export async function readChromeState(file = CHROME_STATE_FILE) {
 }
 
 export async function liveWorkspaceRows(run = cmux) {
-  const r = await run(['workspace', 'list', '--json']);
+  const r = await acrossWindows(run, ['workspace', 'list', '--json']);
   if (r.err) return [];
   try { return JSON.parse(r.out).workspaces || []; } catch { return []; }
 }

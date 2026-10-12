@@ -20,6 +20,15 @@ Website: [https://zuluassistant.com](https://zuluassistant.com)
 |---|---|---|
 | ![board](docs/media/board.png) | ![agents and work](docs/media/agents-and-work.png) | ![tv mode](docs/media/tv-mode.png) |
 
+**Both halves together.** The board, and cmux with the phosphor sidebar. An agent asks for permission,
+its row rises to the top of ATTENTION, and when it's answered the row drops back:
+
+![cmux demo: an agent works, asks for permission, the INPUT row rises to the top of the phosphor sidebar, it is answered and the row drops back](docs/media/cmux-demo.gif)
+
+![The two-part console: agent panes in cmux, the board beside them, the phosphor ATTENTION sidebar](docs/media/two-part-console.png)
+
+<sub>Recorded from `./install.sh --demo --cmux`: its own cmux window, six scripted fake agents, every name synthetic.</sub>
+
 ## The problem
 
 - **Background jobs fail silently.** A LaunchAgent stops loading, a cron line
@@ -65,7 +74,9 @@ Codex** for Mission Control and for workers, pick what to watch from a scan of y
 channels, create your vault, grant the macOS permissions. Re-run any step later (`zulu setup
 --step engines`); the board shows a setup card until you're done.
 
-Just looking? `./install.sh --demo` from a clone runs a synthetic board on :3210 with Node 22 only.
+Just looking? `./install.sh --demo` from a clone runs a synthetic board on :3210 with Node 22 only;
+`./install.sh --demo --cmux` adds a ZULU DEMO window in cmux with six fake agents, so you can see
+both halves of the console working together.
 Everything the setup does and cannot automate is in [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Why not tmux and a dashboard?

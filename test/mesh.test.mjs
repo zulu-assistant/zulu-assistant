@@ -676,3 +676,56 @@ test('resolveNewWorkspace: output first; else retries the listing until the ref 
   assert.deepEqual(t, { id: LIST[1].id, via: 'unique title match' });
   assert.deepEqual(await resolveNewWorkspace({ ref: 'workspace:404', list: async () => LIST, sleep, tries: 2 }), { id: null });
 });
+
+// ---- listings across every cmux window + demo isolation (task #152) ---------------
+
+import { parseWindows, acrossWindows, isDemoWorkspace, DEMO_TITLE_PREFIX } from '../src/mesh.mjs';
+
+const WIN_A = '00000000-0000-4000-8000-00000000000A';
+const WIN_B = '00000000-0000-4000-8000-00000000000B';
+
+test('parseWindows reads cmux list-windows rows', () => {
+  const out = `* 0: ${WIN_A} selected_workspace=x workspaces=27\n  1: ${WIN_B} selected_workspace=y workspaces=7\n`;
+  assert.deepEqual(parseWindows(out), [WIN_A, WIN_B]);
+  assert.deepEqual(parseWindows(''), []);
+});
+
+test('acrossWindows: one window = the old call; two = every window; any failure fails it all', async () => {
+  const calls = [];
+  const fake = (wins, fail = null) => async (args) => {
+    calls.push(args.join(' '));
+    if (args[0] === 'list-windows') return { err: null, out: wins.map((w, i) => `${i ? ' ' : '*'} ${i}: ${w} workspaces=1`).join('\n') };
+    const w = args[args.indexOf('--window') + 1];
+    if (fail && w === fail) return { err: 'boom', out: '' };
+    if (args.includes('--json')) return { err: null, out: JSON.stringify({ workspaces: [{ id: `ws-in-${args.includes('--window') ? w : 'current'}` }] }) };
+    return { err: null, out: `workspace:1 in ${args.includes('--window') ? w : 'current'}` };
+  };
+  const one = await acrossWindows(fake([WIN_A]), ['workspace', 'list']);
+  assert.equal(one.out, 'workspace:1 in current');
+  assert.ok(!calls.some((c) => c.includes('--window')), 'single window: unchanged call');
+  const two = await acrossWindows(fake([WIN_A, WIN_B]), ['workspace', 'list']);
+  assert.match(two.out, new RegExp(`in ${WIN_A}[\\s\\S]*in ${WIN_B}`));
+  const js = JSON.parse((await acrossWindows(fake([WIN_A, WIN_B]), ['workspace', 'list', '--json'])).out);
+  assert.deepEqual(js.workspaces.map((w) => w.id), [`ws-in-${WIN_A}`, `ws-in-${WIN_B}`]);
+  const bad = await acrossWindows(fake([WIN_A, WIN_B], WIN_B), ['workspace', 'list']);
+  assert.equal(bad.err, 'boom', 'a partial listing must never look like "the rest closed"');
+});
+
+test('isDemoWorkspace: the demo title prefix or a recorded demo id, nothing else', () => {
+  assert.equal(isDemoWorkspace({ id: 'x', title: `${DEMO_TITLE_PREFIX} · needs-input` }), true);
+  assert.equal(isDemoWorkspace({ id: 'x', name: 'zulu demo' }), true);
+  assert.equal(isDemoWorkspace({ id: WIN_A.toLowerCase(), title: 'anything' }, new Set([WIN_A])), true);
+  assert.equal(isDemoWorkspace({ id: 'x', title: 'app — resident' }), false);
+  assert.equal(isDemoWorkspace({ id: 'x', title: 'my zulu demo notes' }), false, 'prefix only');
+});
+
+test('reconcile never registers a demo workspace (server passes them as ignoreIds)', () => {
+  const doc = { agents: [] };
+  const workspaces = [
+    { ref: 'workspace:1', id: WIN_A, title: 'app — resident' },
+    { ref: 'workspace:2', id: WIN_B, title: `${DEMO_TITLE_PREFIX} · working` },
+  ];
+  const ignoreIds = new Set(workspaces.filter((w) => isDemoWorkspace(w)).map((w) => w.id));
+  const r = reconcile(doc, { workspaces, sessionMap: {}, registry: [], ignoreIds });
+  assert.deepEqual(r.changes.added.map((a) => a.workspaceId), [WIN_A]);
+});

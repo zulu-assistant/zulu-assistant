@@ -138,4 +138,8 @@ export const SETTINGS = {
   // weekly GitHub Actions cost reading posted to a ledger task (src/ci-cost-watch.mjs);
   // set e.g. { task: <ledger task id>, weekday: 1, hour: 8 } once CI runs on paid macOS minutes
   ciCostWatch: null,
+  // GitHub stats for your repos (stars, forks, watchers, clones, views — kept beyond GitHub's
+  // 14 days) as board cards + a digest section; uses your gh login (traffic needs push access).
+  // e.g. { repos: ['you/your-repo'], everyHours: 6 }
+  repoStats: null,
 };

@@ -53,6 +53,29 @@ cd ~/zulu-assistant
 Demo mode (`MC_DEMO=1`) needs only Node 22. It installs no LaunchAgents, needs no cmux and
 touches nothing outside the checkout. Use it to see the board before committing to a full install.
 
+### The cmux half too: `--demo --cmux`
+
+```bash
+./install.sh --demo --cmux # the board, plus a "ZULU DEMO" window in cmux with six fake agents
+./install.sh demo-stop     # stops the board and closes the ZULU DEMO window
+```
+
+With cmux running, this opens a **separate cmux window** called ZULU DEMO, holding a ZULU DEMO
+workspace group of six fake agent panes (`scripts/demo-agent.mjs`, scripted transcripts, no model
+calls). One works and then asks for permission, one streams work while its context gauge climbs
+into amber, one is blocked, one is a Codex pane, two are quiet. The demo board reads those panes
+and writes the same sidebar chrome the real board writes: domain colors, task and `ctx` pills, and
+the progress label that puts **▲ INPUT** at the top of the phosphor sidebar's ATTENTION list. Press
+`1` in the asking pane and its row drops back down; left alone it answers itself after ~25 s and
+loops.
+
+![The phosphor sidebar in ATTENTION mode: one agent needs input, one task awaits approval, one is blocked](media/cmux-attention.png)
+
+The demo never changes which sidebar is showing (that stays your choice). It prints the one line
+that turns the phosphor sidebar on for the demo window only:
+`cmux right-sidebar set custom phosphor --window <id> --no-focus`. No cmux? The board-only demo
+still runs. What it writes and how it cleans up: [CMUX-SETUP.md](CMUX-SETUP.md#the-cmux-demo).
+
 ## 3. Full install
 
 ```bash
@@ -80,7 +103,7 @@ Other entry points:
 | `./install.sh verify` | `scripts/bootstrap.sh verify`: end-to-end checks (§6) |
 | `./install.sh --brain` | skills, hook guards and the Graphify install line (BRAIN.md) |
 | `./install.sh mission-control` | opens the Mission Control workspace in cmux (`scripts/mission-control.sh`) |
-| `./install.sh --demo` / `demo-stop` | the demo board (§2) |
+| `./install.sh --demo [--cmux]` / `demo-stop` | the demo board, optionally with the ZULU DEMO cmux window (§2) |
 
 `scripts/bootstrap.sh install` also takes `--dry-run` (print the plan), `--force` (replace a
 differing file; it backs up first as `<file>.bak-<ts>`) and `--deadman` (§5). Every step prints

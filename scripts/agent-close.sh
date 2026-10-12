@@ -13,7 +13,9 @@ if [[ -n "$WS" ]]; then
   cmux clear-status task --workspace "$WS" >/dev/null 2>&1 || true
   cmux clear-status model --workspace "$WS" >/dev/null 2>&1 || true
   cmux clear-progress --workspace "$WS" >/dev/null 2>&1 || true
-  cmux close-workspace --workspace "$WS" || true
+  # cmux ≥0.65 refuses to close a workspace with a live process (the worker's
+  # own agent session) without --force; the caller has already read the pane.
+  cmux close-workspace --workspace "$WS" --force || true
 fi
 node "$ROOT/scripts/mesh-cli.mjs" deregister "$NAME"
 curl -s -m 5 -X POST localhost:3210/api/event -H 'content-type: application/json' \

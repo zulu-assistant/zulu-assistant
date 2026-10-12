@@ -10,7 +10,7 @@
 // exactly and refuses closed agents.
 import { readFile } from 'node:fs/promises';
 import {
-  mutateAgents, slugTitle, kickSession, listWorkspaces, liveDirectory, resolveTarget, resolveNewWorkspace,
+  mutateAgents, slugTitle, kickSession, listWorkspaces, liveDirectory, resolveTarget, resolveNewWorkspace, acrossWindows,
   nameDrift, ensureSessionName, cmux, listGroups, writeJsonAtomic, readSessionMap,
 } from '../src/mesh.mjs';
 import { applyChrome, groupPlan, groupRepairPlan, isDisposablePlaceholder, domainTable } from '../src/chrome.mjs';
@@ -324,7 +324,7 @@ async function main() {
   if (cmd === 'close-placeholders') {
     const { flags } = parse([sub, ...rest].filter(Boolean));
     const known = new Set(JSON.parse(await readFile(new URL('../data/mesh-placeholder-workspaces.json', import.meta.url), 'utf8').catch(() => '[]')));
-    const r = await cmux(['workspace', 'list', '--json']);
+    const r = await acrossWindows(cmux, ['workspace', 'list', '--json']);
     if (r.err) die(r.err);
     const rows = JSON.parse(r.out).workspaces || [];
     const idByRef = new Map(rows.map((w) => [w.ref, w.id]));

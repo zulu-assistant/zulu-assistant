@@ -7,7 +7,8 @@
 #   ./install.sh doctor           write a redacted diagnostic bundle (attach it to a beta-feedback issue)
 #   ./install.sh init             copy examples/ → overlay/ (never overwrites your files)
 #   ./install.sh --demo           board with synthetic data on :3210 — Node 22 only, no launchd/cmux
-#   ./install.sh demo-stop        stop the demo board
+#   ./install.sh --demo --cmux    …plus a ZULU DEMO window in cmux: fake agent panes, live sidebar chrome
+#   ./install.sh demo-stop        stop the demo board (and close the ZULU DEMO window)
 #   ./install.sh --brain          Claude skills + graphify hooks into ~/.claude; prints the Graphify install line
 #   ./install.sh mission-control  open the Mission Control workspace in cmux
 #   ./install.sh star             star the repo on GitHub (asks first; your own gh login)
@@ -102,10 +103,31 @@ do_demo() {
     say done "demo board (synthetic data, nothing real is touched) → http://localhost:$PORT"
     say info "stop it with ./install.sh demo-stop"
   fi
+  [[ "${1:-}" == --cmux ]] && demo_cmux
   star_prompt ask
 }
 
+# The cmux half: a separate "ZULU DEMO" window with fake agent panes; the demo
+# board writes chrome ONLY to those panes (src/demo-cmux.mjs). No cmux → the
+# board-only demo still runs.
+demo_cmux() {
+  if ! has cmux; then
+    say skip "cmux not found — board-only demo (brew install --cask cmux, then ./install.sh --demo --cmux)"; return
+  fi
+  local out
+  if out=$("$NODE_BIN" "$ROOT/src/demo-cmux.mjs" up --port "$PORT" 2>&1); then
+    say done "ZULU DEMO window open in cmux: 6 fake agents, one will ask for input"
+    say next "show the phosphor sidebar in that window (your call; the demo never switches it):"
+    printf '         %s\n' "$(printf '%s' "$out" | sed -n 's/.*"hint":"\([^"]*\)".*/\1/p')"
+  else
+    say skip "cmux demo not started: $(printf '%s' "$out" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p') — board-only demo"
+  fi
+}
+
 do_demo_stop() {
+  if [[ -f data/demo-cmux-state.json ]] && has cmux; then
+    say done "$("$NODE_BIN" "$ROOT/src/demo-cmux.mjs" down 2>&1 | sed -n 's/.*"msg":"\([^"]*\)".*/cmux: \1/p')"
+  fi
   local pid; pid=$(cat data/demo.pid 2>/dev/null || true)
   if [[ -n "$pid" ]] && ps -p "$pid" -o command= 2>/dev/null | grep -q server.mjs; then kill "$pid"; say done "demo stopped (pid $pid)"
   else say skip "no demo running"; fi
@@ -173,7 +195,7 @@ do_doctor() { exec "$NODE_BIN" "$ROOT/scripts/doctor.mjs" "$@"; }
 
 case "${1:-}" in
   init) do_init "${2:-}" ;;
-  --demo|demo) do_demo ;;
+  --demo|demo) do_demo "${2:-}" ;;
   demo-stop) do_demo_stop ;;
   --brain|brain) do_brain ;;
   mission-control) do_mission_control ;;

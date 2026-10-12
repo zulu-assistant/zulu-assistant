@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-10-12
+
+### Added
+- **cmux demo**: `./install.sh --demo --cmux` opens a separate "ZULU DEMO" cmux window with six scripted
+  agent panes (one asks for permission, one climbs into amber context, one is blocked, one is Codex, two
+  are quiet) next to the demo board, so the phosphor sidebar's ATTENTION view and the Dock can be seen
+  without a real fleet. Every cmux write is filtered to the demo's own workspaces; `demo-stop` tears it
+  down. New media in `docs/media/` (`cmux-demo.gif`, `two-part-console.png`, `cmux-attention.png`).
+- GitHub repo stats on the board (`SETTINGS.repoStats`): stars, forks, watchers, clones and views as
+  cards and a digest section, with history kept beyond GitHub's 14-day window (`data/repo-stats.json`).
+
+### Fixed
+- Workspace listings span every cmux window (`src/cmux-windows.mjs`); a board running outside cmux no
+  longer sees only the front window, which could have marked the whole fleet closed. A failed listing is
+  treated as no listing, never as closures. Demo workspaces never join the mesh.
+- `agent-close.sh` passes `--force` (cmux 0.65 requires it for a workspace with a live process).
+
 ## [0.1.0-beta.1] - 2026-10-09
 
 First public release.

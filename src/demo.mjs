@@ -26,7 +26,13 @@ export const DEMO_DOMAINS = [
 
 const T0 = Date.now();
 const phase = (now = Date.now()) => ((now - T0) / 1000) % CYCLE_S;
-const ws = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+// With a cmux demo up (src/demo-cmux.mjs) the synthetic agents point at real
+// demo panes, and what those panes show drives their state.
+let paneIds = new Map();        // n -> workspace UUID of its demo pane
+let observed = new Map();       // workspace UUID -> classifyScreen state
+export function useDemoPanes(m) { paneIds = new Map(m); }
+export function observeDemoScreens(m) { observed = new Map(m); }
+const ws = (n) => paneIds.get(n) || `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const hhmm = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 // scripted incident windows (seconds into the cycle)
@@ -88,17 +94,17 @@ function demoTimeline(now) {
 
 // ---- agents: sessions (tiles), directory (mesh), context gauges ----
 const AGENTS = [
-  { n: 1, workspace: '⌘ MISSION CONTROL', name: 'mission-control', kind: 'mission-control', vendor: 'claude', cwd: '~/zulu-assistant',
+  { n: 1, workspace: '⌘ MISSION CONTROL', name: 'mission-control', kind: 'mission-control', domain: 'ops', vendor: 'claude', cwd: '~/zulu-assistant',
     owns: ['workforce', 'triage'], pct: 34, lifecycle: 'running', note: 'Triage pass: 1 red → self-heal handled it; nothing to escalate' },
-  { n: 2, workspace: 'app — resident', name: 'app-resident', kind: 'resident', vendor: 'claude', cwd: '~/my-app',
+  { n: 2, workspace: 'app — resident', name: 'app-resident', kind: 'resident', domain: 'app', vendor: 'claude', cwd: '~/my-app',
     owns: ['app', 'queue-worker'], pct: 64, lifecycle: 'idle', note: 'PR #12 opened: retry backoff for the queue worker' },
-  { n: 3, workspace: 'data — resident', name: 'data-resident', kind: 'resident', vendor: 'claude', cwd: '~/data-pipeline',
+  { n: 3, workspace: 'data — resident', name: 'data-resident', kind: 'resident', domain: 'data', vendor: 'claude', cwd: '~/data-pipeline',
     owns: ['sync', 'search-index'], pct: 18, lifecycle: 'running', note: 'Rebuilding the search-index mapping (task #2)' },
-  { n: 4, workspace: 'fix: Weekly export', name: 'fix-weekly-export', kind: 'worker', vendor: 'claude', cwd: '~/data-pipeline',
+  { n: 4, workspace: 'fix: Weekly export', name: 'fix-weekly-export', kind: 'worker', domain: 'data', vendor: 'claude', cwd: '~/data-pipeline',
     owns: ['task #3'], pct: 41, lifecycle: 'running', note: 'Reproducing the export timeout locally' },
-  { n: 5, workspace: 'docs — worker', name: 'docs-worker', kind: 'worker', vendor: 'claude', cwd: '~/zulu-assistant',
+  { n: 5, workspace: 'docs — worker', name: 'docs-worker', kind: 'worker', domain: 'web', vendor: 'claude', cwd: '~/zulu-assistant',
     owns: ['task #1'], pct: 83, lifecycle: 'idle', note: 'CHANGELOG + README updated for 0.1.0' },
-  { n: 6, workspace: 'codex — review', name: 'codex-review', kind: 'worker', vendor: 'codex', cwd: '~/my-app',
+  { n: 6, workspace: 'codex — review', name: 'codex-review', kind: 'worker', domain: 'app', vendor: 'codex', cwd: '~/my-app',
     owns: ['PR #12'], pct: 22, lifecycle: 'running', note: 'Reviewing PR #12' },
 ];
 
@@ -108,7 +114,11 @@ export function demoSessions(now = Date.now()) {
   const p = phase(now);
   return AGENTS.map((a) => {
     let { lifecycle, note } = a;
-    if (a.n === 4 && p >= INPUT_AT && p < INPUT_END) {
+    const seen = observed.get(ws(a.n));
+    if (seen) {                                   // cmux demo: the pane's screen decides
+      lifecycle = seen === 'dialog' ? 'needsInput' : seen === 'busy' ? 'running' : 'idle';
+      if (seen === 'dialog') note = 'Needs approval: restart the queue worker in production?';
+    } else if (a.n === 4 && p >= INPUT_AT && p < INPUT_END) {
       lifecycle = 'needsInput';
       note = 'Needs approval: re-run the export against production? (POLICY: destructive → owner)';
     }
@@ -118,7 +128,7 @@ export function demoSessions(now = Date.now()) {
 
 export function demoDirectory() {
   return AGENTS.map((a) => ({
-    name: a.name, kind: a.kind, vendor: a.vendor, owns: a.owns, status: 'active', workspaceId: ws(a.n), title: a.workspace,
+    name: a.name, kind: a.kind, vendor: a.vendor, owns: a.owns, domain: a.domain, status: 'active', workspaceId: ws(a.n), title: a.workspace,
     live: { liveName: a.name, nameOk: true, status: a.lifecycle === 'running' ? 'busy' : 'ready' },
   }));
 }
@@ -126,7 +136,8 @@ export function demoDirectory() {
 export function demoContext(now = Date.now()) {
   const drift = Math.floor(phase(now) / 30);     // gauges creep up a little each cycle
   return new Map(AGENTS.map((a) => {
-    const pct = Math.min(99, a.pct + drift);
+    // the working resident's gauge climbs 12% → 72% over a cycle, so the amber band shows
+    const pct = a.n === 3 ? Math.round(12 + (phase(now) / CYCLE_S) * 60) : Math.min(99, a.pct + drift);
     return [ws(a.n), { pct, band: bandOf(pct), ctxTokens: pct * 10000, window: 1000000, model: a.vendor === 'codex' ? 'codex' : 'claude-opus', source: a.vendor }];
   }));
 }

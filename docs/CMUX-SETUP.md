@@ -151,6 +151,35 @@ know:
 
 Codex panes are not auto-resumed by cmux; run `codex resume` in each by hand.
 
+## The cmux demo
+
+`./install.sh --demo --cmux` (see [INSTALL.md](INSTALL.md#the-cmux-half-too---demo---cmux)) is built so
+it cannot touch your real workspaces:
+
+- **Its own window.** It opens a cmux window named ZULU DEMO and creates its six panes there
+  (`--id-format both new-workspace`, so the ids come straight from cmux). Every id it creates is
+  recorded in `data/demo-cmux-state.json` before anything else is made.
+- **A write filter.** While the demo board runs, every cmux command it issues goes through
+  `scopedRun` (`src/demo-cmux.mjs`). It allows reads, plus only these writes: `set-color` and
+  `set-description` workspace actions, `set-status`/`clear-status`, and
+  `set-progress`/`clear-progress`. All of them must target a workspace the demo created. Anything else
+  is refused before it reaches cmux. A test proves a full sync pass writes to demo panes only.
+- **The group placeholder.** `workspace-group create` always makes an empty anchor workspace. The
+  demo finds that exact workspace from the group's own record, takes it out of the group, and
+  closes it. It is the only workspace the demo closes outside its pane list.
+- **Never in the mesh.** The real board lists workspaces across every window and ignores anything
+  titled `ZULU DEMO…` or recorded in the state file. The demo never gets registered, assigned or
+  restored.
+- **Sidebar selection is yours.** The demo prints
+  `cmux right-sidebar set custom phosphor --window <id> --no-focus` and never runs it.
+- **Teardown.** `./install.sh demo-stop` closes the demo window, but only if it still holds nothing but demo
+  workspaces. If you dragged a real workspace into it, only the demo panes are closed and the window
+  stays. Then it deletes `data/demo-cmux-state.json` and `data/demo-chrome-state.json`.
+
+Known limit: the fake agents don't report RUN/IDLE to cmux. That would mean writing into cmux's
+real Claude/Codex session files. The sidebar's RUN/IDLE counts therefore ignore them, while everything
+ATTENTION shows (INPUT, APPROVAL, BLOCKED, ctx) comes from the board, exactly as in real use.
+
 ## Known cmux quirks
 
 | Quirk | Effect | What Zulu Assistant does |

@@ -17,6 +17,7 @@
     "scripts/agent-spawn.sh",
     "scripts/bootstrap.sh",
     "scripts/ci-cost.mjs",
+    "scripts/demo-agent.mjs",
     "scripts/cmux-chrome-config.mjs",
     "scripts/cmux-tier1-install.mjs",
     "scripts/env.sh",

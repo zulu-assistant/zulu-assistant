@@ -209,7 +209,7 @@ test('the socket being unhealthy short-circuits the whole pass', async () => {
   };
   const r = await maybeHealFailedRestores(opts(cmux, async () => {}, clock));
   assert.equal(r.skipped, 'socket-unhealthy');
-  assert.equal(calls.length, 1);
+  assert.ok(calls.every((c) => /^(list-windows|workspace list)/.test(c)), 'nothing but the listing was called');
 });
 
 test('passes are throttled and workspaces have a 10-minute cooldown', async () => {

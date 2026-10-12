@@ -14,14 +14,17 @@ import { processAlerts, sendDigest, notify as realNotify, cmuxPassword } from '.
 import { maybeRemediate } from './src/remediate.mjs';
 import { maybeHealCmuxBridge } from './src/heal-cmux.mjs';
 import { maybeHealFailedRestores } from './src/heal-restore.mjs';
+import { syncDemoCmux } from './src/demo-cmux.mjs';
 import { recordEvent, getEvents } from './src/events.mjs';
 import { maybeCiCostWatch } from './src/ci-cost-watch.mjs';
+import { maybeRepoStats } from './src/repo-stats.mjs';
 import { allowedSource, localOnly } from './src/guard.mjs';
 import { createLedger, MeshError, summarize, wakeMessage } from './src/tasks.mjs';
 import {
   liveDirectory, resolveTarget, deliverNow, enqueue, drainOutbox, readOutbox, formatWake, validateMessage,
   reconcile, mutateAgents, listWorkspaces, readSessionMap, readRegistry, nameDrift, ensureSessionName,
   slugTitle, kickSession, classifyScreen, listGroups, generatedAnchorIds, writeJsonAtomic, OUTBOX_FILE,
+  acrossWindows, isDemoWorkspace, demoWorkspaceIds,
 } from './src/mesh.mjs';
 import { applyChrome, applyPills, inputPrompts } from './src/chrome.mjs';
 import { collectContext } from './src/context.mjs';
@@ -114,7 +117,9 @@ async function reconcileMesh() {
   // remember every workspace ever seen as a cmux-generated anchor: after an
   // ungroup/set-anchor it is no longer an anchor but is still a placeholder
   const seen = new Set(JSON.parse(await readFile(PLACEHOLDERS_FILE, 'utf8').catch(() => '[]')));
-  const ignoreIds = new Set([...seen, ...generatedAnchorIds(groups, workspaces)]);
+  const demoIds = await demoWorkspaceIds();
+  const ignoreIds = new Set([...seen, ...generatedAnchorIds(groups, workspaces),
+    ...workspaces.filter((w) => isDemoWorkspace(w, demoIds)).map((w) => w.id)]);   // the cmux demo never joins the mesh
   const liveIds = new Set(workspaces.map((w) => w.id));
   const keep = [...ignoreIds].filter((id) => liveIds.has(id));       // forget closed ones
   if (keep.length !== seen.size || keep.some((id) => !seen.has(id))) await writeJsonAtomic(PLACEHOLDERS_FILE, keep);
@@ -302,6 +307,8 @@ async function poll() {
     }
     if (DEMO) {
       await demoTick(snap);
+      // `--demo --cmux`: drive the ZULU DEMO panes' chrome (no-op without one)
+      await syncDemoCmux({ ledger }).catch((e) => console.error('[demo cmux]', e.message));
       await refreshDir();
       await refreshWork();
       eventsCache = await getEvents(30);
@@ -353,6 +360,8 @@ async function poll() {
     }
     maybeCiCostWatch({ root: ROOT, cfg: SETTINGS.ciCostWatch, now, record: (k, t) => recordEvent(k, t).catch(() => {}) })
       .catch((e) => console.error('[ci-cost]', e.message));
+    maybeRepoStats({ cfg: SETTINGS.repoStats, now, record: (k, t) => recordEvent(k, t).catch(() => {}) })
+      .catch((e) => console.error('[repo-stats]', e.message));
     const payload = JSON.stringify(payloadFor());
     for (const res of sseClients) res.write(`data: ${payload}\n\n`);
   } catch (err) {
@@ -426,7 +435,7 @@ async function runAction(action, label) {
     if (!j) return { ok: false, msg: 'unknown label' };
     const pw = await cmuxPassword();
     const env = { CMUX_SOCKET_PASSWORD: pw, CMUX_QUIET: '1' };
-    const { out } = await sh(SETTINGS.cmuxBin, ['list-workspaces'], env);
+    const { out } = await acrossWindows((a) => sh(SETTINGS.cmuxBin, a, env), ['workspace', 'list']);
     const line = out.split('\n').find((l) => l.includes('MISSION CONTROL'));
     const ref = line && (line.match(/workspace:\d+/) || [])[0];
     if (!ref) return { ok: false, msg: 'Mission Control workspace not found — launch it first' };

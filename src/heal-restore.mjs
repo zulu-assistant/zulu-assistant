@@ -30,6 +30,7 @@ import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SETTINGS } from './config.mjs';
+import { acrossWindows } from './cmux-windows.mjs';
 
 const PW_FILE = fileURLToPath(new URL('../data/cmux-socket-password', import.meta.url));
 
@@ -275,7 +276,7 @@ export async function maybeHealFailedRestores(opts = {}) {
 
     // Gate: only run once the socket actually answers. While the password is
     // still broken this is heal-cmux.mjs's problem, not ours.
-    const list = await cmux(['workspace', 'list', '--id-format', 'both'], pw);
+    const list = await acrossWindows((a) => cmux(a, pw), ['workspace', 'list', '--id-format', 'both']);
     if (list.err) return { skipped: 'socket-unhealthy', repaired };
 
     for (const ws of parseWorkspaces(list.out)) {
@@ -284,6 +285,7 @@ export async function maybeHealFailedRestores(opts = {}) {
         break;
       }
       if (now() - (lastAttempt.get(ws.ref) || 0) < WORKSPACE_COOLDOWN_MS) continue;
+      if (/^zulu demo\b/i.test(ws.name || '')) continue;   // the cmux demo's own panes are never restored
 
       const viewport = await cmux(['read-screen', '--workspace', ws.ref], pw);
       if (viewport.err) { console.log(`[heal-restore] read-screen ${ws.ref} failed: ${viewport.err}`); continue; }

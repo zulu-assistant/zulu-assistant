@@ -10,6 +10,7 @@
 import { JOBS, DOCKER_CONTAINERS, CRON, DISK, MEM, SETTINGS } from './config.mjs';
 import * as collect from './collect.mjs';
 import { readStateSync, setupCard } from './setup.mjs';
+import { readStatsSync, repoCards } from './repo-stats.mjs';
 
 let pollCount = 0;
 
@@ -395,6 +396,8 @@ export async function snapshot() {
   // installs made by install.sh carry data/setup-state.json: one card until `zulu setup` is done
   const setup = setupCard(readStateSync());
   if (setup) jobs.push(setup);
+  // GitHub stats (SETTINGS.repoStats): informational cards, fetched by server.mjs
+  jobs.push(...repoCards(readStatsSync(), SETTINGS.repoStats, now));
 
   const attention = jobs.filter((x) => x.status !== 'ok');
   return {

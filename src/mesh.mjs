@@ -16,6 +16,8 @@ import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { acrossWindows } from './cmux-windows.mjs';
+export { acrossWindows, parseWindows } from './cmux-windows.mjs';
 import { fileURLToPath } from 'node:url';
 import { SETTINGS, writable } from './config.mjs';
 
@@ -336,8 +338,22 @@ export async function cmux(args, { timeout = 10000 } = {}) {
   });
 }
 
+// Listings span every window (src/cmux-windows.mjs, task #152).
+// Workspaces of the cmux demo (`install.sh --demo --cmux`) live in their own
+// window and must never join the mesh: titled "ZULU DEMO…" and recorded in
+// data/demo-cmux-state.json.
+export const DEMO_TITLE_PREFIX = 'ZULU DEMO';
+export const isDemoWorkspace = (w, demoIds = new Set()) =>
+  demoIds.has(String(w.id || '').toUpperCase()) || normTitle(w.title || w.name || '').startsWith(DEMO_TITLE_PREFIX.toLowerCase());
+export async function demoWorkspaceIds(file = path.join(ROOT, 'data', 'demo-cmux-state.json')) {
+  try {
+    const s = JSON.parse(await readFile(file, 'utf8'));
+    return new Set([...(s.workspaceIds || []), ...(s.panes || []).map((p) => p.wsId)].filter(Boolean).map((x) => String(x).toUpperCase()));
+  } catch { return new Set(); }
+}
+
 export async function listWorkspaces(run = cmux) {
-  const r = await run(['workspace', 'list', '--id-format', 'both']);
+  const r = await acrossWindows(run, ['workspace', 'list', '--id-format', 'both']);
   if (r.err) return [];
   const rows = [];
   for (const line of r.out.split('\n')) {

@@ -5,6 +5,7 @@
 // All from data/secrets.env (src/config.mjs loadSecrets); a missing key = that tier is off.
 // Dedupes on status transitions; re-alerts every SETTINGS.realertHours while red.
 import { execFile } from 'node:child_process';
+import { readStatsSync, digestLines } from './repo-stats.mjs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { SETTINGS, OWNER, loadSecrets } from './config.mjs';
@@ -161,6 +162,7 @@ export async function sendDigest(snap, strips, work = null) {
   }
   if (!flaps) lines.push('  none');
   lines.push(...workLines(work));
+  lines.push(...digestLines(readStatsSync(), SETTINGS.repoStats));
   lines.push('', `Board: http://localhost:3210 · ${new Date().toLocaleString()}`);
   return sendEmail(`[Ops Board] Morning fleet briefing — ${snap.counts.ok}/${snap.counts.total} healthy`, lines.join('\n'));
 }

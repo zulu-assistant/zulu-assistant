@@ -4,6 +4,7 @@
 import { execFile } from 'node:child_process';
 import { readFile, stat, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { acrossWindows } from './cmux-windows.mjs';
 import { JOBS, DOCKER_CONTAINERS, ENDPOINTS, CRON, CRON_DRIFT, DISK, MEM, PROCESSES, SETTINGS } from './config.mjs';
 
 function run(cmd, args, timeoutMs = 8000) {
@@ -142,14 +143,15 @@ export function cmuxBridgeStatus() { return cmuxBridge; }
 async function workspaceNames() {
   try {
     const pw = (await readFile(new URL('../data/cmux-socket-password', import.meta.url), 'utf8')).trim();
-    const { err, out } = await new Promise((resolve) => {
-      execFile(SETTINGS.cmuxBin, ['workspace', 'list', '--id-format', 'both'],
+    const run = (args) => new Promise((resolve) => {
+      execFile(SETTINGS.cmuxBin, args,
         { timeout: 6000, env: { ...process.env, CMUX_SOCKET_PASSWORD: pw, CMUX_QUIET: '1' } },
         (e, stdout, stderr) => resolve({
           err: e ? (String(stderr || '').trim() || e.message) : null,
           out: String(stdout || ''),
         }));
     });
+    const { err, out } = await acrossWindows(run, ['workspace', 'list', '--id-format', 'both']);
     cmuxBridge = err ? { ok: false, detail: err.slice(0, 110) } : { ok: true, detail: '' };
     const map = new Map();
     for (const line of out.split('\n')) {
