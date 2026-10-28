@@ -49,6 +49,7 @@ its row rises to the top of ATTENTION, and when it's answered the row drops back
 | **Self-heal** | Covers a lost cmux socket password, sessions that fail to restore after a reboot, and disk pressure (using only the levers you bless). Each one leaves a ticker line. |
 | **Mission Control** | A master agent in a pinned cmux workspace runs **residents** (one long-lived agent per repo) and **workers** (one per task). Your `POLICY.md` decides what they may do alone. |
 | **Agent Mesh** | A directory, a task ledger and a delivery rule. Agents hand work to each other as tasks and never type into a busy pane. Approvals happen on the board. |
+| **Team chat intake** (optional) | Teammates who never open a terminal post requests in Slack. Each one becomes a ledger task routed through Mission Control, which picks the owner agent and holds every approval for you. Agents' questions come back in the thread, and a reply unblocks the task. Approvals, publishes and credentials never come from chat. Setup: [docs/INSTALL.md §3c](docs/INSTALL.md#3c-optional-team-chat-intake-slack). |
 | **Brain** | Wires in three memories: an Obsidian vault (org memory), Graphify (code memory) and Claude memory files (agent memory). See [docs/BRAIN.md](docs/BRAIN.md). |
 
 ## Architecture
@@ -78,6 +79,10 @@ Just looking? `./install.sh --demo` from a clone runs a synthetic board on :3210
 `./install.sh --demo --cmux` adds a ZULU DEMO window in cmux with six fake agents, so you can see
 both halves of the console working together.
 Everything the setup does and cannot automate is in [docs/INSTALL.md](docs/INSTALL.md).
+
+**Stuck, or did it just work?** Either way we'd like to hear. `./install.sh doctor` writes a redacted
+diagnostic file (nothing is uploaded). Attach it to an
+[install report](https://github.com/zulu-assistant/zulu-assistant/issues/new?template=install_report.yml).
 
 ## Why not tmux and a dashboard?
 
@@ -123,10 +128,11 @@ Assistant only calls its CLI and socket and does not bundle or link it.
 examples/          generic templates, shipped (the board runs on these until you add overlay/)
 overlay/           YOUR config, gitignored: ./install.sh init copies examples/ here
   config/jobs.mjs    what to watch: JOBS, DOCKER_CONTAINERS, ENDPOINTS, CRON, PROCESSES, gauges, SETTINGS
+  config/principals.json, channels.json   who may post requests from Slack, and where (optional)
   config/agents.json the mesh directory (maintained by the board)
   POLICY.md          what agents may do without you
   MISSION-CONTROL.md the master agent's contract
-data/secrets.env   SMTP, SMS webhook, heartbeat keys (template: secrets.env.example)
+data/secrets.env   SMTP, SMS webhook, heartbeat, Slack tokens (template: secrets.env.example)
 ```
 
 Config is resolved `overlay/` → core → `examples/`. Adding coverage takes one entry in
@@ -134,9 +140,10 @@ Config is resolved `overlay/` → core → `examples/`. Adding coverage takes on
 
 ## Roadmap
 
-- v0.1: the board, demo mode, Mission Control, Agent Mesh, the brain templates, the installer.
+- v0.1: the board, demo mode, Mission Control, Agent Mesh, the brain templates, the installer,
+  and (beta.3) Slack team-chat intake.
 - Next: Homebrew tap and an `npx` one-liner, a Linux/systemd collector, a pluggable
-  notifier interface (Slack, ntfy), a hosted heartbeat relay so the dead-man's switch
+  notifier interface (ntfy, chat alerts), more chat transports (Discord, Teams, a web form), a hosted heartbeat relay so the dead-man's switch
   needs no database of your own.
 - Ideas and votes: [Discussions](https://github.com/zulu-assistant/zulu-assistant/discussions).
   Good first issues are [labelled](https://github.com/zulu-assistant/zulu-assistant/labels/good%20first%20issue).
@@ -147,8 +154,8 @@ Config is resolved `overlay/` → core → `examples/`. Adding coverage takes on
 
 ## About the star prompt
 
-The installer asks once, and only in an interactive terminal: `Star zulu-assistant on
-GitHub? [y/N]`. The default is No. If `gh` is not logged in, it skips the question
+The installer asks once, and only in an interactive terminal, as soon as your board first
+answers (or at the end, if it didn't come up): `Star zulu-assistant on GitHub? [y/N]`. The default is No. If `gh` is not logged in, it skips the question
 silently. Only an explicit `y` stars, using your own `gh` login. The board may also show
 **one** toast, the first time it catches something for you, with two buttons:
 **Star**, which just opens this page, and **Never ask again**. Both answers are kept in

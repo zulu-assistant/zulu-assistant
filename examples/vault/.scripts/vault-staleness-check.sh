@@ -16,12 +16,13 @@ VAULT="${VAULT:-${0:A:h:h}}"
 REPORT="$VAULT/Staleness Report.md"
 MARKER="$HOME/.cache/obsidian-vault/staleness-last-run"
 LOG="$HOME/Library/Logs/obsidian-staleness.log"
+JSON="${STALENESS_JSON:-$HOME/.cache/obsidian-vault/staleness.json}"   # read by the board (SETTINGS.brain.staleness)
 GRACE_DAYS=3   # source activity this many days newer than last-synced => stale
 
 mkdir -p "$(dirname "$MARKER")"
 
 # Skip if we ran within the last 6 days (RunAtLoad fires on every login).
-if [[ -f "$MARKER" ]]; then
+if [[ -f "$MARKER" && "${FORCE:-0}" != 1 ]]; then   # FORCE=1 runs now
   last_run=$(cat "$MARKER" 2>/dev/null || echo 0)
   now=$(date +%s)
   if (( now - last_run < 6 * 86400 )); then
@@ -45,7 +46,8 @@ latest_activity() {
   local dir="$1"
   [[ -d "$dir" ]] || { echo ""; return; }
   if [[ -d "$dir/.git" ]]; then
-    git -C "$dir" log -1 --format=%cs -- . \
+    # "Checkpoint …" commits only preserve uncommitted work: not activity
+    git -C "$dir" log -1 --format=%cs --invert-grep --grep='^Checkpoint' -- . \
       ':(exclude)CLAUDE.md' ':(exclude)AGENTS.md' ':(exclude)README.md' \
       ':(exclude).gitignore' ':(exclude)*.lock' ':(exclude)*-lock.json' \
       2>/dev/null
@@ -65,34 +67,36 @@ latest_activity() {
 to_epoch() { date -j -f '%Y-%m-%d' "$1" '+%s' 2>/dev/null || echo 0; }
 
 today=$(date '+%Y-%m-%d')
-rows=""
+rows=""; jrows=""
 stale_count=0
 
 while IFS='|' read -r name note sources; do
   [[ -z "$name" ]] && continue
-  synced=$(awk -F': *' '/^last-synced:/{print $2; exit}' "$VAULT/$note" 2>/dev/null)
+  synced=$(awk -F': *' '/^last-synced:/{print $2; exit}' "$VAULT/$note" 2>/dev/null | tr -d "\"'" | cut -c1-10)
   [[ -z "$synced" ]] && synced="(none)"
 
-  newest_src=""
+  newest_src=""; newest_dir=""
   IFS=',' read -rA dirs <<< "$sources"
   for d in "${dirs[@]}"; do
     a=$(latest_activity "$d")
-    [[ -n "$a" && ( -z "$newest_src" || "$a" > "$newest_src" ) ]] && newest_src="$a"
+    [[ -n "$a" && ( -z "$newest_src" || "$a" > "$newest_src" ) ]] && { newest_src="$a"; newest_dir="$d"; }
   done
   [[ -z "$newest_src" ]] && newest_src="(unknown)"
 
-  verdict="ok"
+  verdict="ok"; is_stale=false; diff_days=0
   if [[ "$synced" == "(none)" ]]; then
     verdict="no last-synced"
   elif [[ "$newest_src" != "(unknown)" ]]; then
     diff_days=$(( ($(to_epoch "$newest_src") - $(to_epoch "$synced")) / 86400 ))
     if (( diff_days > GRACE_DAYS )); then
-      verdict="STALE (${diff_days}d behind)"
+      verdict="STALE (${diff_days}d behind)"; is_stale=true
       (( stale_count++ ))
     fi
   fi
   rows="${rows}| [[${note%.md}\\|$name]] | $synced | $newest_src | $verdict |
 "
+  srcjson=$(printf '"%s",' "${dirs[@]}"); srcjson="[${srcjson%,}]"
+  jrows="${jrows}{\"project\":\"$name\",\"note\":\"$note\",\"synced\":\"$synced\",\"latest\":\"$newest_src\",\"latestDir\":\"$newest_dir\",\"sources\":$srcjson,\"stale\":$is_stale,\"days\":$diff_days},"
 done <<< "$TABLE"
 
 cat > "$REPORT" <<EOF
@@ -116,6 +120,10 @@ and bumping \`last-synced\`.
 |---|---|---|---|
 $rows
 EOF
+
+mkdir -p "$(dirname "$JSON")"
+printf '{"at":"%s","date":"%s","grace":%d,"stale":%d,"rows":[%s]}\n' \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$today" "$GRACE_DAYS" "$stale_count" "${jrows%,}" > "$JSON.tmp" && mv "$JSON.tmp" "$JSON"
 
 date +%s > "$MARKER"
 echo "$(date '+%Y-%m-%d %H:%M') report written ($stale_count stale)" >> "$LOG"

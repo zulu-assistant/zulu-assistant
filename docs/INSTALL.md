@@ -6,7 +6,8 @@ This runbook takes a logged-in macOS account to a running Zulu Assistant:
   endpoints, crontab jobs, disk, memory and live agent sessions;
 - **cmux**, the agent terminal the board drives (see [CMUX-SETUP.md](CMUX-SETUP.md));
 - **Mission Control** and the **Agent Mesh** (see `MISSION-CONTROL.md`, `AGENT-MESH.md`);
-- optionally **the brain**: an Obsidian vault, Graphify and Claude memory (see [BRAIN.md](BRAIN.md)).
+- optionally **the brain**: an Obsidian vault, Graphify and Claude memory (see [BRAIN.md](BRAIN.md));
+- optionally **team chat intake**: teammates post requests in Slack, and they become tasks (see [3c](#3c-optional-team-chat-intake-slack)).
 
 One command does the scriptable work, then a guided setup collects what only you can provide:
 
@@ -166,6 +167,74 @@ Zulu never stores a credential. Redo one step with `zulu setup --step <id>`.
 | `verify` | `zulu check`, board answer, start Mission Control on your chosen engine |
 
 Problems? `zulu doctor` writes a redacted diagnostic file to `data/` (never uploaded) for an issue.
+
+## 3c. Optional: team chat intake (Slack)
+
+This lets people who never open a terminal (a teammate, an assistant, you on your phone) give the
+agents work. They post a request in a Slack channel. Zulu turns it into a ledger task and routes it
+through **Mission Control**, which picks the owner agent and holds every approval for you. The
+agents' questions come back in the request's thread, and a reply there unblocks the task. Status
+lines and the final result (with a PR link) are posted in the same thread.
+
+What never comes from Slack: approvals, publishes, payments and credentials. Those happen on
+the board, typed by you. Slack text is treated as quoted data, never as instructions to an agent,
+and attachments are saved as untrusted files that are never opened or run. Skip this section if you
+don't use Slack. Nothing else depends on it.
+
+You need a Slack workspace where you can install apps. Allow about 15 minutes.
+
+1. **Create the app.** Go to <https://api.slack.com/apps> → *Create New App* → *From a manifest* →
+   pick your workspace → paste [`examples/slack/app-manifest.json`](../examples/slack/app-manifest.json)
+   (rename the app if you like) → *Create* → *Install to Workspace*. The manifest sets up Socket
+   Mode, so Zulu opens the connection from your Mac and **nothing is exposed to the internet**. It
+   also asks for exactly these bot scopes: `app_mentions:read channels:history channels:read
+   chat:write files:read files:write groups:history groups:read reactions:write users:read`.
+2. **Make the two tokens.** In the app's settings:
+   - *Basic Information → App-Level Tokens → Generate*, scope `connections:write`. This gives
+     `xapp-…`.
+   - *OAuth & Permissions → Bot User OAuth Token*. This is `xoxb-…`.
+
+   Type both into `data/secrets.env` yourself (agents never handle them):
+
+   ```bash
+   SLACK_APP_TOKEN=xapp-…
+   SLACK_BOT_TOKEN=xoxb-…
+   ```
+3. **Say who may post.** In `overlay/config/principals.json`, add each person's Slack member id.
+   To find it: click their name in Slack → *⋮* → *Copy member ID* (`U0…`). You are the
+   `owner` entry and the only approver. Add `"planFirst": true` to someone whose requests should
+   stop at a plan until you've reviewed it. Messages from people not listed are ignored, and their
+   ids are logged so you can add them.
+
+   ```json
+   [
+     { "id": "owner", "name": "Your Name", "slack": ["U01AAAAAAAA"] },
+     { "id": "sam", "name": "Sam", "slack": ["U02BBBBBBBB"] }
+   ]
+   ```
+4. **Pick the channels.** `overlay/config/channels.json` maps each request channel to the agent that
+   owns it (`mission-control` by default) and lists the fields a request should carry. The example
+   uses `#requests` for asks and `#status` for a running log. Create those channels in Slack (or
+   rename them in the file), then run `/invite @zulu` in each one.
+5. **Check, then start.** The check posts nothing. It lists every channel (found / invited) and
+   every person (linked), plus the standing rules:
+
+   ```bash
+   scripts/chat-intake.sh --check
+   scripts/chat-intake-install.sh            # dry run: shows the LaunchAgent it would load
+   scripts/chat-intake-install.sh --apply
+   ```
+
+   The intake runs as a KeepAlive LaunchAgent and restarts itself. Its log is
+   `logs/chat-intake.log`. To get a board card for it, add
+   `{ label: 'com.zulu-assistant.chat-intake', name: 'Slack intake', domain: 'infra' }` to `JOBS` in
+   `overlay/config/jobs.mjs` (use your own label prefix if you changed it in `overlay/config/zulu.env`).
+6. **Try it.** Post "test: please reply with today's date" in `#requests`. A task appears on the
+   board's WORK panel, and Mission Control picks it up.
+
+Full behaviour (dedupe, field contracts, plan-first, posting files back, writing another chat
+transport): [CHAT-INTAKE.md](CHAT-INTAKE.md). To turn it off:
+`scripts/chat-intake-install.sh --remove`.
 
 ## 4. Manual steps
 

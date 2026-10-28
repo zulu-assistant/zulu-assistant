@@ -3,6 +3,7 @@
 // lesson: timeout-less checks silently defeat self-healing).
 import { execFile } from 'node:child_process';
 import { readFile, stat, readdir } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { acrossWindows } from './cmux-windows.mjs';
 import { JOBS, DOCKER_CONTAINERS, ENDPOINTS, CRON, CRON_DRIFT, DISK, MEM, PROCESSES, SETTINGS } from './config.mjs';
@@ -34,7 +35,8 @@ export async function getPlists() {
         calendar: p.StartCalendarInterval || null,
         interval: p.StartInterval || null,
         keepAlive: p.KeepAlive === true,
-        outLog: p.StandardOutPath || null,
+        // a registry `log:` beats the plist when the job writes its real log elsewhere
+        outLog: job.log ? String(job.log).replace(/^~(?=$|\/)/, os.homedir()) : (p.StandardOutPath || null),
         errLog: p.StandardErrPath || null,
       });
     } catch { /* unparseable plist -> treated as missing */ }

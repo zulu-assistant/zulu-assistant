@@ -101,3 +101,29 @@ export const REMEDIATION_LEVERS = registry.REMEDIATION_LEVERS || [];
 // `owner` is always accepted as an alias for OWNER.id (scripts/docs say `--on owner`).
 export const OWNER = { id: 'owner', name: 'Owner', ...(SETTINGS.owner || {}) };
 export const isOwner = (x) => x === OWNER.id || x === 'owner';
+
+// Other humans (chat intake, task #223): config/principals.json lists people who
+// may file requests from a team chat and can be blocked on (`--on <id>`). They are
+// never agents and never approve — approvals stay OWNER's, on the board.
+// [{ id, name, slack: ['<member id>'] }]; the owner's entry (if any) carries its chat ids.
+export function principalsFrom(list, owner = OWNER) {
+  const out = new Map([[owner.id, { id: owner.id, name: owner.name, slack: [], approver: true }]]);
+  for (const p of Array.isArray(list) ? list : []) {
+    const id = String(p?.id || '').trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(id)) continue;
+    const key = id === 'owner' ? owner.id : id;
+    const prev = out.get(key);
+    out.set(key, {
+      id: key, name: String(p.name || prev?.name || id), approver: key === owner.id,
+      slack: (Array.isArray(p.slack) ? p.slack : []).map(String).filter((s) => /^[UW][A-Z0-9]{2,}$/.test(s)),
+      // planFirst: this person's chat requests are PLANNING ONLY until the owner reviews the plan
+      planFirst: key !== owner.id && p.planFirst === true,
+    });
+  }
+  return out;
+}
+let principalsDoc = [];
+try { principalsDoc = JSON.parse(readFileSync(resolve('config/principals.json'), 'utf8')); } catch { /* owner only */ }
+export const PRINCIPALS = principalsFrom(principalsDoc);
+/** A human the ledger knows: the owner (or its alias) or a listed principal. */
+export const isPrincipal = (x) => isOwner(x) || PRINCIPALS.has(String(x || '').toLowerCase());

@@ -1,0 +1,60 @@
+name: Install report
+description: Tell us how the install went, whether it finished or got stuck. Both help.
+title: "[install] "
+labels: ["install-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying Zulu Assistant. A two-minute report is the only way we learn where the install breaks:
+        we collect no telemetry. Please remove anything from the diagnostic file you'd rather not share.
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How far did you get?
+      options:
+        - Finished, the board is running
+        - Finished, but something is off
+        - Got stuck partway
+        - Only tried the demo (--demo / --demo --cmux)
+    validations:
+      required: true
+  - type: dropdown
+    id: step
+    attributes:
+      label: Where did it stop or go wrong?
+      options:
+        - Nothing went wrong
+        - get.sh / clone
+        - 1/4 toolchain
+        - 2/4 config (overlay/)
+        - 3/4 agent OS (board, triage, cmux, brain)
+        - 4/4 zulu setup (say which step below)
+        - Mission Control / residents
+        - Slack team-chat intake
+        - Demo mode
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: Paste the last lines the installer printed if it failed.
+      render: text
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: "`git -C ~/zulu-assistant describe --tags --always`"
+  - type: input
+    id: minutes
+    attributes:
+      label: Roughly how many minutes did install + setup take?
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnostics (optional)
+      description: |
+        Run `./install.sh doctor` (or `zulu doctor`). It writes a redacted file to `data/` and uploads nothing.
+        Read it, then drag it here.

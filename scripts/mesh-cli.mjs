@@ -19,7 +19,9 @@ import { CHECKLIST } from '../src/tasks.mjs';
 
 const CHECK_WORDS = {
   docs_updated: 'docs updated', report_written: 'the report',
-  vault_synced: 'vault synced (last-synced bump per Vault Guide)', graphify_updated: '`graphify update .`',
+  // when SETTINGS.brain is on the board VERIFIES these two at close (src/brain.mjs)
+  vault_synced: 'vault synced (dated Update + last-synced bump per Vault Guide; close with --vault "<note>" — the board checks the note was edited during the task, or --no-vault "<reason>")',
+  graphify_updated: '`graphify update .` in the repo (the board checks its graph is not older than its last commit, or --no-graph "<reason>")',
 };
 export const checklistText = (items) => items.map((k) => CHECK_WORDS[k] || k.replace(/_/g, ' ')).join(' + ');
 import { fileURLToPath } from 'node:url';
@@ -82,11 +84,14 @@ const HELP = `usage:
   task.sh claim|start|unblock <id> ["note"]
   task.sh comment <id> "<text>" [--wake]
   task.sh block <id> --on <ids|owner> ["why"]
+  task.sh plan <id> "<plan>"   (plan-first requests: posts the plan, then the task awaits the owner's review on the board)
+  task.sh chat-file <id> <data/handoffs/…file> ["comment"] [--title "<t>"]   (chat-filed tasks: post your file in the thread)
   task.sh approve-request <id> --policy "<POLICY.md ESCALATE line>" ["what exactly"]
   task.sh approved-in-pane <id> "<what the owner said, when>" [--decline]
                                      record an answer the owner gave in your pane
   task.sh check <id> <item>...   (items: SETTINGS.ledger.checklist — mesh-cli.mjs checklist)
-  task.sh close <id> --handoff <report path> [--pr <url>] [--vault <note>] [--checklist all|a,b,..] ["summary"]
+  task.sh close <id> --handoff <report path> [--pr <url>] [--vault <note>] [--repo <path>] [--checklist all|a,b,..] ["summary"]
+                [--no-vault "<reason>"] [--no-graph "<reason>"]   (when the board verifies vault_synced / graphify_updated)
   task.sh assign <id> <agent> | cancel <id> ["why"] | reopen <id>
   task.sh set-requester <id> <agent> "<why>"   (mission-control only: fix a misattributed requester)
   task.sh list [--owner <agent>] [--status open,blocked,..|live] | show <id> | mine
@@ -125,6 +130,15 @@ async function task(sub, pos, flags) {
       return patch({ op: 'comment', text: note(1), wake: Boolean(flags.wake) });
     case 'block':
       return patch({ op: 'block', blocked_on: String(flags.on || ''), text: note(1) });
+    case 'plan':
+      // plan-first requests (a planFirst person's chat ask): post the plan → awaits the owner's review on the board
+      return patch({ op: 'plan', text: note(1) });
+    case 'chat-file': {
+      // a file you made for the requester (e.g. a calendar .ics) → posted into the request's chat thread
+      if (!pos[1]) die('chat-file needs a path under data/handoffs/: task.sh chat-file <id> <path> ["comment"] [--title "<title>"]');
+      const r = await api('POST', `/api/tasks/${id}/chat-file`, { actor: await whoami(flags), path: pos[1], text: pos[2], title: typeof flags.title === 'string' ? flags.title : undefined });
+      return console.log(`#${id}: ${r.queued} queued for the chat thread (the intake posts it within ~10 s)`);
+    }
     case 'approve-request':
       return patch({ op: 'request_approval', policy_item: flags.policy, text: note(1) });
     case 'approved-in-pane':
@@ -137,7 +151,12 @@ async function task(sub, pos, flags) {
       // 'all' is expanded by the server against the configured checklist
       const items = typeof flags.checklist === 'string' && flags.checklist !== 'all' ? flags.checklist.split(',') : [];
       const checklist = flags.checklist === 'all' ? 'all' : Object.fromEntries(items.map((k) => [k.trim(), true]));
-      return patch({ op: 'close', checklist, links: links(flags), text: note(1) });
+      // --no-vault / --no-graph "<reason>": waive the verified brain items (kept on the task)
+      const waive = {};
+      if (typeof flags['no-vault'] === 'string') waive.vault_synced = flags['no-vault'];
+      if (typeof flags['no-graph'] === 'string') waive.graphify_updated = flags['no-graph'];
+      if (flags['no-vault'] === true || flags['no-graph'] === true) die('--no-vault / --no-graph need a reason: --no-vault "<why no vault note>"');
+      return patch({ op: 'close', checklist, links: links(flags), text: note(1), ...(Object.keys(waive).length ? { waive } : {}) });
     }
     case 'assign':
       return patch({ op: 'assign', owner: pos[1], text: note(2) });

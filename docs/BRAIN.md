@@ -49,7 +49,7 @@ version of the write side; it always defers to the live `Vault Guide.md`.
 | Job | Schedule | Does |
 |---|---|---|
 | `vault-backup.sh` (`<prefix>.obsidian-backup`) | every 30 min + at load | commit, rebase, push the vault; mirror selfheal markers into `.scripts/state-mirror/` |
-| `vault-staleness-check.sh` (`<prefix>.obsidian-staleness`) | Mondays 08:00 + at load (skips if run < 6 days ago) | writes `Staleness Report.md`: projects whose source has activity > 3 days newer than their `last-synced` |
+| `vault-staleness-check.sh` (`<prefix>.obsidian-staleness`) | Mondays 08:00 + at load (skips if run < 6 days ago) | writes `Staleness Report.md` (and `~/.cache/obsidian-vault/staleness.json` for the board): projects whose source has activity > 3 days newer than their `last-synced`. Commits whose subject starts with `Checkpoint` don't count as activity |
 | `selfheal-runner.sh` | wraps other scheduled jobs | run iff the last *successful* run is older than the latest scheduled slot, so missed slots after sleep or power-off are caught up exactly once |
 
 **Selfheal markers are state, not cache.** The runner stores each job's last success as an epoch in
@@ -162,3 +162,25 @@ Then, by hand:
 
 `./install.sh check` reports the vault, markers, vault LaunchAgents, Graphify version, skills and
 hook guards.
+
+## 6. Autopilot: the board checks the brain (`SETTINGS.brain`)
+
+Detection alone is not enough: a weekly report nobody reads lets drift pile up. Set
+`SETTINGS.brain` in `overlay/config/jobs.mjs` (see the commented example in `examples/`) and the
+board (`src/brain.mjs`) closes the loop:
+
+- **Stale notes become work.** Every 10 minutes it reads `staleness.json`. Each stale project gets
+  ONE low-priority ledger task, owned by the agent whose repo is the project's most recently active
+  source folder (fallback: `fallbackOwner`). While the task is open, a newer report adds one comment
+  instead of a second task.
+- **Graph failures are visible.** New `Rebuild failed` lines in the hook's rebuild log, and
+  registered repos (`~/.graphify/repos.tsv`) whose graph is older than their last code commit (docs-only commits never count), count on
+  one card, `brain:autopilot`. The card goes amber when anything is > 0. It is never red and never
+  emails or texts.
+- **The close checklist is verified.** `vault_synced` needs `--vault "<note>"` naming a note that
+  was edited after the task was created. `graphify_updated` needs the task's repo graph to be
+  current. Honest exceptions close with `--no-vault "<reason>"` / `--no-graph "<reason>"`, and the
+  reason stays on the task.
+
+Remove the key and all three stop; nothing else changes. The board only writes its own state
+(`data/brain-state.json`) and ledger tasks.

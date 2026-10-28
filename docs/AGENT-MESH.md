@@ -55,6 +55,11 @@ any live state → cancelled;  reopen → claimed (or open if unowned)
   ([BRAIN.md](BRAIN.md)), add `vault_synced` and `graphify_updated`.
   `task.sh close <id> --checklist all` ticks every configured item, and agent
   prompts show the list via `scripts/mesh-cli.mjs checklist`.
+- **Brain items are verified when `SETTINGS.brain` is set** ([BRAIN.md](BRAIN.md)).
+  `vault_synced` needs `--vault "<note>"` naming a note edited after the task was
+  created (a vault commit URL or sha made after it also counts). `graphify_updated` needs the repo's graph to be no older than its last
+  commit (run `graphify update .`). When there is honestly nothing to sync, close
+  with `--no-vault "<reason>"` or `--no-graph "<reason>"`: the reason stays on the task.
 - **No secrets.** The ledger rejects text that looks like a credential.
   Messages are capped at 600 characters and comments at 2000. Link out
   instead of pasting.

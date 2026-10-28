@@ -26,7 +26,10 @@ Procedure:
 5. Write `data/handoffs/triage-<YYYY-MM-DD-HHMM>.md`: what was red, what you did,
    what you skipped and why, what needs <OWNER>, plus a **Work** section from the
    ledger (awaiting approval, blocked, open > 24h). Report only — triage never
-   claims, closes, approves or messages about tasks.
+   claims, closes, approves or messages about tasks. If a `brain:autopilot` card
+   exists, add one **Brain** line at most once per 7 days (label `brain:autopilot`
+   in data/triage-state.json) and never act on it; inside that cooldown an amber
+   brain card alone still counts as "all green".
 6. `cmux notify --title 'Triage' --body '<summary>'` and POST the same line to
    `localhost:3210/api/event` (`{"kind":"sys","text":"triage: …"}`).
 

@@ -11,6 +11,8 @@ import { JOBS, DOCKER_CONTAINERS, CRON, DISK, MEM, SETTINGS } from './config.mjs
 import * as collect from './collect.mjs';
 import { readStateSync, setupCard } from './setup.mjs';
 import { readStatsSync, repoCards } from './repo-stats.mjs';
+import { brainCard, readStateSync as readBrainSync } from './brain.mjs';
+import { viewCards, readStateSync as readViewSync } from './view-watch.mjs';
 
 let pollCount = 0;
 
@@ -398,6 +400,11 @@ export async function snapshot() {
   if (setup) jobs.push(setup);
   // GitHub stats (SETTINGS.repoStats): informational cards, fetched by server.mjs
   jobs.push(...repoCards(readStatsSync(), SETTINGS.repoStats, now));
+  // vault + graph upkeep (SETTINGS.brain): amber only, never on the alert ladder
+  const brain = brainCard(readBrainSync(), SETTINGS.brain, now.getTime());
+  if (brain) jobs.push(brain);
+  // database views (SETTINGS.viewWatch): amber only, never on the alert ladder
+  jobs.push(...viewCards(readViewSync(), SETTINGS.viewWatch, now.getTime()));
 
   const attention = jobs.filter((x) => x.status !== 'ok');
   return {

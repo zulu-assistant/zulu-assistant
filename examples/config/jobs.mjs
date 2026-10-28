@@ -74,7 +74,8 @@ export const DISK = {
 };
 
 // launchd jobs. grace = minutes after a due slot before a missed selfheal run
-// turns critical; quietOk = silent-when-healthy watchdog (exit code only).
+// turns critical; quietOk = silent-when-healthy watchdog (exit code only);
+// log = the job's real log when the plist's StandardOutPath is not it.
 export const JOBS = [
   { label: 'com.example.app.server',  repo: '~/my-app', name: 'App server :8080', domain: 'app', example: true },
   { label: 'com.example.app.sync',    repo: '~/my-app', name: 'Hourly sync',      domain: 'data', grace: 90, example: true },
@@ -107,6 +108,16 @@ export const SETTINGS = {
   // closes. Running the brain (docs/BRAIN.md)? Add 'vault_synced' and
   // 'graphify_updated' so agents also sync the vault and the code graph.
   ledger: { checklist: ['docs_updated', 'report_written'] },
+  // brain autopilot (src/brain.mjs, docs/BRAIN.md), off here. Set it to turn on stale-vault
+  // ledger tasks, the brain:autopilot card and a VERIFIED vault_synced / graphify_updated close:
+  // { vault: '~/<vault>', staleness: '<staleness.json>', reposTsv: '~/.graphify/repos.tsv',
+  //   rebuildLog: '~/.cache/graphify-rebuild.log', requester: 'mission-control', everyMinutes: 10 }
+  brain: null,
+  // database views on cards (src/view-watch.mjs): one row read over PostgREST with the
+  // HEARTBEAT_URL origin + HEARTBEAT_KEY, amber on thresholds. Off here. Example entry:
+  //   { label: 'jobs:queue', name: 'Job queue', view: 'queue_status', everyMinutes: 5,
+  //     max: { stuck: 0 }, maxAgeMinutes: { last_run_at: 15 }, show: ['last_done_at'] }
+  viewWatch: [],
   port: Number(process.env.MC_PORT) || 3210,   // MC_PORT via data/local.env
   pollSeconds: 60,
   // escalation ladder: cmux notify is instant; a red persisting this long also

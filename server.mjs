@@ -4,10 +4,11 @@
 import http from 'node:http';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, stat as fsStat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, SETTINGS, DOMAINS, OWNER, isOwner, resolve as resolveConfig, loadSecrets, REGISTRY_FILE } from './src/config.mjs';
+import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, SETTINGS, DOMAINS, OWNER, isOwner, isPrincipal, resolve as resolveConfig, loadSecrets, REGISTRY_FILE, PRINCIPALS } from './src/config.mjs';
+import { publishLines, chatFileProblem, loadChannels, isChatTask } from './src/intake.mjs';
 import { snapshot, logPathsFor } from './src/status.mjs';
 import { tailFile, getAgentFeed } from './src/collect.mjs';
 import { processAlerts, sendDigest, notify as realNotify, cmuxPassword } from './src/alerts.mjs';
@@ -18,6 +19,8 @@ import { syncDemoCmux } from './src/demo-cmux.mjs';
 import { recordEvent, getEvents } from './src/events.mjs';
 import { maybeCiCostWatch } from './src/ci-cost-watch.mjs';
 import { maybeRepoStats } from './src/repo-stats.mjs';
+import { maybeBrain, verifyClose } from './src/brain.mjs';
+import { maybeViewWatch } from './src/view-watch.mjs';
 import { allowedSource, localOnly } from './src/guard.mjs';
 import { createLedger, MeshError, summarize, wakeMessage } from './src/tasks.mjs';
 import {
@@ -179,6 +182,39 @@ const isDecider = (req) => {
   const want = Buffer.from(decisionToken);
   return got.length === want.length && timingSafeEqual(got, want);
 };
+
+// Chat intake (task #223): the intake process (scripts/chat-intake.mjs) proves
+// itself with its own token (data/intake-token, 0600, never in a page or a
+// prompt). It may only file a listed person's request or reply — never decide.
+const INTAKE_TOKEN_FILE = path.join(ROOT, 'data', 'intake-token');
+const INTAKE_OUTBOX_FILE = path.join(ROOT, 'data', 'intake-outbox.json');
+let intakeToken = DEMO ? randomBytes(24).toString('hex') : (await readFile(INTAKE_TOKEN_FILE, 'utf8').catch(() => '')).trim();
+if (!intakeToken) {
+  intakeToken = randomBytes(24).toString('hex');
+  await writeFile(INTAKE_TOKEN_FILE, intakeToken, { mode: 0o600 });
+}
+const isIntake = (req) => {
+  const got = Buffer.from(String(req.headers['x-mesh-intake'] || ''));
+  const want = Buffer.from(intakeToken);
+  return got.length === want.length && timingSafeEqual(got, want);
+};
+const readIntakeOutbox = async () => { try { return JSON.parse(await readFile(INTAKE_OUTBOX_FILE, 'utf8')); } catch { return []; } };
+let intakeChain = Promise.resolve();
+/** Queue publisher lines for a chat-originated task's thread (pulled by the intake). */
+function queueIntake(prev, task) {
+  if (!isChatTask(task) || DEMO) return;
+  const lines = publishLines(prev, task, { ownerName: OWNER.name, isPerson: (x) => isPrincipal(x), isOwnerId: isOwner });
+  if (!lines.length) return;
+  intakeChain = intakeChain.then(async () => {
+    const week = Date.now() - 7 * 24 * 3600e3;
+    const box = (await readIntakeOutbox()).filter((m) => m.queuedAt > week);
+    for (const l of lines) {
+      box.push({ id: randomBytes(6).toString('hex'), taskId: task.id, channel: task.source.channel, thread_ts: task.source.ts,
+        channel_name: task.source.channel_name || null, text: l.text, status: l.status, queuedAt: Date.now() });
+    }
+    await writeJsonAtomic(INTAKE_OUTBOX_FILE, box);
+  }).catch((e) => console.error('[intake outbox]', e.message));
+}
 
 /** Wake/notify one agent: type it now if its pane is ready, else queue. */
 async function meshDeliver(to, text, { from = 'board', taskId = null, wake = false, kind = 'message' } = {}) {
@@ -362,6 +398,10 @@ async function poll() {
       .catch((e) => console.error('[ci-cost]', e.message));
     maybeRepoStats({ cfg: SETTINGS.repoStats, now, record: (k, t) => recordEvent(k, t).catch(() => {}) })
       .catch((e) => console.error('[repo-stats]', e.message));
+    if (!DEMO) maybeViewWatch({ entries: SETTINGS.viewWatch, secrets: loadSecrets(), now: now.getTime(), record: (k, t) => recordEvent(k, t).catch(() => {}) }).catch(() => {});
+    if (!DEMO) maybeBrain({ cfg: SETTINGS.brain, ledger, agents: dirCache, now: now.getTime(), record: (k, t) => recordEvent(k, t).catch(() => {}),
+      afterCreate: (t) => afterTaskChange(t, { wake: t.owner && !isOwner(t.owner) ? [t.owner] : [] }, 'board') })
+      .catch((e) => console.error('[brain]', e.message));
     const payload = JSON.stringify(payloadFor());
     for (const res of sseClients) res.write(`data: ${payload}\n\n`);
   } catch (err) {
@@ -561,17 +601,57 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/tasks' && req.method === 'POST') {
       const b = await readBody(req);
-      const me = await identify(b.requester);
-      b.requester = me.name; b.requester_ws = me.ws;
+      const intake = isIntake(req);
+      if (intake) {
+        // a person's request from the team chat: the requester is that person
+        const who = String(b.requester || '').trim().toLowerCase();
+        if (!isPrincipal(who)) throw new MeshError(403, `"${who}" is not a person in config/principals.json`);
+        if (!b.source?.via || !b.source?.key) throw new MeshError(400, 'intake requests carry source.via + source.key');
+        // planFirst comes from config/principals.json, never from the request body
+        b.plan_first = PRINCIPALS.get(String(b.requester || '').toLowerCase())?.planFirst === true;
+        b.requester = isOwner(who) ? OWNER.id : who; b.requester_ws = null;
+      } else {
+        if (b.source) throw new MeshError(403, 'source is set by the chat intake only');
+        delete b.plan_first;
+        const me = await identify(b.requester);
+        b.requester = me.name; b.requester_ws = me.ws;
+      }
       if (b.owner) {
         const t = resolveTarget(b.owner, await refreshDir());
         if (!t.agent && !isOwner(b.owner)) return sendJson(res, 400, { ok: false, msg: `owner: ${t.error}`, candidates: t.candidates });
         if (t.agent) { b.owner = t.agent.name; b.owner_ws = t.agent.workspaceId || null; }
       }
       const task = await ledger.create(b);
+      if (task.existing) return sendJson(res, 200, { ok: true, task, existing: true, deliveries: [] });
       recordEvent('sys', `task #${task.id} created by ${task.requester}${task.owner ? ` → ${task.owner}` : ''}: ${task.title}`).catch(() => {});
       const deliveries = await afterTaskChange(task, { wake: task.owner && task.owner !== task.requester && !isOwner(task.owner) ? [task.owner] : [] }, task.requester);
       return sendJson(res, 201, { ok: true, task, deliveries });
+    }
+    // POST a file the owner made (e.g. a calendar .ics) into the request's chat thread
+    // (task.sh chat-file). Agents never hold chat tokens: the board queues it, the intake uploads.
+    const cf = url.pathname.match(/^\/api\/tasks\/(\d+)\/chat-file$/);
+    if (cf && req.method === 'POST') {
+      const b = await readBody(req);
+      const me = await identify(b.actor);
+      const t = await ledger.get(cf[1]);
+      if (!t) throw new MeshError(404, `no task #${cf[1]}`);
+      if (!isChatTask(t)) throw new MeshError(400, `task #${t.id} did not come from chat — no thread to post into`);
+      if (me.name !== t.owner && !me.mc) throw new MeshError(403, `only #${t.id}'s owner (${t.owner}) or mission-control posts files to its thread`);
+      const rel = String(b.path || '').replace(/^\.\//, '');
+      const st = await fsStat(path.join(ROOT, rel)).catch(() => null);
+      const bad = chatFileProblem(rel, { size: st?.size, isFile: st?.isFile(), attachmentsDir: loadChannels(resolveConfig('config/channels.json')).attachmentsDir });
+      if (bad) throw new MeshError(400, `chat-file: ${bad}`);
+      const r = await ledger.update(t.id, { op: 'comment', actor: me.name, text: `posting ${path.basename(rel)} to the chat thread${b.text ? ` — ${b.text}` : ''} (${rel})` }, { mc: me.mc, actorWs: me.ws });
+      intakeChain = intakeChain.then(async () => {
+        const box = await readIntakeOutbox();
+        box.push({ id: randomBytes(6).toString('hex'), taskId: t.id, channel: t.source.channel, thread_ts: t.source.ts,
+          channel_name: t.source.channel_name || null, file: rel, title: String(b.title || '').slice(0, 120) || null,
+          text: String(b.text || '').slice(0, 600), status: false, queuedAt: Date.now() });
+        await writeJsonAtomic(INTAKE_OUTBOX_FILE, box);
+      }).catch((e) => console.error('[intake outbox]', e.message));
+      await intakeChain;
+      recordEvent('sys', `task #${t.id}: ${me.name} queued ${path.basename(rel)} for its chat thread`).catch(() => {});
+      return sendJson(res, 202, { ok: true, queued: rel });
     }
     const tm = url.pathname.match(/^\/api\/tasks\/(\d+)$/);
     if (tm && req.method === 'GET') {
@@ -580,7 +660,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (tm && req.method === 'PATCH') {
       const b = await readBody(req);
-      const decider = b.op === 'decide' && isDecider(req);
+      const intake = isIntake(req);
+      const decider = !intake && b.op === 'decide' && isDecider(req);
       if (b.op === 'decide') {
         // every panel decision attempt leaves a trace (two clicks left none)
         const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -590,7 +671,13 @@ const server = http.createServer(async (req, res) => {
           throw new MeshError(403, 'decision token rejected: reload the board page and click again');
         }
       }
-      const me = decider ? { name: OWNER.id, ws: null, mc: false } : await identify(b.actor);
+      let me;
+      if (decider) me = { name: OWNER.id, ws: null, mc: false };
+      else if (intake) {
+        const who = String(b.actor || '').trim().toLowerCase();
+        if (!isPrincipal(who)) throw new MeshError(403, `"${who}" is not a person in config/principals.json`);
+        me = { name: isOwner(who) ? OWNER.id : who, ws: null, mc: false };
+      } else me = await identify(b.actor);
       b.actor = me.name;
       if (b.op === 'assign' && b.owner) {
         const t = resolveTarget(b.owner, await refreshDir());
@@ -601,7 +688,15 @@ const server = http.createServer(async (req, res) => {
         const who = await identify(b.requester);   // exact, live agent (or the owner)
         b.requester = who.name; b.requester_ws = who.ws;
       }
-      const r = await ledger.update(tm[1], b, { decider, mc: me.mc, actorWs: me.ws });
+      const prev = await ledger.get(tm[1]);
+      // SETTINGS.brain: the close gate verifies vault_synced / graphify_updated (src/brain.mjs)
+      let verified;
+      if (b.op === 'close' && SETTINGS.brain && prev && !DEMO) {
+        const probe = { ...prev, links: { ...prev.links, ...(b.links && typeof b.links === 'object' ? b.links : {}) } };
+        verified = await verifyClose(probe, { cfg: SETTINGS.brain, agents: dirCache.length ? dirCache : await refreshDir() });
+      }
+      const r = await ledger.update(tm[1], b, { decider, intake, mc: me.mc, actorWs: me.ws, verified });
+      queueIntake(prev, r.task);
       if (decider) {
         const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
         recordEvent('sys', `approval #${tm[1]} ${b.decision} decided from ${ip} (${String(req.headers['user-agent'] || '').slice(0, 40)})`).catch(() => {});
@@ -611,6 +706,24 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, task: r.task, deliveries });
     }
 
+    if (url.pathname === '/api/intake/outbox' && req.method === 'GET') {
+      if (!isIntake(req)) throw new MeshError(403, 'intake token required');
+      await intakeChain;
+      return sendJson(res, 200, { items: await readIntakeOutbox() });
+    }
+    if (url.pathname === '/api/intake/outbox/ack' && req.method === 'POST') {
+      if (!isIntake(req)) throw new MeshError(403, 'intake token required');
+      const b = await readBody(req);
+      const ids = new Set(Array.isArray(b.ids) ? b.ids.map(String) : []);
+      let left = 0;
+      intakeChain = intakeChain.then(async () => {
+        const keep = (await readIntakeOutbox()).filter((m) => !ids.has(m.id));
+        left = keep.length;
+        await writeJsonAtomic(INTAKE_OUTBOX_FILE, keep);
+      }).catch((e) => { left = -1; console.error('[intake ack]', e.message); });
+      await intakeChain;
+      return sendJson(res, left < 0 ? 500 : 200, { ok: left >= 0, left });
+    }
     if (req.method === 'POST' && url.pathname === '/api/star') {
       // the board's one-time star toast reports shown / star / never (src/star.mjs)
       const b = await readBody(req);

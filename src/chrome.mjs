@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cmux, writeJsonAtomic } from './mesh.mjs';
 import { acrossWindows } from './cmux-windows.mjs';
+import { isOwner } from './config.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const CHROME_STATE_FILE = path.join(ROOT, 'data', 'mesh-chrome-state.json');
@@ -106,6 +107,9 @@ export function chromePlan(entries, live, state = {}, cfg = {}) {
 export const PILL_STATES = {
   needs_approval: { label: 'APPROVAL', icon: 'flag.fill',               color: '#E5E500', rank: 5 },
   blocked:        { label: 'BLOCKED',  icon: 'xmark.octagon.fill',      color: '#FF8C3C', rank: 4 },
+  // blocked only on another person (chat intake, #223): not the owner's to-do,
+  // so it must not read as BLOCKED in the owner's ATTENTION list
+  waiting:        { label: 'WAITING',  icon: 'person.crop.circle.badge.clock', color: '#00A6A6', rank: 2.5 },
   in_progress:    { label: 'WORKING',  icon: 'bolt.fill',               color: '#00E5E5', rank: 3 },
   claimed:        { label: 'CLAIMED',  icon: 'circle.lefthalf.filled',  color: '#00A600', rank: 2 },
   open:           { label: 'OPEN',     icon: 'circle',                  color: '#157A15', rank: 1 },
@@ -117,8 +121,11 @@ export const PILL_STATES = {
  * Several → "3 tasks" (resident view) colored by the most urgent state.
  * None → clear both.
  */
+export const pillStatus = (t) => (t.status === 'blocked' && t.blocked_on?.length
+  && t.blocked_on.every((x) => typeof x === 'string' && !isOwner(x)) ? 'waiting' : t.status);
+
 export function ownerPill(tasks) {
-  const live = tasks.filter((t) => PILL_STATES[t.status]);
+  const live = tasks.filter((t) => PILL_STATES[t.status]).map((t) => ({ ...t, status: pillStatus(t) }));
   if (!live.length) return { pill: null, progress: null };
   const worst = live.reduce((a, b) => (PILL_STATES[b.status].rank > PILL_STATES[a.status].rank ? b : a));
   const st = PILL_STATES[worst.status];

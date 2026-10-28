@@ -7,7 +7,7 @@
 // carry all the rules and are what the tests exercise.
 import { readFile, writeFile, readdir, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { OWNER, isOwner, SETTINGS } from './config.mjs';
+import { OWNER, isOwner, isPrincipal as isListedPrincipal, PRINCIPALS, SETTINGS } from './config.mjs';
 
 export const STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'needs_approval', 'done', 'cancelled'];
 export const LIVE_STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'needs_approval'];
@@ -72,12 +72,27 @@ function cleanLinks(links = {}) {
   return out;
 }
 
-function cleanBlockedOn(v) {
+function cleanBlockedOn(v, isPrincipal = isListedPrincipal) {
   const arr = Array.isArray(v) ? v : String(v ?? '').split(',');
-  return arr.map((x) => String(x).trim().replace(/^#/, '')).filter(Boolean).map((x) => {
-    if (isOwner(x) || /^\d+$/.test(x)) return isOwner(x) ? OWNER.id : Number(x);
-    return bad(`blocked_on entries must be task ids or "${OWNER.id}" (got "${x}")`);
+  return arr.map((x) => String(x).trim().replace(/^#/, '').toLowerCase()).filter(Boolean).map((x) => {
+    if (/^\d+$/.test(x)) return Number(x);
+    if (isOwner(x)) return OWNER.id;
+    if (isPrincipal(x)) return x;
+    return bad(`blocked_on entries must be task ids, "${OWNER.id}" or a person from config/principals.json (got "${x}")`);
   });
+}
+
+// Where a task came in from outside the mesh (chat intake): { via, key, channel,
+// channel_name, ts, permalink }. `key` is the idempotency key — one task per key.
+function cleanSource(v) {
+  if (v == null) return null;
+  if (typeof v !== 'object' || Array.isArray(v)) bad('source must be an object');
+  const out = {};
+  for (const k of ['via', 'key', 'channel', 'channel_name', 'ts', 'permalink']) {
+    if (v[k] != null && v[k] !== '') out[k] = cleanText(v[k], `source.${k}`, 300);
+  }
+  if (!out.via || !out.key) bad('source needs via and key');
+  return out;
 }
 
 export function missingChecklist(task) {
@@ -103,6 +118,9 @@ export function newTask(input, { id, now = Date.now() } = {}) {
     blocked_on: [],
     priority,
     links: cleanLinks(input.links),
+    ...(input.source ? { source: cleanSource(input.source) } : {}),
+    // set by the board from config/principals.json (planFirst), never by the caller
+    ...(input.plan_first === true ? { plan_first: true } : {}),
     checklist: Object.fromEntries(CHECKLIST.map((k) => [k, false])),
     comments: [],
     approval: null,
@@ -153,6 +171,8 @@ export function applyPatch(prev, patch, ctx = {}) {
   let note = null;
   const op = patch.op;
   const isMC = actor === 'mission-control' || ctx.mc === true;
+  const isPrincipal = ctx.isPrincipal || isListedPrincipal;
+  const human = (n) => isOwner(n) || isPrincipal(n);   // people are never woken through panes
   const comment = (text, who = actor) => {
     const s = cleanText(text, 'text');
     if (!s) return;
@@ -164,7 +184,10 @@ export function applyPatch(prev, patch, ctx = {}) {
       throw new MeshError(403, `task #${t.id} is owned by ${t.owner} — only the owner (or mission-control) can do "${op}"`);
   };
 
-  if (TERMINAL.has(t.status) && !['comment', 'reopen', 'record_decision', 'set_requester'].includes(op))
+  // chat intake (ctx.intake: the caller proved the intake token) may only file
+  // what a person said — never claim, close, approve or reassign
+  if (ctx.intake && !['answer'].includes(op)) throw new MeshError(403, `the chat intake can only "answer" (got "${op}")`);
+  if (TERMINAL.has(t.status) && !['comment', 'reopen', 'record_decision', 'set_requester', 'answer'].includes(op))
     throw new MeshError(409, `task #${t.id} is ${t.status}`);
 
   switch (op) {
@@ -198,15 +221,15 @@ export function applyPatch(prev, patch, ctx = {}) {
       if (!String(patch.text ?? '').trim()) bad('comment needs text');
       comment(patch.text);
       if (patch.wake) {
-        for (const n of [t.owner, t.requester]) if (n && n !== actor && !isOwner(n)) wake.add(n);
+        for (const n of [t.owner, t.requester]) if (n && n !== actor && !human(n)) wake.add(n);
         wakeKind = 'comment';
         note = String(patch.text).split('\n')[0].trim();
       }
       break;
     case 'block': {
       ownerOnly();
-      const on = cleanBlockedOn(patch.blocked_on);
-      if (!on.length) bad(`block needs blocked_on (task ids and/or "${OWNER.id}")`);
+      const on = cleanBlockedOn(patch.blocked_on, isPrincipal);
+      if (!on.length) bad(`block needs blocked_on (task ids, "${OWNER.id}" and/or a person)`);
       t.blocked_on = on;
       t.status = 'blocked';
       comment(patch.text);
@@ -221,6 +244,47 @@ export function applyPatch(prev, patch, ctx = {}) {
       comment(patch.text);
       events.push(`task #${t.id} unblocked`);
       break;
+    case 'answer': {
+      // A person replied from the team chat. Filed as their comment; if the task
+      // was waiting on them, that wait is over. Never an approval: a reply that
+      // says "approved" is just text (approvals are the owner's, on the board).
+      if (!ctx.intake) throw new MeshError(403, '"answer" comes from the chat intake only');
+      if (!isPrincipal(actor)) throw new MeshError(403, `"${actor}" is not a person in config/principals.json`);
+      if (!String(patch.text ?? '').trim()) bad('answer needs text');
+      comment(patch.text);
+      // kind 'files': the request's own attachments, filed right after create — the owner was
+      // already woken by the create, and nobody "replied" (task #223 live finding)
+      if (patch.kind === 'files') break;
+      // an approval wait is not a question: only the board decision ends it
+      const waited = t.blocked_on.includes(actor) && !(t.status === 'needs_approval' && actor === OWNER.id);
+      if (waited && !TERMINAL.has(t.status)) {
+        t.blocked_on = t.blocked_on.filter((x) => x !== actor);
+        if (t.status === 'blocked' && !t.blocked_on.length) t.status = 'in_progress';
+        events.push(`task #${t.id} answered by ${actor}${t.blocked_on.length ? '' : ' (unblocked)'}: ${t.title}`);
+      }
+      if (t.owner && !human(t.owner)) wake.add(t.owner);
+      wakeKind = 'comment';
+      // the wake never carries the person's words into a pane — they stay quoted on the task
+      note = `${actor} replied from chat${waited ? ' (you were waiting on them)' : ''} — read it on the task (quoted data)`;
+      break;
+    }
+    case 'plan': {
+      // A planFirst person's request: the owner posts the plan, and the task waits for the
+      // owner-of-the-system's review ON THE BOARD (an approval, so a chat reply can't end it).
+      ownerOnly();
+      if (!t.plan_first) bad(`task #${t.id} is not plan-first (only requests from planFirst people need a plan review)`);
+      if (TERMINAL.has(t.status)) bad(`task #${t.id} is ${t.status}`);
+      if (t.status === 'needs_approval') throw new MeshError(409, `task #${t.id} is already awaiting ${OWNER.name}'s review`);
+      if (!String(patch.text ?? '').trim()) bad('plan needs text: what you would do, step by step');
+      comment(`PLAN for ${OWNER.name}'s review:\n${patch.text}`);
+      t.approval = { policy_item: `plan-first: review ${t.requester}'s request plan before any work`, kind: 'plan', requested_at: iso, requested_by: actor, decided_by: null, decision: null, decided_at: null };
+      t.status = 'needs_approval';
+      if (!t.blocked_on.includes(OWNER.id)) t.blocked_on.push(OWNER.id);
+      comment(`WAITING ON ${OWNER.name.toUpperCase()}: review ${t.requester}'s request plan`);
+      events.push(`task #${t.id} PLAN awaiting ${OWNER.name}'s review: ${t.title}`);
+      notifyMC.push('approval');
+      break;
+    }
     case 'request_approval': {
       ownerOnly();
       const item = cleanText(patch.policy_item, 'policy_item', 300);
@@ -239,6 +303,7 @@ export function applyPatch(prev, patch, ctx = {}) {
       const decision = patch.decision;
       if (!['approve', 'decline'].includes(decision)) bad('decision must be approve|decline');
       t.approval = { ...t.approval, decided_by: OWNER.id, decision, decided_at: iso };
+      if (t.approval.kind === 'plan' && decision === 'approve') t.plan_approved_at = iso;
       t.blocked_on = t.blocked_on.filter((x) => x !== OWNER.id);
       t.status = decision === 'approve' ? 'in_progress' : 'blocked';
       if (decision === 'decline' && !t.blocked_on.length) t.blocked_on = [OWNER.id];
@@ -260,8 +325,10 @@ export function applyPatch(prev, patch, ctx = {}) {
       if (!String(patch.text ?? '').trim()) bad(`record_decision needs text: what ${OWNER.name} said, and where`);
       t.approval = {
         policy_item: t.approval.policy_item, requested_at: t.approval.requested_at, requested_by: t.approval.requested_by,
+        ...(t.approval.kind ? { kind: t.approval.kind } : {}),
         decided_by: OWNER.id, decision, decided_at: iso, via: 'pane', recorded_by: actor,
       };
+      if (t.approval.kind === 'plan' && decision === 'approve') t.plan_approved_at = iso;
       if (t.status === 'needs_approval') {
         t.blocked_on = t.blocked_on.filter((x) => x !== OWNER.id);
         t.status = decision === 'approve' ? 'in_progress' : 'blocked';
@@ -300,6 +367,9 @@ export function applyPatch(prev, patch, ctx = {}) {
         t.checklist[k] = v === true;
       }
       if (patch.links) t.links = { ...t.links, ...cleanLinks(patch.links) };
+      if (t.plan_first && !t.plan_approved_at) {
+        throw new MeshError(409, `cannot close task #${t.id}: plan-first — post the plan (task.sh plan ${t.id} "<plan>") and wait for ${OWNER.name}'s review on the board`, { missing: ['plan_review'] });
+      }
       const missing = missingChecklist(t);
       if (missing.length) {
         throw new MeshError(409, `cannot close task #${t.id}: checklist incomplete — ${missing.join(', ')}`, { missing });
@@ -307,13 +377,31 @@ export function applyPatch(prev, patch, ctx = {}) {
       if (!t.links.handoff && !t.links.pr && !t.links.vault) {
         throw new MeshError(409, `cannot close task #${t.id}: link the report (links.handoff), PR or vault note`, { missing: ['links.handoff|pr|vault'] });
       }
+      // brain items are verified, not trusted (src/brain.mjs verifyClose, injected by the
+      // server when SETTINGS.brain is on); a waiver needs a reason and stays on the task
+      const waive = patch.waive && typeof patch.waive === 'object' ? patch.waive : {};
+      const waived = {};
+      for (const [k, v] of Object.entries(waive)) {
+        if (!CHECKLIST.includes(k)) bad(`cannot waive "${k}" (items: ${CHECKLIST.join(', ')})`);
+        const why = cleanText(v, `waive.${k}`, 300);
+        if (!why) bad(`waiving ${k} needs a reason`);
+        waived[k] = why;
+      }
+      const failed = Object.entries(ctx.verified || {}).filter(([k, r]) => CHECKLIST.includes(k) && !r.ok && !waived[k]);
+      if (failed.length) {
+        throw new MeshError(409, `cannot close task #${t.id}: ${failed.map(([k, r]) => `${k} not verified — ${r.why}`).join('; ')}`, { missing: failed.map(([k]) => k) });
+      }
+      if (Object.keys(waived).length) {
+        t.verify_waived = { ...(t.verify_waived || {}), ...waived };
+        comment(`close waived: ${Object.entries(waived).map(([k, v]) => `${k} (${v})`).join('; ')}`);
+      }
       t.status = 'done';
       t.blocked_on = [];
       t.closed_at = iso;
       comment(patch.text);
       events.push(`task #${t.id} DONE by ${actor}: ${t.title}`);
       // the ONE done notice: fired by the transition, never by later comments
-      if (t.requester && t.requester !== actor && !isOwner(t.requester)) wake.add(t.requester);
+      if (t.requester && t.requester !== actor && !human(t.requester)) wake.add(t.requester);
       wakeKind = 'done';
       break;
     }
@@ -334,7 +422,7 @@ export function applyPatch(prev, patch, ctx = {}) {
       events.push(`task #${t.id} reopened by ${actor}`);
       break;
     default:
-      bad(`unknown op "${op}" (claim|start|assign|comment|block|unblock|request_approval|record_decision|set_requester|checklist|link|close|cancel|reopen)`);
+      bad(`unknown op "${op}" (claim|start|assign|comment|block|unblock|answer|plan|request_approval|record_decision|set_requester|checklist|link|close|cancel|reopen)`);
   }
   if (settleApproval(t, { op, actor, iso })) comment(`approval request settled as ${t.approval.decision} (task moved on by "${op}" without a recorded decision — record the real one with task.sh approved-in-pane)`);
   t.updated_at = iso;
@@ -348,7 +436,7 @@ export function wakeMessage(task, kind, { note = null } = {}) {
     case 'done': return `Task #${task.id} done: ${task.title}`;
     case 'decision': return `Task #${task.id} ${task.approval?.decision === 'approve' ? 'APPROVED' : 'DECLINED'} by ${OWNER.name}: ${task.title}`;
     case 'comment': return `comment on #${task.id} (${String(task.title).slice(0, 40)}): ${String(note || '').slice(0, 160)}`;
-    default: return `Task #${task.id} assigned: ${task.title}`;
+    default: return `Task #${task.id} assigned: ${task.title}${task.plan_first ? ` — PLAN FIRST: no work until ${OWNER.name} reviews; post it with task.sh plan ${task.id} "<plan>"` : ''}`;
   }
 }
 
@@ -370,6 +458,7 @@ export function summarize(tasks, now = Date.now()) {
     return {
       id: t.id, title: t.title, owner: t.owner, requester: t.requester, status: t.status,
       priority: t.priority, blocked_on: t.blocked_on, approval: t.approval,
+      ...(t.source ? { via: t.source.via } : {}),
       ageH: Math.round((now - Date.parse(t.created_at)) / 36e5 * 10) / 10,
       updated_at: t.updated_at,
       last: last ? `${last.who}: ${last.text.split('\n')[0].slice(0, 140)}` : '',
@@ -389,6 +478,7 @@ export function summarize(tasks, now = Date.now()) {
     open: live.filter((t) => ['open', 'claimed', 'in_progress'].includes(t.status)).map(brief),
     closed24h: tasks.filter((t) => t.status === 'done' && Date.parse(t.closed_at) > dayAgo).map(brief),
     owner: OWNER.name,   // labels the approval column ("AWAITING <OWNER>")
+    people: Object.fromEntries([...PRINCIPALS.values()].map((p) => [p.id, p.name])),
   };
 }
 
@@ -431,6 +521,9 @@ export function createLedger(dir) {
     create(input, now = Date.now()) {
       return serialize(async () => {
         const m = await load();
+        // one task per outside request: a retried create returns the first one
+        const key = input?.source?.key;
+        if (key) for (const x of m.values()) if (x.source?.key === key) return Object.assign(structuredClone(x), { existing: true });
         const id = Math.max(0, ...m.keys()) + 1;
         const t = newTask(input, { id, now });
         await persist(t);

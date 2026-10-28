@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-10-28
+
+### Added
+- **Team chat intake (Slack), optional.** Teammates who never open a terminal post requests in a Slack
+  channel. Each one becomes one ledger task routed through Mission Control, which picks the owner agent
+  and holds every approval. The agents' questions are posted in the request's thread (`task.sh block N
+  --on <person>`), and a reply there unblocks the task. Status lines and the final result come back to
+  the same thread.
+  - Socket Mode only: nothing is exposed to the internet.
+  - Approvals, publishes and credentials never come from chat. Slack text is quoted data, and
+    attachments are saved as untrusted files.
+  - `"planFirst": true` on a person makes their requests planning-only until the owner reviews the plan
+    on the board.
+  - `task.sh chat-file` posts an agent-made file (a calendar `.ics`, a PDF) back into the thread.
+  - Setup is the new optional step [docs/INSTALL.md §3c](docs/INSTALL.md#3c-optional-team-chat-intake-slack).
+    It uses a ready app manifest (`examples/slack/app-manifest.json`), plus `examples/config/principals.json`
+    and `channels.json`. Behaviour: [docs/CHAT-INTAKE.md](docs/CHAT-INTAKE.md).
+- **Brain autopilot** (`SETTINGS.brain`, off in `examples/`). Stale vault notes become one owned,
+  low-priority ledger task per project. Graphify rebuild failures and out-of-date graphs show on one
+  amber `brain:autopilot` card; docs-only commits never count. The close checklist *verifies*
+  `vault_synced` and `graphify_updated` instead of trusting the tick (waive with `--no-vault` /
+  `--no-graph "<reason>"`). See [docs/BRAIN.md §6](docs/BRAIN.md).
+- **Database-view cards** (`SETTINGS.viewWatch`, off in `examples/`): one row of a PostgREST view on a
+  board card, with column limits and timestamp ages. Read-only, with the dead-man's project URL and key;
+  amber only, never on the escalation ladder.
+- JOBS entries take `log:` when a LaunchAgent's StandardOutPath isn't its real log.
+- **Install report** issue form. When an install or demo fails (or a step warns), the installer prints
+  where to send it, together with `./install.sh doctor` (a redacted file; nothing is uploaded).
+
+### Changed
+- The one star question now comes as soon as the board first answers during install, instead of after
+  the whole setup. It is still asked once, defaults to No, and needs your own `gh` login.
+- The vault staleness check skips `Checkpoint …` commits and also writes `staleness.json` for the board.
+  `FORCE=1` runs it now.
+
 ## [0.1.0-beta.2] - 2026-10-12
 
 ### Added
@@ -102,5 +137,7 @@ First public release.
 - Publish manifest (checked locally with `scripts/publish.mjs --check`), and the scrub gate
   and gitleaks in CI.
 
-[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v0.1.0-beta.3...HEAD
+[0.1.0-beta.3]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.3
+[0.1.0-beta.2]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.1

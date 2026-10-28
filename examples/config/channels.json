@@ -1,0 +1,20 @@
+{
+  "standing": [
+    "Example standing rule: calendar items are answered with an .ics posted into the request's thread (task.sh chat-file N <file.ics>); nobody writes to a calendar directly."
+  ],
+  "statusChannel": "status",
+  "boardUrl": "",
+  "orderPattern": "#?\\b\\d{4,8}\\b",
+  "attachmentsDir": "data/handoffs/chat",
+  "vendors": [],
+  "channels": [
+    {
+      "name": "requests", "owner": "mission-control", "label": "request",
+      "fields": [
+        { "name": "request", "kind": "text", "required": true },
+        { "name": "due", "kind": "date" },
+        { "name": "files", "kind": "attachment" }
+      ]
+    }
+  ]
+}

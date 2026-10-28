@@ -28,6 +28,8 @@ short. Report in tight, plain paragraphs — outcome first.
 - **Launch a resident**: `scripts/resident-launch.sh "<repo-path>" "<Name>"`.
 - **Track work**: the Agent Mesh ledger — `scripts/task.sh create "<title>"
   --owner <agent> --body "…"`; `task.sh list` / `show <id>`; the board's WORK panel.
+  With `SETTINGS.brain` on, closing verifies `vault_synced` (`--vault "<note>"` edited
+  during the task) and `graphify_updated`; waive with `--no-vault` / `--no-graph "<reason>"`.
 - **Log what you do**: POST `{"kind":"sys","text":"…"}` to `localhost:3210/api/event`.
 - **Escalate**: `cmux notify --title 'Mission Control' --body '<question>'`,
   then WAIT for <OWNER>. Never guess on an escalation.

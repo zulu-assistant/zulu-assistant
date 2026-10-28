@@ -39,12 +39,28 @@ need_node() {
 # the public repo, from the registry's SETTINGS.repoUrl (single source of truth)
 repo_url() { "$NODE_BIN" -e "import('./src/config.mjs').then((m) => console.log(m.SETTINGS.repoUrl || ''))" 2>/dev/null || true; }
 
+# Failure path: say where to tell us, with the redacted doctor bundle (nothing is sent by us).
+# Printed when a full install / demo exits non-zero, or finishes after a step warned.
+STEP_WARNED=0
+report_hint() {
+  local url; url=$(repo_url)
+  [[ -n "$url" ]] || url=$(sed -n "s/^ *repoUrl: '\(https:[^']*\)'.*/\1/p" "$ROOT/examples/config/jobs.mjs" 2>/dev/null | head -1)
+  echo
+  say help "Stuck, or something looked wrong? Tell us what broke:"
+  echo "         ./install.sh doctor   # writes a redacted diagnostic file to data/ (nothing is uploaded)"
+  [[ -n "$url" ]] && echo "         then attach it to an install report: $url/issues/new?template=install_report.yml"
+  return 0
+}
+on_exit() { local rc=$?; [[ -n "${HINT_ON_EXIT:-}" ]] && { [[ $rc -ne 0 ]] || [[ $STEP_WARNED -ne 0 ]]; } && report_hint; return $rc; }
+trap on_exit EXIT
+
 do_init() {
   local dry="${1:-}" n=0
   mkdir -p data logs
   while IFS= read -r f; do
     local rel="${f#examples/}" dst="overlay/${f#examples/}"
     [[ "$rel" == vault/* || "$rel" == claude/* ]] && continue      # brain templates: see --brain / docs/BRAIN.md
+    [[ "$rel" == slack/* ]] && continue                            # pasted into api.slack.com, not config: docs/INSTALL.md 3c
     if [[ -e "$dst" ]]; then continue; fi
     n=$((n + 1))
     if [[ -n "$dry" ]]; then say would "create $dst"; else mkdir -p "$(dirname "$dst")"; cp "$f" "$dst"; say done "create $dst"; fi
@@ -91,6 +107,7 @@ star_prompt() {  # star_prompt ask|explicit
 demo_up() { curl -s -o /dev/null -m 2 -w '%{http_code}' "http://localhost:$PORT/api/status" 2>/dev/null | grep -q 200; }
 
 do_demo() {
+  HINT_ON_EXIT=1
   need_node
   mkdir -p data logs
   if demo_up; then say skip "something already answers on :$PORT (demo-stop, or MC_PORT=... in data/local.env)"
@@ -165,16 +182,21 @@ do_mission_control() {
 do_full() {
   local dry="" yes="" a; local -a pass=()
   for a in "$@"; do case $a in --dry-run) dry=1 ;; --yes|-y) yes=1 ;; *) pass+=("$a") ;; esac; done
+  HINT_ON_EXIT=1
   [[ "$(uname -s)" == Darwin ]] || { say FAIL "macOS only (launchd, cmux). Try ./install.sh --demo to look around."; exit 1; }
   echo "━━ 1/4 toolchain"
-  "$ROOT/scripts/prereqs.sh" ${dry:+--dry-run} ${yes:+--yes} || say warn "some tools failed to install — the steps below say what is missing"
+  "$ROOT/scripts/prereqs.sh" ${dry:+--dry-run} ${yes:+--yes} || { STEP_WARNED=1; say warn "some tools failed to install — the steps below say what is missing"; }
   unset NODE_BIN_DIR; . "$ROOT/scripts/env.sh"        # a freshly installed Node is found now
   need_node
   echo "━━ 2/4 your config (overlay/)"
   do_init "$dry"
   echo "━━ 3/4 the agent OS (board, triage, cmux, brain)"
   if [[ -n "$dry" ]]; then "$ROOT/scripts/bootstrap.sh" install --dry-run; return; fi
-  "$ROOT/scripts/bootstrap.sh" install ${pass[@]+"${pass[@]}"} || say warn "bootstrap reported problems above — zulu setup and ./install.sh check pick them up"
+  "$ROOT/scripts/bootstrap.sh" install ${pass[@]+"${pass[@]}"} || { STEP_WARNED=1; say warn "bootstrap reported problems above — zulu setup and ./install.sh check pick them up"; }
+  # first in-install success: the board answers → the one star ask happens here (asked once;
+  # if the board is not up yet, the same ask runs at the end instead)
+  for _ in $(seq 1 20); do demo_up && break; sleep 0.5; done
+  demo_up && { say done "board answers on http://localhost:$PORT"; star_prompt ask; }
   do_brain
   # setup state = this install was made by install.sh → the board shows a setup card until done
   [[ -f data/setup-state.json ]] || "$NODE_BIN" -e 'import("./src/setup.mjs").then((m) => m.writeState({ installedAt: Date.now(), steps: {}, answers: {} }))'
