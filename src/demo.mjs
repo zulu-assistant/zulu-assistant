@@ -24,7 +24,7 @@ export const DEMO_DOMAINS = [
   { id: 'cloud', name: 'Cloud / Endpoints', accent: '#00e5e5' },
 ];
 
-const T0 = Date.now();
+export const T0 = Date.now();
 const phase = (now = Date.now()) => ((now - T0) / 1000) % CYCLE_S;
 // With a cmux demo up (src/demo-cmux.mjs) the synthetic agents point at real
 // demo panes, and what those panes show drives their state.
@@ -37,6 +37,9 @@ const hhmm = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit
 
 // scripted incident windows (seconds into the cycle)
 const FAIL_AT = 20, HEAL_AT = 38, GREEN_AT = 44, INPUT_AT = 60, INPUT_END = 110, CLOSE_AT = 90;
+// guardrails beat: an agent's production deploy is gated, waits on the owner, runs once on approval
+export const GATE_AT = 70, GATE_APPROVE_AT = 100;
+export const DEMO_GATE = { agent: 'app-resident', command: 'vercel deploy --prod', cwd: '~/my-app' };
 
 function job(label, name, domain, status, detail, schedule, extra = {}) {
   return { label, name, domain, status, detail, schedule, logAvailable: label.startsWith('com.') || label.startsWith('cron:'), ...extra };
@@ -182,6 +185,8 @@ export function demoBeats(prevNow, now) {
   if (crossed(GREEN_AT + 1)) out.push({ kind: 'sys', text: 'Hourly sync healthy again — no page needed', success: 'a failed Hourly sync run and restarted it' });
   if (crossed(INPUT_AT)) out.push({ kind: 'bad', text: 'fix-weekly-export NEEDS INPUT: re-run the export against production?' });
   if (crossed(CLOSE_AT)) out.push({ kind: 'sys', text: 'mission-control: triage pass clean — 0 escalations', closeTask: true });
+  if (crossed(GATE_AT)) out.push({ kind: 'bad', text: `guardrails: ${DEMO_GATE.agent} tried \`${DEMO_GATE.command}\` — not run, waiting on the owner`, gate: 'file' });
+  if (crossed(GATE_APPROVE_AT)) out.push({ kind: 'good', text: 'demo: the owner approved the gate on the phone → it ran once, receipt on the task', gate: 'approve' });
   return out;
 }
 

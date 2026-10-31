@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-31
+
+The first stable release. Its headline is **Guardrails**: an agent's irreversible actions wait for your approval, run once, and leave a receipt. The release also adds a written security model, backup and restore, and a context autopilot that compacts agents before they run out of room.
+
+**Upgrading from a beta:**
+1. Follow [docs/INSTALL.md §7b](docs/INSTALL.md#7b-upgrading): take a backup, `git pull`, `./install.sh`, restart the board.
+2. `./install.sh` adds the new example files (such as `overlay/policy.json`) and never overwrites yours.
+3. To turn on the new settings in an existing `overlay/config/jobs.mjs`, copy them from `examples/config/jobs.mjs`: `CONTEXT.warnPct/compactPct/forcePct` and `SETTINGS.contextAutopilot`.
+4. Guardrails need their hook installed once: `scripts/guardrails-install.sh --apply [--codex]`. Then restart the agent sessions.
+5. Tested versions are in [docs/VERSIONS.md](docs/VERSIONS.md). One-click upgrades come in 1.1.
+
+### Added
+- **Context autopilot.** The board compacts your agents before their context runs out, instead of the CLI's own auto-compact cutting in mid-thought.
+  - At 70% it asks the agent to save its state file. At 80%, once the save has landed, it types `/compact` at the agent's next idle moment. At 90% it compacts even without a save and tells Mission Control.
+  - After the compaction it tells the agent to re-read its state file and carry on with its task.
+  - It never types into a busy pane, a dialog or a half-typed draft. One try per 10 minutes, and after 3 failed tries it stops and says so.
+  - `SETTINGS.contextAutopilot` (`mode: 'off' | 'observe' | 'on'`, `only`, `exclude`), off in the examples. The gauge colours now follow the thresholds (amber 70, red 80).
+- **Gate receipts say where you decided:** board, phone, Dock, the WAITING ON YOU strip, the CLI or a recorded pane answer (`surface` / `surfaces` on each gate; also shown in `task.sh audit`).
+- **`zulu backup` / `zulu restore`.** Backup writes your ledger, state and config (`data/` + `overlay/`) to one tarball with a manifest of hashes.
+  - It's lean by default: from `data/handoffs/` only text files up to 1 MB. `--full` keeps media and big exports too.
+  - Every backup prints its size and what it left out.
+  - Left out: the decision token, gate grants and earlier backups always; secrets unless you add `--with-secrets`.
+  - Restore shows what would change and checks every hash. It refuses a backup from a newer schema; migrating an older one forward arrives with the 1.1 upgrade migrations (1.0 has one schema). `--apply` takes a safety backup first. Secrets come back only with `--with-secrets` on the restore too.
+- **[docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md):** who is trusted, what the Guardrails gate stops and what it doesn't, the decision token, network exposure and secrets. The README gains a Guardrails section.
+- **Guardrails: owner gates for irreversible agent actions** ([docs/GUARDRAILS.md](docs/GUARDRAILS.md)). These commands no longer run when an agent tries them: merges, pushes to protected branches or public remotes, deploys, secret changes, a guarded script's `--commit`/`--apply` run (dry run required first), outbound sends, MCP store writes, deletes outside the working tree, schedule changes and edits to the gate itself. Each waits for the owner on the ledger. The owner approves the exact call on the board or a phone: a shell command's text, or a tool's whole input such as an MCP mutation's arguments or an edit's old and new text. It runs once on a single-use grant that never leaves the board. Every attempt, decision and run is a receipt on the task (`gates[]`, `task.sh audit`), and a task can't close with a gate unresolved.
+  - Claude Code and Codex, through a PreToolUse hook (`scripts/guardrails-install.sh`).
+  - The policy lives in `policy.json`, rendered into `POLICY.md`, with observe mode and per-agent pilot enforcement.
+  - Fail closed: if the board is down, gated calls are denied, and calls that aren't gated pass in milliseconds.
+  - Demo mode shows a gate.
+  - **Program go:** one owner approval of kind `program` on a task lets that task's *standing* classes run without a per-action tap, each with a receipt. By default those are merges into confirmed-private repos and local service loads. Revocable from the board or `task.sh revoke-go`; it ends at task close.
+  - **Decide anywhere:**
+    - a pinned *WAITING ON YOU* strip at the top of the board, the Dock view and the phone, with a "(N)" count in the tab title;
+    - the count in the phosphor sidebar;
+    - `task.sh gate N gK approve|decline` from the owner's own terminal (gated if an agent runs it).
+  - **Judged where it runs:** each command is judged in the folder it really runs in (`cd …`, `git -C`). Outside any git repo, `rm -r` gates.
+  - **Fewer false alarms:** `--help`/`--version`, and an agent cleaning its own scratch folder, aren't gated.
+  - **Scripts that write without a flag** can be listed in `@guardedScripts`, which gates them on every run.
+  - **Approvals reach the agent:**
+    - the notice is delivered inside a busy session and can't be replaced by a later message about the same task;
+    - the agent's sidebar shows `⛨ gK APPROVED — run it` until it runs;
+    - approvals last 120 minutes.
+    
+    One that expires unused is never re-armed: the next attempt asks again and says it was approved before.
+
 ## [0.1.0-beta.4] - 2026-10-31
 
 ### Added
@@ -149,7 +193,8 @@ First public release.
 - Publish manifest (checked locally with `scripts/publish.mjs --check`), and the scrub gate
   and gitleaks in CI.
 
-[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v0.1.0-beta.4...HEAD
+[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v1.0.0
 [0.1.0-beta.4]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.2

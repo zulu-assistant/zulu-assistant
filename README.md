@@ -27,6 +27,23 @@ its row rises to the top of ATTENTION, and when it's answered the row drops back
 
 <sub>Recorded from `./install.sh --demo --cmux`: its own cmux window, six scripted fake agents, every name synthetic.</sub>
 
+## Guardrails: a human gate and a receipt for every irreversible action
+
+Your agents work on their own, until they reach something that can't be taken back: a merge, a push to
+`main`, a deploy, a script's `--commit` run, a message sent, a store write, a delete outside the
+working tree. Then **the command doesn't run.** It waits for you on the board, your phone or your
+terminal, showing the exact command, folder and agent. One approval lets that exact call run **once**,
+and the task keeps a receipt of the attempt, your decision and the run.
+
+- **Enforced by the system, not the model's judgment:** a hook in every Claude Code and Codex session.
+  It fails closed: board down means gated calls are denied.
+- **Single-use approvals** bound to the exact command (or the tool's whole input). An approval can't be
+  reused or stretched to a different command.
+- **A program go**, when you want one: approve a task's plan once, and its routine merges and local
+  service loads run without a tap. Each still leaves a receipt.
+- **Honest limits:** it stops your agents' own mistakes, not a hostile program running as you. See
+  [docs/GUARDRAILS.md](docs/GUARDRAILS.md) and [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md).
+
 ## The problem
 
 - **Background jobs fail silently.** A LaunchAgent stops loading, a cron line
@@ -46,6 +63,7 @@ its row rises to the top of ATTENTION, and when it's answered the row drops back
 | **Escalation ladder** | A cmux notification fires at once. Email follows after 30 red minutes, then an SMS webhook for the critical set, and an 08:00 digest each day. A dead-man's switch covers the board itself. |
 | **Self-heal** | Covers a lost cmux socket password, sessions that fail to restore after a reboot, and disk pressure (using only the levers you bless). Each one leaves a ticker line. |
 | **Mission Control** | A master agent in a pinned cmux workspace runs **residents** (one long-lived agent per repo) and **workers** (one per task). Your `POLICY.md` decides what they may do alone. |
+| **Guardrails** | Irreversible agent actions wait for your approval and run once on it, with a receipt on the task. Policy in `policy.json`, rendered into `POLICY.md`. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md). |
 | **Agent Mesh** | A directory, a task ledger and a delivery rule. Agents hand work to each other as tasks and never type into a busy pane. Approvals happen on the board. |
 | **Team chat intake** (optional) | Teammates who never open a terminal post requests in Slack. Each one becomes a ledger task routed through Mission Control, which picks the owner agent and holds every approval for you. Agents' questions come back in the thread, and a reply unblocks the task. Approvals, publishes and credentials never come from chat. Setup: [docs/INSTALL.md §3c](docs/INSTALL.md#3c-optional-team-chat-intake-slack). |
 | **Brain** | Wires in three memories: an Obsidian vault (org memory), Graphify (code memory) and Claude memory files (agent memory). See [docs/BRAIN.md](docs/BRAIN.md). |
@@ -98,13 +116,17 @@ the better choice, are in [docs/WHY-NOT-TMUX.md](docs/WHY-NOT-TMUX.md).
   all.
 - **Policy, not vibes.** `POLICY.md` belongs to you. Anything paid, outward-facing or
   destructive escalates to you, every time.
-- **Approvals on the board.** Agents can *request* approval. Only the board's WORK
-  panel can grant it, using a per-install decision token.
+- **Approvals are yours.** Agents can *request* approval. Only you grant it: on the board,
+  your phone or your own terminal, using a per-install decision token. Irreversible actions
+  are **gated by the system** (Guardrails): they don't run until you approve that exact call, once.
 - **Escalate, never guess.** Agents never auto-answer a trust dialog. They deliver
   messages only into a ready pane. Anything else is queued and reported.
 - **Network.** The board serves localhost and your Tailscale range only. The LAN gets 403.
 - **Clean by construction.** Every file is classified in `publish/manifest.json`, and a
-  scrub gate plus gitleaks run in CI. See [SECURITY.md](SECURITY.md).
+  scrub gate plus gitleaks run in CI. See [SECURITY.md](SECURITY.md) and the full
+  [security model](docs/SECURITY-MODEL.md).
+- **Your state is yours.** `zulu backup` puts your ledger and config in one tarball (secrets only if
+  you ask), and `zulu restore` checks it before changing anything.
 
 ## Requirements
 

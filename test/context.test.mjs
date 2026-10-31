@@ -88,13 +88,13 @@ test('Codex tail: last token_count total_tokens vs model_context_window (cached 
   assert.equal(r.window, 258400);
 });
 
-test('windows: current models 1M, Haiku 200K, [1m] forces 1M; bands 60/80', () => {
+test('windows: current models 1M, Haiku 200K, [1m] forces 1M; bands 70/80', () => {
   const W = { default: 1000000, 'claude-haiku-4-5': 200000, 'claude-opus-5': 1000000 };
   assert.equal(windowFor('claude-opus-5-5', W), 1000000);
   assert.equal(windowFor('claude-haiku-4-5-20251001', W), 200000);
   assert.equal(windowFor('claude-haiku-4-5[1m]', W), 1000000);
   assert.equal(windowFor('something-new', W), 1000000);
-  assert.deepEqual([band(59), band(60), band(79), band(80)], ['ok', 'amber', 'amber', 'red']);
+  assert.deepEqual([band(69), band(70), band(79), band(80)], ['ok', 'amber', 'amber', 'red']);
   assert.deepEqual(gauge({ tokens: 120077, window: 1000000, source: 'claude' }).pct, 12);
 });
 
@@ -112,10 +112,12 @@ const T = (id, status, checklist = {}) => ({ id, status, checklist: { docs_updat
 const G = (pct) => ({ pct, band: band(pct), ctxTokens: pct * 10000, window: 1000000 });
 
 test('withContext: bar value = context; label keeps input + task; ctx pill by band', () => {
-  const a = withContext(ownerPill([T(14, 'open')]), G(61));
-  assert.deepEqual(a.progress, { value: 0.61, label: 'ctx 61% · #14 OPEN · 0/4' });
+  const a = withContext(ownerPill([T(14, 'open')]), G(71));
+  assert.deepEqual(a.progress, { value: 0.71, label: 'ctx 71% · #14 OPEN · 0/4' });
   assert.equal(a.pill.value, '#14 OPEN');
-  assert.deepEqual(a.ctxPill, { key: 'ctx', value: '61%', icon: 'gauge.medium', color: '#E5E500' });
+  assert.deepEqual(a.ctxPill, { key: 'ctx', value: '71%', icon: 'gauge.medium', color: '#E5E500' });
+  // the context autopilot's phase rides in the label (#351)
+  assert.equal(withContext(ownerPill([T(14, 'open')]), { ...G(72), autopilot: 'saving state' }).progress.label, 'ctx 72% · saving state · #14 OPEN · 0/4');
   const b = withContext(withInput(ownerPill([]), 'permission'), G(85));
   assert.equal(b.progress.label, '▲ INPUT · ctx 85% · permission');
   assert.equal(b.ctxPill.color, '#FF4444');

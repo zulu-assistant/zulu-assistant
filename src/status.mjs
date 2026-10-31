@@ -14,6 +14,16 @@ import { readStatsSync, repoCards } from './repo-stats.mjs';
 import { driftCard, readStateSync as readDriftSync } from './release-drift.mjs';
 import { brainCard, readStateSync as readBrainSync } from './brain.mjs';
 import { viewCards, readStateSync as readViewSync } from './view-watch.mjs';
+
+const GATE_CARD = fileURLToPath(new URL('../data/guardrails-card.json', import.meta.url));
+export function readGateCardSync(file = GATE_CARD) { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } }
+/** Guardrails card (pure): amber while a gate waits > 30 min or the hook is missing; red only for a broken policy. */
+export function gateCard(c, now = Date.now()) {
+  if (!c) return null;
+  const stale = now - (c.at || 0) > 10 * 60e3;
+  const status = stale ? 'stale' : c.status === 'failed' && /policy invalid/.test(c.detail || '') ? 'failed' : c.status === 'ok' ? 'ok' : 'warn';
+  return { label: 'guardrails', name: 'Guardrails (owner gates)', domain: 'infra', schedule: 'every poll', logAvailable: false, status, detail: c.detail };
+}
 import { linkHealth } from './intake.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -423,6 +433,9 @@ export async function snapshot() {
   // vault + graph upkeep (SETTINGS.brain): amber only, never on the alert ladder
   const brain = brainCard(readBrainSync(), SETTINGS.brain, now.getTime());
   if (brain) jobs.push(brain);
+  // guardrails (docs/GUARDRAILS.md): pending gates, hook installed, policy health — written by the server each poll
+  const gate = gateCard(readGateCardSync(), now.getTime());
+  if (gate) jobs.push(gate);
   // database views (SETTINGS.viewWatch): amber only, never on the alert ladder
   jobs.push(...viewCards(readViewSync(), SETTINGS.viewWatch, now.getTime()));
 

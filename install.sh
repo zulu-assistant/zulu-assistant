@@ -5,6 +5,8 @@
 #   ./install.sh --dry-run        show what the full install would do, write nothing
 #   ./install.sh setup            the guided part: your accounts, engine choice, what to watch, alerts, vault …
 #   ./install.sh doctor           write a redacted diagnostic bundle (attach it to a beta-feedback issue)
+#   ./install.sh backup [--out f] [--with-secrets]   data/ + overlay/ in one tarball (secrets left out by default)
+#   ./install.sh restore <f> [--apply]               what a backup would change; --apply restores (safety backup first)
 #   ./install.sh init             copy examples/ → overlay/ (never overwrites your files)
 #   ./install.sh --demo           board with synthetic data on :3210 — Node 22 only, no launchd/cmux
 #   ./install.sh --demo --cmux    …plus a ZULU DEMO window in cmux: fake agent panes, live sidebar chrome
@@ -61,6 +63,7 @@ do_init() {
     local rel="${f#examples/}" dst="overlay/${f#examples/}"
     [[ "$rel" == vault/* || "$rel" == claude/* ]] && continue      # brain templates: see --brain / docs/BRAIN.md
     [[ "$rel" == slack/* ]] && continue                            # pasted into api.slack.com, not config: docs/INSTALL.md 3c
+    [[ "$rel" == */guardrails-hooks.json.tmpl ]] && continue      # hook templates: scripts/guardrails-install.sh renders them
     if [[ -e "$dst" ]]; then continue; fi
     n=$((n + 1))
     if [[ -n "$dry" ]]; then say would "create $dst"; else mkdir -p "$(dirname "$dst")"; cp "$f" "$dst"; say done "create $dst"; fi
@@ -225,7 +228,8 @@ case "${1:-}" in
   check|verify) exec "$ROOT/scripts/bootstrap.sh" "$@" ;;
   setup) shift; need_node; exec "$NODE_BIN" "$ROOT/scripts/setup.mjs" "$@" ;;
   doctor) shift; need_node; do_doctor "$@" ;;
-  -h|--help|help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+  backup|restore) need_node; exec "$NODE_BIN" "$ROOT/scripts/backup.mjs" "$@" ;;
+  -h|--help|help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
   ""|--dry-run|--yes|-y|--force|--deadman|--sandbox) do_full "$@" ;;
   *) echo "unknown command: $1 (./install.sh --help)"; exit 2 ;;
 esac

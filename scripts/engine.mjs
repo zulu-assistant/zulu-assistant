@@ -16,7 +16,7 @@
 // run in Codex's workspace-write sandbox with on-request approvals (interactive)
 // or the same sandbox with approvals off (headless triage — it can only write in
 // the repo; network is enabled because the board is on localhost).
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { resolve } from '../src/config.mjs';
@@ -74,4 +74,4 @@ function main() {
   process.exit(2);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main();

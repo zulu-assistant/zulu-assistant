@@ -182,9 +182,26 @@ queued for chat threads).
   the `task` pill yourself — change the task and the board repaints it.
 - **Progress bar = context used** value = % of the model's
   context window the session's last turn used; label = `[▲ INPUT · ]ctx n% ·
-  <task>`; a `ctx` pill shows the % colored by band (amber ≥60, red ≥80).
-  Residents in the red band should checkpoint their state file and /compact
-  at the next idle moment (`GET /api/agents` → `contextRed`).
+  <task>`; a `ctx` pill shows the % colored by band (amber ≥ `CONTEXT.warnPct`
+  70, red ≥ `compactPct` 80; `GET /api/agents` → `contextRed`).
+- **Context autopilot** (`src/context-autopilot.mjs`, `SETTINGS.contextAutopilot`
+  `{ mode: off|observe|on, only, exclude, continuity }`): the board runs the
+  save → compact → resume sequence itself.
+  - **≥70%:** one message per episode: finish the step, update your state file
+    (`<repo>/.claude/RESIDENT-STATE.md`, or the `continuity` entry; agents without
+    one post a task comment). The save is the signal; no reply is needed. The
+    label shows `saving state`.
+  - **≥80%:** at the next READY pane (the delivery rule: never busy, a dialog or a
+    draft) and once the state file (or an owner comment) is newer than the warn,
+    the board types `/compact`. The label shows `compacting`.
+  - **≥90%:** the same, even without a fresh save, and Mission Control is told.
+  - **Compaction seen** (Claude: the post-compact estimate; Codex: the % drops):
+    the board sends "re-read <state file> and continue with #N" (the gate focus,
+    or your single in-progress task).
+  - **Limits:** one attempt per 10 min; no compaction 10 min after an attempt =
+    a failure; after 3 the board stops (`compact failed`) and tells Mission
+    Control. Every action is a ticker line and a board comment on the focus task.
+    State is in `data/context-state.json`. `observe` writes only "would …" ticker lines.
   After a compaction the gauge is an estimate (`compacted · est`) until the
   session's next turn — so a just-compacted resident drops out of the red band
   immediately.

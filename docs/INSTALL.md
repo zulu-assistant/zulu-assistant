@@ -236,6 +236,21 @@ Full behaviour (dedupe, field contracts, plan-first, posting files back, writing
 transport): [CHAT-INTAKE.md](CHAT-INTAKE.md). To turn it off:
 `scripts/chat-intake-install.sh --remove`.
 
+## 3d. Guardrails: owner gates for irreversible actions
+
+Agents' merges, protected pushes, deploys, `--commit` runs, sends, store writes
+and deletes wait for your approval on the board, and run once. Install the hook
+yourself (an agent changing its own hooks is itself gated):
+
+```bash
+scripts/guardrails-install.sh            # what would change
+scripts/guardrails-install.sh --apply    # + --codex for Codex panes
+```
+
+Restart the agent sessions to pick it up. Start in `"mode": "observe"` in
+`overlay/policy.json` if you want a log of what *would* be gated before anything
+is blocked. Everything else: [GUARDRAILS.md](GUARDRAILS.md).
+
 ## 4. Manual steps
 
 No script can do these. Do them early; some need an app relaunch.
@@ -319,6 +334,14 @@ Then start Mission Control: `./install.sh mission-control`.
 
 ## 7. Rollback
 
+**Before a big change, take a backup:** `./install.sh backup` (or `zulu backup`) writes your ledger, state and config
+(`data/` + `overlay/`) to `data/backups/zulu-backup-<time>.tgz`. Secrets are left out unless you add `--with-secrets`.
+It's lean by default: from `data/handoffs/` it keeps only text files up to 1 MB (reports, plans, notes), and it prints its size and
+what it left out. `--full` keeps media and big exports too.
+`zulu restore <file>` shows what would change; `--apply` restores it, taking a safety backup of the current state first. Secrets come back only with
+`--with-secrets` on the restore too. A backup from a newer version is refused (upgrade first). Moving an older backup forward needs migrations,
+which arrive with one-click upgrades in 1.1; until then a backup from another schema version is refused too. 1.0 has a single schema, so any 1.0 backup restores.
+
 | What | Undo |
 |---|---|
 | A LaunchAgent | `launchctl bootout gui/$(id -u)/<label>` and remove `~/Library/LaunchAgents/<label>.plist` |
@@ -327,6 +350,20 @@ Then start Mission Control: `./install.sh mission-control`.
 | Workspace colours / descriptions | set `"chrome": false` in `overlay/config/mesh.json`, then `cmux workspace-action --workspace <id> --action clear-color` (or `clear-description`) |
 | Any file `--force` replaced | the `<file>.bak-<ts>` next to it |
 | Board code | `git revert <sha>`, then `launchctl kickstart -k gui/$(id -u)/<prefix>.master-console` |
+
+## 7b. Upgrading
+
+1.0 upgrades by hand. A one-click UPDATE button, with tested-version checks and migrations, is coming in 1.1.
+
+```sh
+./install.sh backup                       # a restore point first
+git pull --ff-only                        # the new release
+./install.sh                              # re-runs the idempotent install steps (never overwrites your overlay/)
+launchctl kickstart -k gui/$(id -u)/<prefix>.master-console   # restart the board on the new code
+./install.sh verify
+```
+
+Read the release's CHANGELOG section first. It names anything you need to do by hand. The versions each release was tested with are in [VERSIONS.md](VERSIONS.md).
 
 ## 8. Never do
 

@@ -21,6 +21,7 @@ import { cmux, classifyScreen, parseCreatedWorkspace, isDemoWorkspace, DEMO_TITL
 import { parseWindows, acrossWindows } from './cmux-windows.mjs';
 import { applyChrome, applyPills } from './chrome.mjs';
 import { demoDirectory, demoContext, useDemoPanes, observeDemoScreens } from './demo.mjs';
+import { realpathSync } from 'node:fs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const STATE_FILE = path.join(ROOT, 'data', 'demo-cmux-state.json');
@@ -221,7 +222,7 @@ export async function demoDown({ run = cmux, file = STATE_FILE, chromeFile = CHR
 }
 
 // CLI: node src/demo-cmux.mjs up [--port N] | down
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const [cmd] = process.argv.slice(2);
   const i = process.argv.indexOf('--port');
   const port = i > 0 ? Number(process.argv[i + 1]) : 3210;

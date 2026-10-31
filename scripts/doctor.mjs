@@ -11,6 +11,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { ROOT, run, engineStatus, shellEnv, readStateSync, summarize } from '../src/setup.mjs';
 import { parseEnv } from '../src/config.mjs';
+import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 export function redactor({ secrets = {}, home = os.homedir(), user = os.userInfo().username, host = os.hostname() } = {}) {
   const literal = [...Object.values(secrets).filter((v) => v && v.length >= 4), host, host.replace(/\.local$/, '')]
@@ -77,4 +79,4 @@ async function main() {
   console.log('read it before attaching it to an issue — remove anything you would rather not share');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main().catch((e) => { console.error(e.message); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main().catch((e) => { console.error(e.message); process.exit(1); });

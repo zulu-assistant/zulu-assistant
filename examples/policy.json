@@ -1,0 +1,315 @@
+{
+  "_doc": "Guardrails policy (docs/GUARDRAILS.md). Gated tool calls wait for the owner on the ledger and run once on approval. mode: enforce | observe (log only) | off. enforceFor: agent names, or * for all. standing: true = a program go on the task approves this class without a per-action tap (docs/GUARDRAILS.md). lists: owner-specific names the rules refer to with @name.",
+  "version": 1,
+  "mode": "enforce",
+  "enforceFor": [
+    "*"
+  ],
+  "defaults": {
+    "ttlMinutes": 120,
+    "approver": "owner",
+    "requireDryRun": false
+  },
+  "classes": [
+    {
+      "id": "merge",
+      "label": "Merge a pull request",
+      "standing": true,
+      "rules": [
+        {
+          "bin": "gh",
+          "args": [
+            "pr",
+            "merge"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "push",
+      "label": "Push to a protected branch or public remote, force-push, push tags or delete a ref",
+      "rules": [
+        {
+          "bin": "git",
+          "args": [
+            "push"
+          ],
+          "when": "pushProtected",
+          "protectedRefs": [
+            "main",
+            "master"
+          ],
+          "allowRefs": [
+            "checkpoint/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deploy",
+      "label": "Deploy to production, or touch a paid/outbound job",
+      "rules": [
+        {
+          "bin": "vercel",
+          "notArgs": [
+            [
+              "env",
+              "ls"
+            ],
+            [
+              "ls"
+            ],
+            [
+              "whoami"
+            ],
+            [
+              "logs"
+            ],
+            [
+              "inspect"
+            ],
+            [
+              "list"
+            ]
+          ]
+        },
+        {
+          "bin": "launchctl",
+          "argsAny": [
+            "bootstrap",
+            "bootout",
+            "load",
+            "unload",
+            "enable",
+            "disable",
+            "kickstart"
+          ],
+          "labels": "@paidOrOutbound"
+        },
+        {
+          "bin": "shopify",
+          "argsAny": [
+            "deploy",
+            "push",
+            "publish"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deploy-local",
+      "label": "Load or unload a service on this machine",
+      "standing": true,
+      "rules": [
+        {
+          "bin": "launchctl",
+          "argsAny": [
+            "bootstrap",
+            "bootout",
+            "load",
+            "unload",
+            "enable",
+            "disable"
+          ],
+          "unlessLabels": "@paidOrOutbound"
+        }
+      ]
+    },
+    {
+      "id": "env",
+      "label": "Change production configuration or secrets",
+      "rules": [
+        {
+          "bin": "gh",
+          "args": [
+            "secret"
+          ],
+          "argsAny": [
+            "set",
+            "delete"
+          ]
+        },
+        {
+          "bin": "gh",
+          "args": [
+            "variable"
+          ],
+          "argsAny": [
+            "set",
+            "delete"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "guarded",
+      "label": "Run a script on the guarded list (it writes without a flag)",
+      "rules": [
+        {
+          "scriptIn": "@guardedScripts",
+          "unlessFlags": "@dryFlags"
+        }
+      ]
+    },
+    {
+      "id": "write",
+      "label": "A guarded script's write form",
+      "requireDryRun": true,
+      "rules": [
+        {
+          "script": true,
+          "flagsAny": [
+            "--commit",
+            "--apply",
+            "--write",
+            "--execute",
+            "--confirm",
+            "--activate",
+            "--live",
+            "--send",
+            "--go"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "outbound",
+      "label": "Send a message or post outside the system",
+      "rules": [
+        {
+          "bin": "curl",
+          "method": "POST",
+          "urlAny": [
+            "slack.com/api/chat.",
+            "slack.com/api/files.",
+            "api.twilio.com",
+            "a.klaviyo.com/api/campaign-send"
+          ]
+        },
+        {
+          "tool": "^mcp__.*__(send_message|reply|forward)$"
+        }
+      ]
+    },
+    {
+      "id": "store",
+      "label": "Write to the store through an MCP tool",
+      "rules": [
+        {
+          "tool": "^mcp__.*Shopify__(graphql_mutation|create-.*|update-.*|set-inventory|bulk-.*|add-to-collection|publish-.*|upload-.*)$"
+        }
+      ]
+    },
+    {
+      "id": "delete",
+      "label": "Delete outside the working tree, drop data, delete repos",
+      "rules": [
+        {
+          "bin": "rm",
+          "flagsAny": [
+            "-r",
+            "-R",
+            "--recursive"
+          ],
+          "when": "outsideRepo"
+        },
+        {
+          "bin": "find",
+          "flagsAny": [
+            "-delete",
+            "-exec",
+            "-execdir",
+            "-ok",
+            "-okdir"
+          ],
+          "when": "outsideRepo"
+        },
+        {
+          "sql": "\\b(drop|truncate)\\s+(table|schema|database)\\b"
+        },
+        {
+          "bin": "gh",
+          "args": [
+            "repo",
+            "delete"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "schedule",
+      "label": "Change scheduled jobs",
+      "rules": [
+        {
+          "bin": "crontab",
+          "unlessFlags": [
+            "-l"
+          ]
+        },
+        {
+          "pathWrite": "~/Library/LaunchAgents/**"
+        }
+      ]
+    },
+    {
+      "id": "self",
+      "label": "Change or read the gate itself",
+      "rules": [
+        {
+          "pathAny": [
+            "@guardSecrets"
+          ]
+        },
+        {
+          "pathWrite": "@guardConfig"
+        },
+        {
+          "textAny": [
+            "gate_decide",
+            "x-mesh-decision"
+          ]
+        },
+        {
+          "scriptIn": [
+            "**/task.sh"
+          ],
+          "args": [
+            "gate"
+          ]
+        },
+        {
+          "scriptIn": [
+            "**/mesh-cli.mjs"
+          ],
+          "args": [
+            "task",
+            "gate"
+          ]
+        }
+      ]
+    }
+  ],
+  "lists": {
+    "paidOrOutbound": [],
+    "publicRemotes": [],
+    "deployOnPush": [],
+    "guardedScripts": [],
+    "dryFlags": [
+      "--dry-run",
+      "-n",
+      "--check",
+      "--plan"
+    ],
+    "guardSecrets": [
+      "<repo>/data/guardrails/**",
+      "<repo>/data/mesh-decision-token"
+    ],
+    "guardConfig": [
+      "<repo>/overlay/policy.json",
+      "<repo>/policy.json",
+      "<repo>/examples/policy.json",
+      "~/.claude/settings.json",
+      "~/.codex/hooks.json"
+    ]
+  }
+}

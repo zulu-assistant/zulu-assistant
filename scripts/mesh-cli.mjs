@@ -46,11 +46,11 @@ function parse(args) {
 
 const die = (msg, code = 1) => { console.error(`mesh: ${msg}`); process.exit(code); };
 
-async function api(method, p, body) {
+async function api(method, p, body, extraHeaders = {}) {
   let r;
   try {
     r = await fetch(BOARD + p, {
-      method, headers: { 'content-type': 'application/json' },
+      method, headers: { 'content-type': 'application/json', ...extraHeaders },
       body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000),
     });
   } catch (e) { die(`board unreachable at ${BOARD} (${e.message}) — is the board LaunchAgent (<prefix>.master-console) running?`); }
@@ -86,12 +86,24 @@ const HELP = `usage:
   task.sh block <id> --on <ids|owner> ["why"]
   task.sh plan <id> "<plan>"   (plan-first requests: posts the plan, then the task awaits the owner's review on the board)
   task.sh chat-file <id> <data/handoffs/…file> ["comment"] [--title "<t>"]   (chat-filed tasks: post your file in the thread)
-  task.sh approve-request <id> --policy "<POLICY.md ESCALATE line>" ["what exactly"]
+  task.sh approve-request <id> --policy "<POLICY.md ESCALATE line>" ["what exactly"] [--program]
+                                     --program: ask for a PROGRAM GO — once approved, the task's standing gate
+                                     classes (merges into private repos, local launchd loads) run without a tap
+  task.sh revoke-go <id> ["why"]     end the task's program go (it also ends when the task closes)
   task.sh approved-in-pane <id> "<what the owner said, when>" [--decline]
                                      record an answer the owner gave in your pane
   task.sh check <id> <item>...   (items: SETTINGS.ledger.checklist — mesh-cli.mjs checklist)
   task.sh close <id> --handoff <report path> [--pr <url>] [--vault <note>] [--repo <path>] [--checklist all|a,b,..] ["summary"]
                 [--no-vault "<reason>"] [--no-graph "<reason>"]   (when the board verifies vault_synced / graphify_updated)
+                [--no-gates "<reason>"]   (guardrails: waive gates_resolved)
+  task.sh focus <id>      (guardrails: the task your gated commands' receipts land on; claim/start set it
+                          only when you haven't set one yourself on a live task)
+  task.sh gate <id> <gate> approve|decline ["reason"]
+                          OWNER ONLY, from the owner's own shell (e.g. a ! line): decide a gate with the
+                          board's decision token. An agent running this is itself gated (class self).
+  task.sh audit <id> [--json]   (guardrails: every gate request, decision and run on the task)
+  task.sh gate-approved <id> <gate> "<what the owner said, where>" [--decline]
+                                     mission-control only: record a gate answer the owner gave in a pane
   task.sh assign <id> <agent> | cancel <id> ["why"] | reopen <id>
   task.sh set-requester <id> <agent> "<why>"   (mission-control only: fix a misattributed requester)
   task.sh list [--owner <agent>] [--status open,blocked,..|live] | show <id> | mine
@@ -140,7 +152,9 @@ async function task(sub, pos, flags) {
       return console.log(`#${id}: ${r.queued} queued for the chat thread (the intake posts it within ~10 s)`);
     }
     case 'approve-request':
-      return patch({ op: 'request_approval', policy_item: flags.policy, text: note(1) });
+      return patch({ op: 'request_approval', policy_item: flags.policy, text: note(1), ...(flags.program ? { kind: 'program' } : {}) });
+    case 'revoke-go':
+      return patch({ op: 'revoke_go', text: note(1) });
     case 'approved-in-pane':
       // `--decline "<text>"` parses the text as the flag's value — accept it either way
       return patch({ op: 'record_decision', decision: flags.decline ? 'decline' : 'approve',
@@ -155,9 +169,38 @@ async function task(sub, pos, flags) {
       const waive = {};
       if (typeof flags['no-vault'] === 'string') waive.vault_synced = flags['no-vault'];
       if (typeof flags['no-graph'] === 'string') waive.graphify_updated = flags['no-graph'];
-      if (flags['no-vault'] === true || flags['no-graph'] === true) die('--no-vault / --no-graph need a reason: --no-vault "<why no vault note>"');
+      if (typeof flags['no-gates'] === 'string') waive.gates_resolved = flags['no-gates'];
+      if (flags['no-vault'] === true || flags['no-graph'] === true || flags['no-gates'] === true) die('--no-vault / --no-graph / --no-gates need a reason: --no-vault "<why no vault note>"');
       return patch({ op: 'close', checklist, links: links(flags), text: note(1), ...(Object.keys(waive).length ? { waive } : {}) });
     }
+    case 'focus': {
+      const r = await api('POST', '/api/gates/focus', { actor: await whoami(flags), task: Number(id) });
+      return console.log(`${r.agent}: gated commands now land on #${r.focus}`);
+    }
+    case 'audit': {
+      const r = await api('GET', `/api/tasks/${id}/audit`);
+      if (flags.json) return console.log(JSON.stringify(r, null, 2));
+      if (!r.rows.length) return console.log(`#${id}: no gates`);
+      for (const x of r.rows) console.log(`${String(x.at).replace('T', ' ').slice(0, 19)}  ${x.gate.padEnd(4)} ${String(x.event).padEnd(12)} ${String(x.cls).padEnd(9)} ${x.actor}${x.via ? ` (${x.via})` : ''}\n      ${x.command}  [${x.cwd}]${x.reason ? `\n      reason: ${x.reason}` : ''}`);
+      return;
+    }
+    case 'gate': {
+      // the owner's terminal decision: same token, same rules as the board's RUN ONCE / DECLINE.
+      // No actor is sent — a request carrying an agent identity is refused (condition H).
+      const [gate, decision] = [pos[1], pos[2]];
+      if (!gate || !['approve', 'decline'].includes(decision)) die('usage: task.sh gate <task> <gate> approve|decline ["reason"]');
+      const tokenFile = new URL('../data/mesh-decision-token', import.meta.url);
+      const token = (await readFile(tokenFile, 'utf8').catch(() => '')).trim();
+      if (!token) die('no decision token in data/mesh-decision-token (is this the board\'s checkout, and has the board run once?)');
+      const r = await api('PATCH', `/api/tasks/${id}`, { op: 'gate_decide', gate, decision, ...(pos[3] ? { reason: pos[3] } : {}) },
+        { 'x-mesh-decision': token, 'x-mesh-via': 'cli' });
+      const g = (r.task.gates || []).find((x) => x.id === gate);
+      return console.log(`#${id} ${gate}: ${g?.status || decision}${g?.expires_at && decision === 'approve' ? ` (runs once, by ${String(g.expires_at).slice(11, 16)}Z)` : ''}`);
+    }
+    case 'gate-approved':
+      if (!pos[1]) die('gate-approved needs the gate id: task.sh gate-approved <task> <gate> "<what the owner said>" [--decline]');
+      return patch({ op: 'gate_record', gate: pos[1], decision: flags.decline ? 'decline' : 'approve',
+        text: note(2) ?? (typeof flags.decline === 'string' ? flags.decline : undefined) });
     case 'assign':
       return patch({ op: 'assign', owner: pos[1], text: note(2) });
     case 'set-requester':   // mission-control only: repair a misattributed task

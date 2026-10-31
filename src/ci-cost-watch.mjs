@@ -35,7 +35,8 @@ export function due({ now, cfg, state }) {
 /** argv for the reader (pure). */
 export function ciCostArgs(root, cfg) {
   return [path.join(root, 'scripts', 'ci-cost.mjs'), '--comment', String(cfg.task),
-    ...(cfg.repos?.length ? ['--repos', cfg.repos.join(',')] : [])];
+    ...(cfg.repos?.length ? ['--repos', cfg.repos.join(',')] : []),
+    ...(Number(cfg.included) > 0 ? ['--included', String(Number(cfg.included))] : [])];   // the plan's allowance (default 2000 = Free)
 }
 
 let busy = false;

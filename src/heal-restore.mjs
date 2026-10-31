@@ -31,6 +31,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SETTINGS } from './config.mjs';
 import { acrossWindows } from './cmux-windows.mjs';
+import { realpathSync } from 'node:fs';
 
 const PW_FILE = fileURLToPath(new URL('../data/cmux-socket-password', import.meta.url));
 
@@ -363,7 +364,7 @@ export async function maybeHealFailedRestores(opts = {}) {
 // Agent Mesh — the name each live/restorable Claude session will come back
 // with (the transcript's last agent-name record; set by --name or /rename,
 // it survives --resume and `cmux restore`).
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const dryRun = process.argv.includes('--dry-run');
   const r = await maybeHealFailedRestores({ dryRun, log: dryRun ? async () => {} : postEvent });
   if (dryRun) {

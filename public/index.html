@@ -33,6 +33,12 @@
 
 <div class="notice hidden" id="notice" role="status" aria-live="polite"></div>
 
+<!-- guardrails: everything waiting on the owner, pinned at the top while anything waits (oldest first) -->
+<section class="decisions hidden" id="decisions" aria-label="decisions waiting on you">
+  <h2><span class="glyph">⛨</span> <span id="decisions-title">WAITING ON YOU</span></h2>
+  <div class="decisions-list" id="decisions-list"></div>
+</section>
+
 <section class="timeline-row" id="timeline-row">
   <h2><span class="glyph">◷</span> OPS TIMELINE <span class="feed-src">−12h ··· +12h</span></h2>
   <div class="timeline" id="timeline" aria-label="scheduled job slots, past and next 12 hours"></div>

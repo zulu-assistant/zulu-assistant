@@ -18,6 +18,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { resolve as resolveConfig } from '../src/config.mjs';
+import { realpathSync } from 'node:fs';
 
 // The denylist is DATA, resolved overlay/publish/denylist.json → examples/publish/denylist.json
 // (it names the owner's identity, so it must never ship in the public core itself).
@@ -113,4 +114,4 @@ async function main() {
   process.exit(hits.length || !leaksOk ? 1 : 0);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((e) => { console.error(e.message); process.exit(2); });
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main().catch((e) => { console.error(e.message); process.exit(2); });

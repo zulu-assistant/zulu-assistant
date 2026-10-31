@@ -60,7 +60,7 @@ test('examples/ twins: same registry exports and SETTINGS keys as the live overl
   const names = ['DOMAINS', 'ENDPOINTS', 'PROCESSES', 'CRON', 'CRON_DRIFT', 'MEM', 'CONTEXT', 'DISK', 'JOBS', 'DOCKER_CONTAINERS', 'SETTINGS'];
   for (const n of names) assert.ok(ex[n] !== undefined, `examples missing ${n}`);
   assert.deepEqual(Object.keys(ex.SETTINGS).sort(), Object.keys(live.SETTINGS).sort());
-  for (const f of ['config/agents.json', 'config/mesh.json', 'config/models.json', 'config/TRIAGE.md', 'POLICY.md', 'MISSION-CONTROL.md'])
+  for (const f of ['config/agents.json', 'config/mesh.json', 'config/models.json', 'config/TRIAGE.md', 'POLICY.md', 'MISSION-CONTROL.md', 'policy.json'])
     await readFile(path.join(ROOT, 'examples', f));                       // every overlay file has a twin
 });
 

@@ -17,6 +17,7 @@ import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CFG = path.join(os.homedir(), '.config', 'cmux');
@@ -77,6 +78,6 @@ async function main() {
   console.log('revert: node scripts/cmux-tier1-install.mjs --revert');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   main().catch((e) => { console.error(e.stdout || e.message); process.exit(1); });
 }

@@ -11,7 +11,7 @@
 // is carried over untouched. NOT touched by design (Tier 3, the owner decides):
 // app.minimalMode, app.appIcon, ~/.config/ghostty/config.
 import { readFile, writeFile, copyFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { resolve as resolveConfig } from '../src/config.mjs';
 import { domainTable } from '../src/chrome.mjs';
 import { execFileSync } from 'node:child_process';
@@ -81,4 +81,4 @@ async function main() {
   console.log(`applied. revert: node scripts/cmux-chrome-config.mjs --revert "${bak}"`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((e) => { console.error(e.message); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main().catch((e) => { console.error(e.message); process.exit(1); });

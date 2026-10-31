@@ -4,7 +4,7 @@
 class ZuluAssistant < Formula
   desc "Local ops board and agent workforce for the Mac that runs your automations"
   homepage "https://github.com/zulu-assistant/zulu-assistant"
-  url "https://github.com/zulu-assistant/zulu-assistant/archive/refs/tags/v0.1.0.tar.gz"
+  url "https://github.com/zulu-assistant/zulu-assistant/archive/refs/tags/v1.0.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000" # filled at release
   license "MIT"
   head "https://github.com/zulu-assistant/zulu-assistant.git", branch: "main"

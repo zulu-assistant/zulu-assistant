@@ -93,6 +93,18 @@ decision, the ledger settles the approval as `unrecorded` (a cancel makes it
 `withdrawn`). An approval is only ever pending while the task is in
 `needs_approval`.
 
+**Gates** ([GUARDRAILS.md](GUARDRAILS.md)) are approvals the system asks for
+itself. When an agent tries an irreversible command, the gate hook stops it and
+files a gate on the agent's task (`gates[]`). The WORK panel shows the exact
+command with **RUN ONCE / DECLINE**. An approval lets that command run once, and
+`task.sh audit <id>` lists every attempt, decision and run. Gated commands land
+on the agent's focus task (`task.sh focus <id>`; `claim`/`start` set it). A task
+can't close while a gate is pending, or after a declined gate was re-attempted,
+unless that is waived (`--no-gates "<reason>"`). A **program go**
+(`task.sh approve-request <id> --policy "…" --program`, once approved) lets the
+task's standing classes (private-repo merges, local service loads) run without a
+tap, each with a receipt. It is revocable (`task.sh revoke-go <id>`) and ends at close.
+
 ## Delivery rule
 
 A wake is one line typed into the target's pane:

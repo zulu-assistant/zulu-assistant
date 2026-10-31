@@ -15,6 +15,8 @@ Report them privately through GitHub's
 We aim to acknowledge reports within 7 days and will coordinate a fix and a
 disclosure date with you. Only the latest release and `main` are supported.
 
+**The full security model** is in [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md). It covers who is trusted, what the Guardrails gate stops and what it doesn't, the decision token, network exposure, and secrets.
+
 ## Design: read-only by default
 
 Zulu Assistant is an observer. It reads launchd, docker, the user crontab,

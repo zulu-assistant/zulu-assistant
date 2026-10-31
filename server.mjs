@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { readFile, writeFile, stat as fsStat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, SETTINGS, DOMAINS, OWNER, isOwner, isPrincipal, resolve as resolveConfig, loadSecrets, REGISTRY_FILE, PRINCIPALS } from './src/config.mjs';
+import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, CONTEXT, SETTINGS, DOMAINS, OWNER, isOwner, isPrincipal, resolve as resolveConfig, loadSecrets, REGISTRY_FILE, PRINCIPALS } from './src/config.mjs';
 import { publishLines, chatFileProblem, loadChannels, isChatTask } from './src/intake.mjs';
 import { snapshot, logPathsFor } from './src/status.mjs';
 import { tailFile, getAgentFeed } from './src/collect.mjs';
@@ -24,6 +24,8 @@ import { maybeBrain, verifyClose } from './src/brain.mjs';
 import { maybeViewWatch } from './src/view-watch.mjs';
 import { allowedSource, localOnly } from './src/guard.mjs';
 import { createLedger, MeshError, summarize, wakeMessage } from './src/tasks.mjs';
+import { createGateService } from './src/gate-service.mjs';
+import { decisionSurface } from './src/gate-ledger.mjs';
 import {
   liveDirectory, resolveTarget, deliverNow, enqueue, drainOutbox, readOutbox, formatWake, validateMessage,
   reconcile, mutateAgents, listWorkspaces, readSessionMap, readRegistry, nameDrift, ensureSessionName,
@@ -32,10 +34,12 @@ import {
 } from './src/mesh.mjs';
 import { applyChrome, applyPills, inputPrompts } from './src/chrome.mjs';
 import { collectContext } from './src/context.mjs';
+import { runAutopilot, thresholds as autopilotThresholds } from './src/context-autopilot.mjs';
+import { focusOf } from './src/gate-ledger.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   DEMO, DEMO_POLL_SECONDS, DEMO_DOMAINS, demoSnapshot, demoContext, demoDirectory, demoHistory, demoBeats,
-  demoFeed, demoLog, seedDemoLedger,
+  demoFeed, demoLog, seedDemoLedger, DEMO_GATE,
 } from './src/demo.mjs';
 import { readStar, successMoment, toastFor, recordToast } from './src/star.mjs';
 
@@ -67,6 +71,21 @@ const HISTORY_FILE = path.join(ROOT, 'data', 'history.json');
 const ledger = DEMO
   ? await seedDemoLedger(path.join(ROOT, 'data', 'demo-tasks'), createLedger)
   : createLedger(path.join(ROOT, 'data', 'tasks'));
+// Guardrails (docs/GUARDRAILS.md): the gate hook asks POST /api/gates/check; the policy is
+// overlay/policy.json → examples/policy.json; state in data/guardrails/ (demo: its own dir)
+const GATE_CARD_FILE = path.join(ROOT, 'data', DEMO ? 'demo-guardrails-card.json' : 'guardrails-card.json');
+const gates = createGateService({
+  root: ROOT, ledger, ownerId: OWNER.id, policyFile: () => resolveConfig('policy.json'),
+  stateDir: path.join(ROOT, 'data', DEMO ? 'demo-guardrails' : 'guardrails'),
+  identifyWs: async (ws) => {
+    const d = dirCache.length ? dirCache : await refreshDir();
+    const a = d.find((x) => String(x.workspaceId || '').toLowerCase() === String(ws).toLowerCase() && x.status !== 'closed');
+    return a?.name || null;
+  },
+  recordEvent: (k, t) => recordEvent(k, t),
+  afterTaskChange: (t, r, actor) => afterTaskChange(t, r, actor),
+  mcName: async () => resolveTarget('mission-control', dirCache.length ? dirCache : await refreshDir()).agent?.name || 'mission-control',
+});
 let workCache = summarize([]);
 let dirCache = [];
 let contextCache = new Map();      // workspaceId → context gauge (src/context.mjs)
@@ -99,19 +118,56 @@ const PLACEHOLDERS_FILE = path.join(ROOT, 'data', 'mesh-placeholder-workspaces.j
 // Writes only set-color/set-description/set-status/set-progress; never
 // overwrites a hand-set color or description (src/chrome.mjs).
 async function syncChrome(cfg) {
-  if (cfg.chrome === false) return;
+  if (cfg.chrome === false) return syncPills(cfg, { autopilot: true });
   const r = await applyChrome(dirCache, { cfg, max: cfg.chromeMaxPerPass || 6 });
   if (r.applied?.length) recordEvent('sys', `mesh chrome: ${r.applied.map((a) => `${a.name} ${a.action.replace('set-', '')}`).join(', ')}`.slice(0, 160)).catch(() => {});
-  await syncPills(cfg);
+  await syncPills(cfg, { autopilot: true });
 }
-async function syncPills(cfg) {
+async function syncPills(cfg, { autopilot = false } = {}) {
   if (DEMO) return;
-  if ((cfg || await meshConfig()).chrome === false) return;
+  cfg = cfg || await meshConfig();
+  contextCache = await collectContext(dirCache).catch(() => contextCache);
+  if (autopilot) await contextAutopilot().catch((e) => console.error('[context autopilot]', e.message));
+  for (const [ws, phase] of autopilotPhases) { const g = contextCache.get(ws); if (g) contextCache.set(ws, { ...g, autopilot: phase }); }
+  if (cfg.chrome === false) return;
   const tasks = await ledger.list({ status: 'live' });
   const prompts = await inputPrompts(dirCache, await readSessionMap(), { classify: classifyScreen });
-  contextCache = await collectContext(dirCache).catch(() => contextCache);
   const changed = await applyPills(dirCache, tasks, { prompts, ctx: contextCache });
   if (changed.length) console.log('[mesh pills]', changed.map((c) => `${c.name}=${c.pill}`).join(', '));
+}
+// Context autopilot (#351, src/context-autopilot.mjs): warn at CONTEXT.warnPct, /compact at the
+// next READY pane at compactPct once the state is saved (forcePct: even without), then resume.
+const CONTEXT_STATE_FILE = path.join(ROOT, 'data', 'context-state.json');
+let autopilotPhases = new Map();       // workspaceId → 'saving state' | 'compacting' | 'compact failed' (pill text)
+async function contextAutopilot() {
+  const cfg = SETTINGS.contextAutopilot;
+  if (!cfg || !['observe', 'on'].includes(cfg.mode)) { autopilotPhases = new Map(); return; }
+  const liveOf = (a) => ledger.list({ status: 'live' }).then((ts) => ts.filter((t) => t.owner === a.name));
+  const r = await runAutopilot(dirCache, {
+    ctx: contextCache, cfg, t: autopilotThresholds(CONTEXT, cfg), stateFile: CONTEXT_STATE_FILE,
+    focusFor: async (a) => {
+      const f = focusOf(await gates.store.focus().catch(() => ({})), a.name)?.task;
+      const mine = await liveOf(a);
+      if (f && mine.some((t) => t.id === f)) return f;
+      const working = mine.filter((t) => t.status === 'in_progress');
+      return working.length === 1 ? working[0].id : null;
+    },
+    commentAt: async (a, since) => {
+      let best = 0;
+      for (const t of await liveOf(a)) for (const c of t.comments || []) {
+        const at = Date.parse(c.at);
+        if (c.who === a.name && at > since && at > best) best = at;
+      }
+      return best;
+    },
+    compact: (a) => deliverNow(a, '/compact').catch((e) => ({ queued: e.message })),
+    tell: (a, text, taskId) => meshDeliver(a.name, text, { from: 'board', taskId, kind: 'context', wake: true }),
+    tellMC: (text, taskId) => meshDeliver('mission-control', text, { from: 'board', taskId, kind: 'context' }),
+    comment: (taskId, text) => ledger.update(taskId, { op: 'comment', actor: 'board', text }).catch(() => {}),
+    event: (k, text) => recordEvent(k, text).catch(() => {}),
+  });
+  autopilotPhases = r.phases;
+  if (r.changed.length) console.log('[context autopilot]', r.changed.map((c) => `${c.name}=${c.action}@${c.pct}%`).join(', '));
 }
 async function reconcileMesh() {
   const [workspaces, sessionMap, registry, groups] = await Promise.all([
@@ -249,14 +305,21 @@ async function afterTaskChange(task, { events = [], wake = [], notifyMC = [], wa
   for (const who of wake) {
     if ((resolveTarget(who, dirCache).agent?.name || who) === me) continue;
     const kind = wakeKind || 'assigned';
+    // a gate decision is delivered INSIDE a busy session (cmux queues it for the next turn): the
+    // approval has a clock on it, and waiting for an idle pane let one expire unused (#343 g8)
     deliveries.push(await meshDeliver(who, wakeMessage(task, kind, { note }), {
-      from: actor, taskId: task.id, kind: kind === 'comment' ? 'message' : kind }));
+      from: actor, taskId: task.id, kind: kind === 'comment' ? 'message' : kind, wake: kind === 'gate' }));
   }
   // Mission Control is cc'd only on approvals, blocks and cross-domain conflicts
   for (const why of notifyMC) {
     const mc = resolveTarget('mission-control', dirCache).agent;
     if (mc && (task.owner === mc.name || actor === mc.name)) continue;
-    deliveries.push(await meshDeliver('mission-control', `cc: task #${task.id} ${why === 'approval' ? `needs ${OWNER.name}'s approval` : 'is blocked'} (${task.owner}): ${task.title}`, { from: actor, taskId: task.id, kind: why === 'approval' ? 'approval' : 'cc' }));
+    const what = why === 'approval' ? `needs ${OWNER.name}'s approval` : why === 'gate' ? `has a gate waiting on ${OWNER.name} (FYI — gates are the owner's to decide)` : 'is blocked';
+    deliveries.push(await meshDeliver('mission-control', `cc: task #${task.id} ${what} (${task.owner}): ${task.title}`, { from: actor, taskId: task.id, kind: why === 'approval' ? 'approval' : 'cc' }));
+  }
+  if (notifyMC.includes('gate')) {
+    const g = (task.gates || []).filter((x) => x.status === 'pending').pop();
+    notify('Ops Board · gate waiting', `task #${task.id}`, `${g?.agent || task.owner}: ${g?.label || 'gated action'} — approve on the WORK panel`).catch(() => {});
   }
   if (notifyMC.includes('approval')) {
     notify('Ops Board · approval needed', `task #${task.id}`, `${task.owner}: ${task.title} — ${task.approval?.policy_item}`).catch(() => {});
@@ -324,7 +387,32 @@ async function demoTick(snap) {
         await ledger.update(t.id, { op: 'close', actor: 'mission-control', checklist: 'all', links: { handoff: 'data/handoffs/triage.report.md' }, text: 'clean pass' });
         await recordEvent('good', `task #${t.id} DONE by mission-control: ${t.title}`);
       }
+      if (beat.gate) await demoGate(beat.gate);
     } catch (e) { console.error('[demo beat]', e.message); }
+  }
+}
+
+// Demo guardrails beat: the same ledger gate records a real gate makes (nothing runs)
+let demoGateRef = null;
+async function demoGate(step) {
+  if (step === 'file') {
+    const t = await ledger.create({ title: 'Ship the pricing page', requester: 'mission-control', owner: DEMO_GATE.agent });
+    await ledger.update(t.id, { op: 'start', actor: DEMO_GATE.agent });
+    const u = await ledger.update(t.id, { op: 'gate_request', actor: 'board', gate: { cls: 'deploy', label: 'Deploy or (re)load production services', why: 'vercel deploy --prod',
+      command: DEMO_GATE.command, bin: 'vercel', cwd: DEMO_GATE.cwd, tool: 'Bash', engine: 'claude', agent: DEMO_GATE.agent, cmdHash: 'demo', ttlMinutes: 30 } }, { gateSystem: true });
+    demoGateRef = { task: t.id, gate: u.task.gates.at(-1).id };
+    await refreshWork();
+  } else if (step === 'approve' && demoGateRef) {
+    const t = await ledger.get(demoGateRef.task);
+    const g = t?.gates?.find((x) => x.id === demoGateRef.gate);
+    if (g?.status === 'pending') await ledger.update(t.id, { op: 'gate_decide', actor: OWNER.id, gate: g.id, decision: 'approve' }, { decider: true, from: 'phone/tailnet' });
+    const now = await ledger.get(demoGateRef.task);
+    if (now.gates.find((x) => x.id === demoGateRef.gate)?.status === 'approved') {
+      await ledger.update(now.id, { op: 'gate_event', actor: 'board', gate: demoGateRef.gate, event: 'executed' }, { gateSystem: true });
+      await recordEvent('sys', `demo: would run \`${DEMO_GATE.command}\` once (single-use grant) — receipt on #${now.id}`);
+    }
+    demoGateRef = null;
+    await refreshWork();
   }
 }
 
@@ -406,6 +494,7 @@ async function poll() {
     if (!DEMO) maybeBrain({ cfg: SETTINGS.brain, ledger, agents: dirCache, now: now.getTime(), record: (k, t) => recordEvent(k, t).catch(() => {}),
       afterCreate: (t) => afterTaskChange(t, { wake: t.owner && !isOwner(t.owner) ? [t.owner] : [] }, 'board') })
       .catch((e) => console.error('[brain]', e.message));
+    gates.card(await ledger.list({ status: 'live' })).then((c) => writeFile(GATE_CARD_FILE, JSON.stringify({ ...c, at: Date.now() }))).catch((e) => console.error('[guardrails card]', e.message));
     const payload = JSON.stringify(payloadFor());
     for (const res of sseClients) res.write(`data: ${payload}\n\n`);
   } catch (err) {
@@ -657,6 +746,32 @@ const server = http.createServer(async (req, res) => {
       recordEvent('sys', `task #${t.id}: ${me.name} queued ${path.basename(rel)} for its chat thread`).catch(() => {});
       return sendJson(res, 202, { ok: true, queued: rel });
     }
+    // ---- guardrails ----
+    if (url.pathname === '/api/gates/check' && req.method === 'POST') {
+      if (!localOnly(req)) throw new MeshError(403, 'the gate hook calls from this machine only');
+      return sendJson(res, 200, await gates.check(await readBody(req)));
+    }
+    if (url.pathname === '/api/gates/focus' && req.method === 'POST') {
+      if (!localOnly(req)) throw new MeshError(403, 'localhost only');
+      const b = await readBody(req);
+      const me = await identify(b.actor);
+      const t = await ledger.get(b.task);
+      if (!t) throw new MeshError(404, `no task #${b.task}`);
+      if (t.owner !== me.name && !me.mc) throw new MeshError(403, `task #${t.id} is owned by ${t.owner}`);
+      await gates.setFocus(me.name, t.id);
+      return sendJson(res, 200, { ok: true, agent: me.name, focus: t.id });
+    }
+    if (url.pathname === '/api/gates' && req.method === 'GET') {
+      const want = url.searchParams.get('status') || 'pending';
+      const out = [];
+      for (const t of await ledger.list({ status: 'live' })) for (const g of t.gates || []) if (want === 'all' || g.status === want) out.push({ task: t.id, title: t.title, ...g, cmdHash: undefined });
+      return sendJson(res, 200, { gates: out, card: JSON.parse(await readFile(GATE_CARD_FILE, 'utf8').catch(() => 'null')) });
+    }
+    const am = url.pathname.match(/^\/api\/tasks\/(\d+)\/audit$/);
+    if (am && req.method === 'GET') {
+      const rows = await gates.audit(am[1]);
+      return rows ? sendJson(res, 200, { task: Number(am[1]), rows }) : sendJson(res, 404, { ok: false, msg: `no task #${am[1]}` });
+    }
     const tm = url.pathname.match(/^\/api\/tasks\/(\d+)$/);
     if (tm && req.method === 'GET') {
       const t = await ledger.get(tm[1]);
@@ -665,8 +780,13 @@ const server = http.createServer(async (req, res) => {
     if (tm && req.method === 'PATCH') {
       const b = await readBody(req);
       const intake = isIntake(req);
-      const decider = !intake && b.op === 'decide' && isDecider(req);
-      if (b.op === 'decide') {
+      // board decisions carry the decision token; a revoke_go without it goes the normal (owner/MC) path
+      const deciding = b.op === 'decide' || b.op === 'gate_decide' || (b.op === 'revoke_go' && !!req.headers['x-mesh-decision']);
+      // condition H: a gate decision never carries an agent or intake identity, token or not
+      if (b.op === 'gate_decide' && (intake || b.actor || req.headers['x-mesh-intake'] || req.headers['x-mesh-agent']))
+        throw new MeshError(403, 'gates are decided from the owner\'s board only (no agent or intake identity)');
+      const decider = !intake && deciding && isDecider(req);
+      if (deciding) {
         // every panel decision attempt leaves a trace (two clicks left none)
         const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
         console.log(`[decide] #${tm[1]} ${b.decision} from ${ip} token=${decider ? 'ok' : 'REJECTED'}`);
@@ -699,8 +819,17 @@ const server = http.createServer(async (req, res) => {
         const probe = { ...prev, links: { ...prev.links, ...(b.links && typeof b.links === 'object' ? b.links : {}) } };
         verified = await verifyClose(probe, { cfg: SETTINGS.brain, agents: dirCache.length ? dirCache : await refreshDir() });
       }
-      const r = await ledger.update(tm[1], b, { decider, intake, mc: me.mc, actorWs: me.ws, verified });
+      const from = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+      // where the owner decided: the owner CLI (task.sh gate) says so; else phone over the tailnet or this Mac's page
+      const via = req.headers['x-mesh-via'] === 'cli' ? 'cli' : from.startsWith('100.') ? 'phone/tailnet' : 'local';
+      // + the surface (dock / strip from the page, phone from the socket): a receipt field for the release acceptance gate
+      const surface = decider ? decisionSurface({ via: req.headers['x-mesh-via'], remote: from, client: req.headers['x-mesh-surface'] }) : null;
+      const r = await ledger.update(tm[1], b, { decider, intake, mc: me.mc, actorWs: me.ws, verified, from: via, surface });
       queueIntake(prev, r.task);
+      // an approved gate gets its single-use grant BEFORE the agent is woken
+      if ((b.op === 'gate_decide' || b.op === 'gate_record') && b.decision !== 'decline') await gates.afterDecision(r.task, b.gate);
+      // claim/start focus the agent's gates on this task — unless it set a focus itself on a live task
+      if ((b.op === 'claim' || b.op === 'start') && !intake) await gates.autoFocus(me.name, r.task.id).catch(() => {});
       if (decider) {
         const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
         recordEvent('sys', `approval #${tm[1]} ${b.decision} decided from ${ip} (${String(req.headers['user-agent'] || '').slice(0, 40)})`).catch(() => {});
@@ -785,11 +914,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': MIME[path.extname(full)] || 'application/octet-stream', 'cache-control': 'no-cache' });
     return res.end(body);
   } catch (err) {
-    if (err instanceof MeshError) return sendJson(res, err.status, { ok: false, msg: err.message, ...err.extra });
+    if (err instanceof MeshError || (Number.isInteger(err?.status) && err.status >= 400 && err.status < 500)) return sendJson(res, err.status, { ok: false, msg: err.message, ...(err.extra || {}) });
     res.writeHead(500); res.end(err.message);
   }
 });
 
+await gates.loadPolicy().catch((e) => console.error('[guardrails]', e.message));   // writes data/guardrails/triggers for the hook
 server.listen(SETTINGS.port, '0.0.0.0', () => {
   console.log(`[ops-board] http://localhost:${SETTINGS.port} (+ tailnet, source-guarded)${DEMO ? ' — DEMO MODE (synthetic data)' : ''}`);
   recordEvent('sys', DEMO ? 'Ops Board started in demo mode — synthetic fleet, nothing real is touched' : 'Ops Board started').catch(() => {});

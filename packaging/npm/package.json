@@ -1,6 +1,6 @@
 {
   "name": "zulu-assistant",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Local ops board and agent workforce for the Mac that runs your automations (launcher: clones the repo, runs install.sh)",
   "license": "MIT",
   "homepage": "https://github.com/zulu-assistant/zulu-assistant",

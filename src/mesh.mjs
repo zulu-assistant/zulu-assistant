@@ -567,14 +567,16 @@ export async function drainOutbox({ file = OUTBOX_FILE, now = Date.now(), resolv
   return { delivered, expired, dropped, still };
 }
 
+export const NEVER_SUPERSEDED = new Set(['approval', 'done', 'decision', 'gate', 'context']);
 export async function enqueue(msg, file = OUTBOX_FILE) {
   let box = await readOutbox(file);
   // one pending wake per (target, text) — no storms; and a newer wake about
   // the same task SUPERSEDES the older one (only the latest state is useful)
   if (box.some((m) => m.to === msg.to && m.line === msg.line)) return box.length;
-  // (a queued done notice or approval is never superseded — a later comment
-  // must not swallow "Task #N done")
-  if (msg.taskId) box = box.filter((m) => !(m.to === msg.to && m.taskId === msg.taskId && !['approval', 'done'].includes(m.kind)));
+  // (a queued done notice, approval or decision — including a guardrails gate
+  // decision — is never superseded: a later comment must not swallow "Task #N done"
+  // or "GATE g8 APPROVED — run it" (#343: g8's wake was replaced by MC's next message)
+  if (msg.taskId) box = box.filter((m) => !(m.to === msg.to && m.taskId === msg.taskId && !NEVER_SUPERSEDED.has(m.kind)));
   box.push(msg);
   await writeJsonAtomic(file, box);
   return box.length;

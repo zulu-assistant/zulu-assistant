@@ -124,9 +124,26 @@ export const PILL_STATES = {
 export const pillStatus = (t) => (t.status === 'blocked' && t.blocked_on?.length
   && t.blocked_on.every((x) => typeof x === 'string' && !isOwner(x)) ? 'waiting' : t.status);
 
-export function ownerPill(tasks) {
+export function ownerPill(tasks, now = Date.now()) {
   const live = tasks.filter((t) => PILL_STATES[t.status]).map((t) => ({ ...t, status: pillStatus(t) }));
   if (!live.length) return { pill: null, progress: null };
+  const p = ownerPillBase(live);
+  if (!p.progress) return p;
+  // guardrails: the custom sidebar has no network and reads only `progress`, so gate state leads the label.
+  // An approval the agent hasn't run yet comes first — it has a clock on it (#343 g8 expired unused):
+  // "⛨ g8 APPROVED — run it · ⛨ 2 GATES · #343 APPROVAL · 0/4"
+  const all = live.flatMap((t) => t.gates || []);
+  const ready = all.filter((g) => g.status === 'approved' && (!g.expires_at || Date.parse(g.expires_at) > now));
+  const waiting = all.filter((g) => g.status === 'pending').length;
+  const lead = [
+    ...(ready.length ? [`⛨ ${ready.map((g) => g.id).join(', ')} APPROVED — run it`] : []),
+    ...(waiting ? [`⛨ ${waiting} GATE${waiting > 1 ? 'S' : ''}`] : []),
+  ];
+  if (lead.length) p.progress = { ...p.progress, label: `${lead.join(' · ')} · ${p.progress.label}` };
+  return p;
+}
+
+function ownerPillBase(live) {
   const worst = live.reduce((a, b) => (PILL_STATES[b.status].rank > PILL_STATES[a.status].rank ? b : a));
   const st = PILL_STATES[worst.status];
   // The progress bar doubles as the task-state carrier: custom sidebars (Tier 1)
@@ -177,8 +194,9 @@ export function withContext(want, g) {
   const label = want.progress?.label || '';
   const input = label.startsWith(INPUT_PREFIX);
   const rest = input ? label.slice(INPUT_PREFIX.length) : label;
-  // post-/compact estimate (no turn yet): "ctx 2% · compacted · est · #14 OPEN"
-  const parts = [...(input ? ['▲ INPUT'] : []), `ctx ${g.pct}%`, ...(g.estimated ? ['compacted · est'] : []), ...(rest ? [rest] : [])];
+  // post-/compact estimate (no turn yet): "ctx 2% · compacted · est · #14 OPEN";
+  // the context autopilot adds its phase: "ctx 72% · saving state · #14 OPEN"
+  const parts = [...(input ? ['▲ INPUT'] : []), `ctx ${g.pct}%`, ...(g.estimated ? ['compacted · est'] : []), ...(g.autopilot ? [g.autopilot] : []), ...(rest ? [rest] : [])];
   return {
     pill: want.pill,
     progress: { value: Math.round(g.pct) / 100, label: parts.join(' · ') },

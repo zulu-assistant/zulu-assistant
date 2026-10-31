@@ -141,6 +141,22 @@ a.tile { text-decoration: none; color: inherit; }
 .task-policy { font-size: 10px; color: var(--status-warning); }
 .task-last { font-size: 10.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-actions { display: flex; gap: 6px; margin-top: 4px; }
+/* guardrails: a pending gate — the exact command, wrapped, never truncated (it is what the owner approves) */
+.gate { border: 1px solid #5c5c00; border-radius: 3px; padding: 6px 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 3px; box-shadow: var(--glow-amber); }
+.gate-top { display: flex; gap: 8px; align-items: baseline; }
+.gate-chip { color: var(--status-warning); border-color: #5c5c00; flex: none; }
+.gate-label { color: var(--ink-bright); font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
+.gate-cmd { margin: 0; font: inherit; font-size: 11px; color: var(--ink-bright); background: #001400; border-radius: 2px; padding: 4px 6px;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; max-height: none; }
+.gate-meta { font-size: 10px; color: var(--ink-2); overflow-wrap: anywhere; }
+.gate-meta.gate-again { color: var(--status-warning); }   /* "you approved this before; it expired" */
+/* the owner's decisions, pinned while anything waits (same rows as WORK; amber under-glow = warn) */
+.decisions { position: sticky; top: 0; z-index: 20; background: var(--surface); border: 1px solid #5c5c00; border-radius: 4px;
+  box-shadow: var(--glow-amber); padding: 8px 10px; margin-bottom: 14px; max-height: 60vh; overflow-y: auto; }
+.decisions h2 { font-size: 11px; letter-spacing: .2em; color: var(--status-warning); margin-bottom: 8px; font-weight: 700; }
+.decisions-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; }
+.decisions-list .task { margin-bottom: 0; }
+@media (max-width: 520px) { .decisions-list { grid-template-columns: 1fr; } }
 .task.t-approval { border-color: #6b6b00; box-shadow: var(--glow-amber); }
 .task.t-approval .task-chip { color: var(--status-warning); border-color: #5c5c00; }
 .task.t-blocked { border-color: #7a4a1d; }

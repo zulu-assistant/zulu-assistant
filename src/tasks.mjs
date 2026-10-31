@@ -8,6 +8,7 @@
 import { readFile, writeFile, readdir, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { OWNER, isOwner, isPrincipal as isListedPrincipal, PRINCIPALS, SETTINGS } from './config.mjs';
+import { addGate, decideGate, gateEvent, pendingGates, settleAfterGates, gatesResolved } from './gate-ledger.mjs';
 
 export const STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'needs_approval', 'done', 'cancelled'];
 export const LIVE_STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'needs_approval'];
@@ -173,10 +174,10 @@ export function applyPatch(prev, patch, ctx = {}) {
   const isMC = actor === 'mission-control' || ctx.mc === true;
   const isPrincipal = ctx.isPrincipal || isListedPrincipal;
   const human = (n) => isOwner(n) || isPrincipal(n);   // people are never woken through panes
-  const comment = (text, who = actor) => {
+  const comment = (text, who = actor, extra = null) => {
     const s = cleanText(text, 'text');
     if (!s) return;
-    t.comments.push({ who, at: iso, text: s });
+    t.comments.push({ who, at: iso, text: s, ...(extra || {}) });
     if (t.comments.length > MAX_COMMENTS) t.comments = t.comments.slice(-MAX_COMMENTS);
   };
   const ownerOnly = () => {
@@ -187,6 +188,8 @@ export function applyPatch(prev, patch, ctx = {}) {
   // chat intake (ctx.intake: the caller proved the intake token) may only file
   // what a person said — never claim, close, approve or reassign
   if (ctx.intake && !['answer'].includes(op)) throw new MeshError(403, `the chat intake can only "answer" (got "${op}")`);
+  // gate records are written only by the board's own gate service (ctx.gateSystem), never through PATCH
+  if (['gate_request', 'gate_event'].includes(op) && !ctx.gateSystem) throw new MeshError(403, `"${op}" is written by the board's gate service only`);
   if (TERMINAL.has(t.status) && !['comment', 'reopen', 'record_decision', 'set_requester', 'answer'].includes(op))
     throw new MeshError(409, `task #${t.id} is ${t.status}`);
 
@@ -289,7 +292,8 @@ export function applyPatch(prev, patch, ctx = {}) {
       ownerOnly();
       const item = cleanText(patch.policy_item, 'policy_item', 300);
       if (!item) bad('request_approval needs policy_item (the POLICY.md ESCALATE line this falls under)');
-      t.approval = { policy_item: item, requested_at: iso, requested_by: actor, decided_by: null, decision: null, decided_at: null };
+      t.approval = { policy_item: item, requested_at: iso, requested_by: actor, decided_by: null, decision: null, decided_at: null,
+        ...(patch.kind === 'program' ? { kind: 'program' } : {}) };
       t.status = 'needs_approval';
       if (!t.blocked_on.includes(OWNER.id)) t.blocked_on.push(OWNER.id);
       comment(patch.text);
@@ -304,6 +308,7 @@ export function applyPatch(prev, patch, ctx = {}) {
       if (!['approve', 'decline'].includes(decision)) bad('decision must be approve|decline');
       t.approval = { ...t.approval, decided_by: OWNER.id, decision, decided_at: iso };
       if (t.approval.kind === 'plan' && decision === 'approve') t.plan_approved_at = iso;
+      if (t.approval.kind === 'program' && decision === 'approve') grantProgramGo(t, { iso, via: 'board', recordedBy: null, item: t.approval.policy_item });
       t.blocked_on = t.blocked_on.filter((x) => x !== OWNER.id);
       t.status = decision === 'approve' ? 'in_progress' : 'blocked';
       if (decision === 'decline' && !t.blocked_on.length) t.blocked_on = [OWNER.id];
@@ -311,6 +316,63 @@ export function applyPatch(prev, patch, ctx = {}) {
       events.push(`task #${t.id} ${decision === 'approve' ? 'APPROVED' : 'DECLINED'} by ${OWNER.name}: ${t.title}`);
       if (t.owner) wake.add(t.owner);
       wakeKind = 'decision';
+      break;
+    }
+    case 'gate_request': {                     // a gated command was attempted (src/gate-ledger.mjs)
+      const g = addGate(t, patch.gate, iso);
+      if (g.status === 'pending') {
+        if (t.status !== 'needs_approval') { g.prev_status = t.status; t.status = 'needs_approval'; }
+        if (!t.blocked_on.includes(OWNER.id)) t.blocked_on.push(OWNER.id);
+        events.push(`task #${t.id} GATE ${g.id} waiting on ${OWNER.name}: ${g.label} (${t.owner || 'unowned'})`);
+        notifyMC.push('gate');
+      }
+      // the comment carries a one-line excerpt; the full approved text stays in gates[] (task.sh audit)
+      const line1 = g.command.split('\n')[0];
+      const shown = line1.length > 300 || g.command.includes('\n') ? `${line1.slice(0, 300)} …(full text in gates[])` : line1;
+      comment(g.status === 'pending'
+        ? `GATE ${g.id} requested · ${g.cls} · ${shown} · ${g.cwd}${g.dryRun?.required ? ` · dry run ${g.dryRun.seen_at ? `completed ${g.dryRun.seen_at}` : 'missing'}` : ''}`
+        : g.via === 'standing'
+          ? `GATE ${g.id} auto-approved under program go ${g.go} · ${g.cls} · ${shown} · ${g.cwd}`
+          : `GATE ${g.id} ${g.status.replace('_', ' ')} · ${g.cls} · ${shown} · ${g.why}`, 'gate', { gate: { id: g.id, event: g.status === 'pending' ? 'requested' : g.via === 'standing' ? 'auto_approved' : g.status } });
+      if (g.via === 'standing') events.push(`task #${t.id} GATE ${g.id} auto-approved under program go ${g.go}: ${g.label} (${g.agent})`);
+      break;
+    }
+    case 'gate_decide': {
+      // the owner's board only — and never a request that also carries an agent or intake identity (condition H)
+      if (!ctx.decider || ctx.intake || ctx.agentIdentity) throw new MeshError(403, `gates are decided by ${OWNER.name} from the board (WORK panel) only`);
+      const g = decideGate(t, patch, { iso, via: 'board', by: OWNER.id, now, surface: ctx.surface?.surface, surfaces: ctx.surface?.surfaces });
+      comment(`GATE ${g.id} ${g.decision === 'approve' ? 'APPROVED' : 'DECLINED'} by ${OWNER.name} (board${ctx.from ? `, ${ctx.from}` : ''}${g.surfaces.some((s) => ['dock', 'strip'].includes(s)) ? `, ${g.surfaces.filter((s) => ['dock', 'strip'].includes(s)).join(' + ')}` : ''})${g.reason ? `: ${g.reason}` : ''}`, OWNER.id, { gate: { id: g.id, event: g.decision === 'approve' ? 'approved' : 'declined' } });
+      events.push(`task #${t.id} GATE ${g.id} ${g.decision === 'approve' ? 'APPROVED' : 'DECLINED'} by ${OWNER.name}: ${g.label}`);
+      settleAfterGates(t, OWNER.id);
+      if (g.agent && !g.agent.startsWith('unregistered:')) wake.add(g.agent);
+      wakeKind = 'gate'; note = g.id;
+      break;
+    }
+    case 'revoke_go': {
+      // the owner's board, the task owner or Mission Control can end a program go at any time
+      if (!ctx.decider) ownerOnly();
+      if (!t.program_go || t.program_go.revoked_at) throw new MeshError(409, `task #${t.id} has no active program go`);
+      t.program_go = { ...t.program_go, revoked_at: iso, revoked_by: ctx.decider ? OWNER.id : actor };
+      comment(`PROGRAM GO ${t.program_go.id} revoked by ${t.program_go.revoked_by}${patch.text ? `: ${patch.text}` : ''} — gated actions on this task ask again`, ctx.decider ? OWNER.id : actor);
+      events.push(`task #${t.id} program go revoked: ${t.title}`);
+      if (t.owner && ctx.decider) { wake.add(t.owner); wakeKind = 'comment'; note = `program go revoked by ${OWNER.name} — gated merges/local deploys on #${t.id} need a tap again`; }
+      break;
+    }
+    case 'gate_record': {
+      // the owner said yes/no in an agent's pane: only Mission Control records it — an agent never
+      // records an approval of its own gate
+      if (!isMC) throw new MeshError(403, `only mission-control records a gate answer given in a pane (ask it to: task.sh gate-approved ${t.id} <gate> "…")`);
+      if (!String(patch.text ?? '').trim()) bad(`gate_record needs text: what ${OWNER.name} said, and where`);
+      const g = decideGate(t, patch, { iso, via: 'pane', by: OWNER.id, recordedBy: actor, now });
+      comment(`GATE ${g.id} ${g.decision === 'approve' ? 'APPROVED' : 'DECLINED'} by ${OWNER.name} in pane (recorded by ${actor}): ${patch.text}`, actor, { gate: { id: g.id, event: g.decision === 'approve' ? 'approved' : 'declined' } });
+      events.push(`task #${t.id} GATE ${g.id} ${g.decision === 'approve' ? 'APPROVED' : 'DECLINED'} in pane (recorded by ${actor})`);
+      settleAfterGates(t, OWNER.id);
+      break;
+    }
+    case 'gate_event': {                       // executed / expired / rerun_declined / attempt (gate service only)
+      const g = gateEvent(t, patch, iso);
+      if (['executed', 'expired'].includes(patch.event)) comment(patch.event === 'executed' ? `GATE ${g.id} executed ${iso.slice(11, 19)}Z (single use)` : `GATE ${g.id} expired unused`, 'gate', { gate: { id: g.id, event: patch.event } });
+      if (patch.event === 'rerun_declined') comment(`GATE ${g.id} re-attempted after it was declined`, 'gate', { gate: { id: g.id, event: 'rerun_declined' } });
       break;
     }
     case 'record_decision': {
@@ -329,6 +391,7 @@ export function applyPatch(prev, patch, ctx = {}) {
         decided_by: OWNER.id, decision, decided_at: iso, via: 'pane', recorded_by: actor,
       };
       if (t.approval.kind === 'plan' && decision === 'approve') t.plan_approved_at = iso;
+      if (t.approval.kind === 'program' && decision === 'approve') grantProgramGo(t, { iso, via: 'pane', recordedBy: actor, item: t.approval.policy_item });
       if (t.status === 'needs_approval') {
         t.blocked_on = t.blocked_on.filter((x) => x !== OWNER.id);
         t.status = decision === 'approve' ? 'in_progress' : 'blocked';
@@ -382,7 +445,7 @@ export function applyPatch(prev, patch, ctx = {}) {
       const waive = patch.waive && typeof patch.waive === 'object' ? patch.waive : {};
       const waived = {};
       for (const [k, v] of Object.entries(waive)) {
-        if (!CHECKLIST.includes(k)) bad(`cannot waive "${k}" (items: ${CHECKLIST.join(', ')})`);
+        if (!CHECKLIST.includes(k) && k !== 'gates_resolved') bad(`cannot waive "${k}" (items: ${[...CHECKLIST, 'gates_resolved'].join(', ')})`);
         const why = cleanText(v, `waive.${k}`, 300);
         if (!why) bad(`waiving ${k} needs a reason`);
         waived[k] = why;
@@ -391,6 +454,9 @@ export function applyPatch(prev, patch, ctx = {}) {
       if (failed.length) {
         throw new MeshError(409, `cannot close task #${t.id}: ${failed.map(([k, r]) => `${k} not verified — ${r.why}`).join('; ')}`, { missing: failed.map(([k]) => k) });
       }
+      // guardrails: no gate still pending, and none re-attempted after the owner declined it
+      const gr = gatesResolved(t);
+      if (!gr.ok && !waived.gates_resolved) throw new MeshError(409, `cannot close task #${t.id}: gates_resolved not verified — ${gr.why}`, { missing: ['gates_resolved'] });
       if (Object.keys(waived).length) {
         t.verify_waived = { ...(t.verify_waived || {}), ...waived };
         comment(`close waived: ${Object.entries(waived).map(([k, v]) => `${k} (${v})`).join('; ')}`);
@@ -398,6 +464,7 @@ export function applyPatch(prev, patch, ctx = {}) {
       t.status = 'done';
       t.blocked_on = [];
       t.closed_at = iso;
+      if (t.program_go && !t.program_go.revoked_at) t.program_go = { ...t.program_go, ended_at: iso };   // a go ends with its task
       comment(patch.text);
       events.push(`task #${t.id} DONE by ${actor}: ${t.title}`);
       // the ONE done notice: fired by the transition, never by later comments
@@ -422,7 +489,7 @@ export function applyPatch(prev, patch, ctx = {}) {
       events.push(`task #${t.id} reopened by ${actor}`);
       break;
     default:
-      bad(`unknown op "${op}" (claim|start|assign|comment|block|unblock|answer|plan|request_approval|record_decision|set_requester|checklist|link|close|cancel|reopen)`);
+      bad(`unknown op "${op}" (claim|start|assign|comment|block|unblock|answer|plan|request_approval|record_decision|gate_decide|gate_record|revoke_go|set_requester|checklist|link|close|cancel|reopen)`);
   }
   if (settleApproval(t, { op, actor, iso })) comment(`approval request settled as ${t.approval.decision} (task moved on by "${op}" without a recorded decision — record the real one with task.sh approved-in-pane)`);
   t.updated_at = iso;
@@ -430,10 +497,27 @@ export function applyPatch(prev, patch, ctx = {}) {
   return { task: t, events, wake: [...wake], notifyMC, wakeKind: wake.size ? wakeKind : null, note };
 }
 
+/** A recorded program go (the owner's "go" for the whole task): standing approval for gate classes marked standing. */
+function grantProgramGo(t, { iso, via, recordedBy, item }) {
+  const n = (t.program_go_count || 0) + 1;
+  t.program_go_count = n;
+  t.program_go = { id: `go${n}`, granted_at: iso, via, recorded_by: recordedBy, policy_item: item, revoked_at: null, revoked_by: null, ended_at: null };
+}
+export const activeProgramGo = (t) => (t?.program_go && !t.program_go.revoked_at && !t.program_go.ended_at && !TERMINAL.has(t.status) ? t.program_go : null);
+
 /** The one-line wake text for a task change, by kind (pure). */
 export function wakeMessage(task, kind, { note = null } = {}) {
   switch (kind) {
     case 'done': return `Task #${task.id} done: ${task.title}`;
+    case 'gate': {
+      const g = (task.gates || []).find((x) => x.id === note);
+      if (!g) return `Task #${task.id}: a gate was decided`;
+      if (g.decision !== 'approve') return `GATE ${g.id} on #${task.id} DECLINED by ${OWNER.name}${g.reason ? `: ${g.reason}` : ''} — do not retry it; ask on the task`;
+      // a shell command is repeated verbatim; any other tool call is re-issued with the identical input
+      const what = g.tool !== 'Bash' ? `the same ${g.tool} call again, with exactly the same input`
+        : g.commandRedacted || g.command.length > 400 ? 'exactly the command you were stopped on' : `exactly: ${g.command}`;
+      return `GATE ${g.id} on #${task.id} APPROVED by ${OWNER.name} — run ${what} (once, by ${String(g.expires_at).slice(11, 16)}Z). If auto mode still refuses it, hand ${OWNER.name} the ! line.`;
+    }
     case 'decision': return `Task #${task.id} ${task.approval?.decision === 'approve' ? 'APPROVED' : 'DECLINED'} by ${OWNER.name}: ${task.title}`;
     case 'comment': return `comment on #${task.id} (${String(task.title).slice(0, 40)}): ${String(note || '').slice(0, 160)}`;
     default: return `Task #${task.id} assigned: ${task.title}${task.plan_first ? ` — PLAN FIRST: no work until ${OWNER.name} reviews; post it with task.sh plan ${task.id} "<plan>"` : ''}`;
@@ -458,6 +542,8 @@ export function summarize(tasks, now = Date.now()) {
     return {
       id: t.id, title: t.title, owner: t.owner, requester: t.requester, status: t.status,
       priority: t.priority, blocked_on: t.blocked_on, approval: t.approval,
+      ...(pendingGates(t).length ? { gates: pendingGates(t) } : {}),
+      ...(activeProgramGo(t) ? { program_go: activeProgramGo(t) } : {}),
       ...(t.source ? { via: t.source.via } : {}),
       ageH: Math.round((now - Date.parse(t.created_at)) / 36e5 * 10) / 10,
       updated_at: t.updated_at,

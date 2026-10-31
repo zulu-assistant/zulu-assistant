@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Edit|Write|MultiEdit|NotebookEdit|mcp__.*",
+        "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-hook.sh'", "timeout": 15 } ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-hook.sh'", "timeout": 15 } ]
+      }
+    ]
+  }
+}

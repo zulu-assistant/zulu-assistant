@@ -334,15 +334,54 @@ function taskRow(t) {
     const text = res?.decision === decision ? res.text : armed ? `CLICK AGAIN TO ${decision.toUpperCase()} #${t.id}` : label;
     return `<button class="act ${cls}${armed ? ' armed' : ''}" data-task="${t.id}" data-decision="${decision}"${res?.pending ? ' disabled' : ''}>${esc(text)}</button>`;
   };
-  const btns = t.status === 'needs_approval'
+  // a plain approval request (POLICY.md item) — gates carry their own buttons below
+  const asking = t.status === 'needs_approval' && t.approval && !t.approval.decision;
+  const btns = asking
     ? `<div class="task-actions">${btn('approve', '✓ APPROVE', 'act-approve')}${btn('decline', '✕ DECLINE', 'act-decline')}</div>` : '';
+  const gates = (t.gates || []).map((g) => gateRow(t, g)).join('');
+  const go = t.program_go ? goRow(t) : '';
   return `<div class="task ${st.cls}">
     <div class="task-top"><span class="task-id">#${t.id}</span><span class="task-title">${esc(t.title)}</span>
       <span class="chip task-chip"><span aria-hidden="true">${st.glyph}</span>${st.label}</span></div>
     <div class="task-meta">${esc(t.owner || 'unowned')} · ${ageLabel(t.ageH)}${esc(on)}${t.priority !== 'normal' ? ' · ' + esc(t.priority) : ''}</div>
     ${policy}
     ${t.last ? `<div class="task-last">${esc(t.last)}</div>` : ''}
-    ${btns}
+    ${btns}${go}${gates}
+  </div>`;
+}
+
+// Guardrails: an active program go — standing approval for the task's merges/local loads, revocable here
+function goRow(t) {
+  const g = t.program_go;
+  const key = `${t.id}:revoke`;
+  const res = decided.get(key);
+  const armed = decideArmed && decideArmed.task === key && Date.now() < decideArmed.until;
+  const text = res ? res.text : armed ? `CLICK AGAIN TO REVOKE ${g.id}` : '⊘ REVOKE GO';
+  return `<div class="gate-meta go-row"><span class="chip gate-chip"><span aria-hidden="true">✓</span>PROGRAM GO ${esc(g.id)}</span>
+    standing: merges into private repos + local loads run without a tap (receipts kept) · since ${esc(String(g.granted_at).slice(11, 16))}Z${g.via === 'pane' ? ' (pane)' : ''}
+    <button class="act act-decline${armed ? ' armed' : ''}" data-task="${t.id}" data-revoke="1" data-decision="revoke"${res?.pending ? ' disabled' : ''}>${esc(text)}</button></div>`;
+}
+
+// Guardrails: one row per pending gate. Approval is of the EXACT text, so the whole
+// command, folder and agent are shown — wrapped, never cut (phone included).
+function gateRow(t, g) {
+  const key = `${t.id}:${g.id}`;
+  const btn = (decision, label, cls) => {
+    const res = decided.get(key);
+    const armed = decideArmed && decideArmed.task === key && decideArmed.decision === decision && Date.now() < decideArmed.until;
+    const text = res?.decision === decision ? res.text : armed ? `CLICK AGAIN TO ${decision.toUpperCase()} ${g.id}` : label;
+    return `<button class="act ${cls}${armed ? ' armed' : ''}" data-task="${t.id}" data-gate="${esc(g.id)}" data-decision="${decision}"${res?.pending ? ' disabled' : ''}>${esc(text)}</button>`;
+  };
+  const age = ageLabel((Date.now() - Date.parse(g.requested_at)) / 36e5);
+  const dry = g.dryRun?.required ? `<div class="gate-meta">dry run: ${g.dryRun.seen_at ? `completed ${esc(String(g.dryRun.seen_at).slice(11, 16))}Z` : 'missing'}</div>` : '';
+  return `<div class="gate">
+    <div class="gate-top"><span class="chip gate-chip"><span aria-hidden="true">⛨</span>GATE ${esc(g.id)}</span><span class="gate-label">${esc(g.label || g.cls)}</span></div>
+    <pre class="gate-cmd">${esc(g.command)}</pre>
+    <div class="gate-meta">${esc(g.agent)} · ${esc(g.cwd)} · ${esc(g.tool)} · ${age} ago${g.commandRedacted ? ' · command withheld (contains a secret)' : ''}</div>
+    ${g.why ? `<div class="gate-meta">${esc(g.why)}</div>` : ''}
+    ${g.previously ? `<div class="gate-meta gate-again">↻ you approved this exact call at ${esc(String(g.previously.at).slice(11, 16))}Z (${esc(g.previously.gate)}); it expired before it ran</div>` : ''}
+    ${dry}
+    <div class="task-actions">${btn('approve', '✓ RUN ONCE', 'act-approve')}${btn('decline', '✕ DECLINE', 'act-decline')}</div>
   </div>`;
 }
 
@@ -359,6 +398,19 @@ function renderWork(work) {
   $('work-cols').innerHTML = col(`AWAITING ${String(w.owner || 'owner').toUpperCase()}`, w.needsApproval, 'nothing needs your approval')
     + col('BLOCKED', w.blocked, 'nothing blocked')
     + col('OPEN / IN PROGRESS', w.open, 'no open cross-agent tasks');
+  renderDecisions(w);
+}
+
+// Guardrails: the owner's decisions pinned at the top (same rows and buttons as WORK, oldest first),
+// and a "(N) " title prefix so a background tab shows the count. Hidden when nothing waits.
+const BASE_TITLE = document.title;
+function renderDecisions(w) {
+  const waiting = [...(w.needsApproval || [])].sort((a, b) => b.ageH - a.ageH);
+  const n = waiting.reduce((k, t) => k + (t.gates?.length || 0) + (t.approval && !t.approval.decision ? 1 : 0), 0);
+  document.title = n ? `(${n}) ${BASE_TITLE}` : BASE_TITLE;
+  $('decisions').classList.toggle('hidden', !waiting.length);
+  $('decisions-title').textContent = `WAITING ON ${String(w.owner || 'you').toUpperCase()} · ${n}`;
+  $('decisions-list').innerHTML = waiting.map(taskRow).join('');
 }
 
 // Approvals: one delegated listener, so a re-render between press and
@@ -368,18 +420,23 @@ function renderWork(work) {
 let decideArmed = null;                 // { task, decision, until } after the first click
 const decided = new Map();              // task id -> { decision, text, pending }
 let lastWork = null;
-$('work-cols').addEventListener('click', (e) => {
+function onDecideClick(e) {
   const b = e.target.closest('button.act-approve, button.act-decline');
   if (!b) return;
-  const { task, decision } = b.dataset;
-  const r = BoardDecide.armClick(decideArmed, task, decision, Date.now());
+  const { task, decision, gate, revoke } = b.dataset;
+  const key = revoke ? `${task}:revoke` : gate ? `${task}:${gate}` : task;
+  const r = BoardDecide.armClick(decideArmed, key, decision, Date.now());
   decideArmed = r.armed;
-  if (r.fire) decideTask(task, decision);
+  // where the owner decided (a receipt field, #350): the pinned WAITING ON YOU strip or the WORK panel
+  if (r.fire) decideTask(task, decision, gate, !!revoke, e.currentTarget.id === 'decisions-list');
   else { renderWork(lastWork); setTimeout(() => renderWork(lastWork), BoardDecide.ARM_MS + 50); }
-});
+}
+$('work-cols').addEventListener('click', onDecideClick);
+$('decisions-list').addEventListener('click', onDecideClick);   // the pinned strip: same buttons, same two-click arm
 
-async function decideTask(task, decision) {
-  decided.set(task, { decision, text: '… SENDING', pending: true });
+async function decideTask(task, decision, gate = null, revoke = false, fromStrip = false) {
+  const key = revoke ? `${task}:revoke` : gate ? `${task}:${gate}` : task;
+  decided.set(key, { decision, text: '… SENDING', pending: true });
   renderWork(lastWork);
   const token = document.querySelector('meta[name="mesh-decision"]')?.content || '';
   const ctl = new AbortController();
@@ -388,16 +445,17 @@ async function decideTask(task, decision) {
   try {
     const res = await fetch(`/api/tasks/${task}`, {
       method: 'PATCH', signal: ctl.signal, cache: 'no-store',
-      headers: { 'content-type': 'application/json', 'x-mesh-decision': token },
-      body: JSON.stringify({ op: 'decide', decision }),
+      headers: { 'content-type': 'application/json', 'x-mesh-decision': token,
+        'x-mesh-surface': [dockMode && 'dock', fromStrip && 'strip'].filter(Boolean).join(',') || 'panel' },
+      body: JSON.stringify(revoke ? { op: 'revoke_go' } : gate ? { op: 'gate_decide', gate, decision } : { op: 'decide', decision }),
     });
     status = res.status;
     body = await res.json().catch(() => null);
   } catch { /* status 0 = never reached the board */ } finally { clearTimeout(timer); }
   const out = BoardDecide.decisionOutcome(status, body);
-  decided.set(task, { decision, text: out.text, pending: false });
+  decided.set(key, { decision, text: out.text, pending: false });
   renderWork(lastWork);
-  showNotice(`#${task} ${decision.toUpperCase()}: ${out.text}`, out.ok ? 'ok' : 'bad', out.reload);
+  showNotice(`#${task}${gate ? ` ${gate}` : ''} ${decision.toUpperCase()}: ${out.text}`, out.ok ? 'ok' : 'bad', out.reload);
   if (out.ok) fetch('/api/status').then((x) => x.json()).then(render).catch(() => {});
 }
 

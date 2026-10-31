@@ -59,8 +59,10 @@ export const MEM = {
 };
 
 // Context-window gauge (src/context.mjs): % of the model window used by an
-// agent's last turn. Compaction happens near the top, so amber/red warn before it.
-export const CONTEXT = { amberPct: 60, redPct: 80, tailBytes: 256 * 1024 };
+// agent's last turn. The context autopilot (SETTINGS.contextAutopilot) asks for a
+// state save at warnPct, compacts at the next idle moment at compactPct once the
+// state is saved, and at forcePct even without it. Gauge: amber ≥ warn, red ≥ compact.
+export const CONTEXT = { warnPct: 70, compactPct: 80, forcePct: 90, tailBytes: 256 * 1024 };
 
 export const DISK = {
   // tune to your Mac so the gauge isn't permanently amber
@@ -153,6 +155,12 @@ export const SETTINGS = {
   // 14 days) as board cards + a digest section; uses your gh login (traffic needs push access).
   // e.g. { repos: ['you/your-repo'], everyHours: 6 }
   repoStats: null,
+  // context autopilot (src/context-autopilot.mjs): the board saves an agent's state and types
+  // /compact at its next idle moment (thresholds in CONTEXT). mode 'off' | 'observe' (ticker
+  // lines only) | 'on'; only/exclude: agent names; continuity: { <agent>: <state file> } for
+  // agents without <repo>/.claude/RESIDENT-STATE.md.
+  // e.g. { mode: 'on', only: ['my-resident'], exclude: [], continuity: {} }
+  contextAutopilot: { mode: 'off' },
   // public edition drift (src/release-drift.mjs): compares this checkout's publish set with the
   // newest release of your public repo; a card, a digest line and one ledger ask per episode.
   // e.g. { repo: 'you/your-repo', everyHours: 6, amberDays: 3, owner: '<agent>', queued: [] }

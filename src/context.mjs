@@ -100,7 +100,7 @@ export function windowFor(model, windows = {}) {
   return keys.length ? windows[keys[0]] : (windows.default || 1_000_000);
 }
 
-export function band(pct, { amberPct = CONTEXT.amberPct, redPct = CONTEXT.redPct } = {}) {
+export function band(pct, { amberPct = CONTEXT.warnPct ?? CONTEXT.amberPct, redPct = CONTEXT.compactPct ?? CONTEXT.redPct } = {}) {
   return pct >= redPct ? 'red' : pct >= amberPct ? 'amber' : 'ok';
 }
 

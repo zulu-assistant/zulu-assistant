@@ -11,6 +11,7 @@
 // answer it (the board's ▲ INPUT row then clears). With no answer it answers
 // itself after --auto seconds (default 25) so an unattended demo keeps cycling.
 import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 export const ROLES = ['needs-input', 'working', 'blocked', 'idle', 'codex'];
 
@@ -92,7 +93,7 @@ export function inputPhase(t, answeredAt, auto = 25) {
   return t >= 12 ? 'input' : 'working';
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const args = process.argv.slice(2);
   const role = args[0];
   if (!ROLES.includes(role)) { console.error(`usage: demo-agent.mjs <${ROLES.join('|')}> [--name <label>] [--auto <s>]`); process.exit(2); }
