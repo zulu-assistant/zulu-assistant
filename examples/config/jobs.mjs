@@ -153,4 +153,8 @@ export const SETTINGS = {
   // 14 days) as board cards + a digest section; uses your gh login (traffic needs push access).
   // e.g. { repos: ['you/your-repo'], everyHours: 6 }
   repoStats: null,
+  // public edition drift (src/release-drift.mjs): compares this checkout's publish set with the
+  // newest release of your public repo; a card, a digest line and one ledger ask per episode.
+  // e.g. { repo: 'you/your-repo', everyHours: 6, amberDays: 3, owner: '<agent>', queued: [] }
+  releaseDrift: null,
 };

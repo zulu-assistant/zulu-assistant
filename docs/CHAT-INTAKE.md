@@ -39,10 +39,17 @@ Retries are safe:
    - `SLACK_APP_TOKEN` (`xapp-…`, scope `connections:write`)
    - `SLACK_BOT_TOKEN` (`xoxb-…`)
 5. Run `/invite @<bot>` in each channel.
-6. Check: `scripts/chat-intake.sh --check` lists every channel (found / invited) and every person (linked). It makes no posts.
+6. Check: `scripts/chat-intake.sh --check` lists every channel (found / invited) and every person (linked). It also shows the running service's link health and how many unfiled requests the next catch-up would file per channel. It makes no posts.
 7. Install the LaunchAgent: `scripts/chat-intake-install.sh` (dry run), then `--apply`. It uses KeepAlive and restarts itself; with no tokens it idles. Logs go to `logs/chat-intake.log`.
 
 Unlisted members' messages are ignored. Their ids are logged, so you can add them.
+
+## Staying connected
+- **Reconnects never wait.** Slack asks for a new socket every few hours. The intake dials the replacement at once and drops the old one, without waiting for its close; a half-dead link may never finish closing.
+- **Watchdog:** every 30 s, a socket that isn't open is replaced. If no `hello` arrives for 15 min, or the connection call keeps failing, the process exits non-zero and the service manager (launchd `KeepAlive`) starts a clean one. Auth errors only slow the retries down and never exit, so a revoked token can't cause a crash loop.
+- **History catch-up:** at start, after every reconnect and every 5 min, each request channel's history is read from a saved cursor (`data/chat-intake/cursor.json`). The first run starts at the service start, so the past is never re-filed on its own. To file an older window by hand: `scripts/chat-intake.sh --sweep --since <ISO time | 12h | 2d>` previews it, and adding `--apply` asks the running service to file it. The window is capped at 7 days, and the service owns the state files. Top-level messages go through the same path as live events, with the same idempotency key, so nothing is filed twice. A request the socket should already have delivered means the link is dead: the sweep files it and forces a reconnect.
+- **Link-health card:** with `linkStatus: { file: 'data/chat-intake/status.json', warnMin: 10, redMin: 60 }` on the service's JOBS entry, the card checks the link, not only the process. It turns amber when there has been no frame and no good sweep for 10 min, or the link has been down that long. At 60 min it turns red and goes on the alert ladder.
+- **Posting back** tries 3 times (now, +1 min, +5 min). Permanent errors such as `invalid_arguments` drop at once. A dropped post leaves a ticker line on the board.
 
 ## Posting a file back
 An owner that made something for the requester (a calendar `.ics`, a PDF, an image) posts it into the request's thread:

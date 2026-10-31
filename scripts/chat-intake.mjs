@@ -4,17 +4,21 @@
 // next to the board; talks to the board over localhost with data/intake-token.
 //
 //   node scripts/chat-intake.mjs            run (idles while tokens are absent)
-//   node scripts/chat-intake.mjs --check    resolve tokens/channels/people, print, exit
+//   node scripts/chat-intake.mjs --check    resolve tokens/channels/people, link health, catch-up preview, exit
+//   node scripts/chat-intake.mjs --sweep --since <ISO|12h|2d> [--apply]
+//        preview the requests posted since then that were never filed; --apply asks the
+//        running service to file them (it owns the state files; capped at 7 days)
 //
 // Design: data/handoffs/slack-adapter-design-2026-10-24.md (private) /
 // docs/CHAT-INTAKE.md (public). Never logs a token; never runs an attachment.
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { ROOT, SETTINGS, PRINCIPALS, OWNER, loadSecrets, resolve } from '../src/config.mjs';
 const OWNER_NAME = OWNER.name;
 import {
   loadChannels, routeEvent, plainText, parseContract, requestBody, replyBody, withheldBody, titleFor,
   ownerFor, safeFileName, renderMentions, coalesce, openSeen, openThreads, openInbox, writeAtomic, chatFileProblem,
+  catchupOldest, parseSince, seenFloor, historyEvents, missedByLink, linkHealth, linkStatePatch, readJson, publishBackoff,
 } from '../src/intake.mjs';
 import { slackApi, listChannels, userNames, mentionedIds, downloadFile, socketMode, uploadToThread } from '../src/intake-slack.mjs';
 
@@ -43,7 +47,7 @@ async function board(method, p, body) {
   return { status: res.status, json: await res.json().catch(() => ({})) };
 }
 
-async function run(secrets, { check = false } = {}) {
+async function run(secrets, { check = false, ...opts } = {}) {
   const bot = secrets.SLACK_BOT_TOKEN;
   const cfg = loadChannels(resolve('config/channels.json'));
   const auth = await slackApi(bot, 'auth.test');
@@ -58,9 +62,27 @@ async function run(secrets, { check = false } = {}) {
   const statusCh = cfg.statusChannel ? visible.get(cfg.statusChannel) : null;
   report.push({ name: cfg.statusChannel, id: statusCh?.id || null, member: Boolean(statusCh?.member), owner: '(status publisher)' });
   const people = [...PRINCIPALS.values()].map((p) => `${p.id}=${p.slack.length ? 'linked' : 'NO chat id'}`);
-  await setStatus({ channels: report, bot: auth.user, team: auth.team });
+  // --check / --sweep run beside the live service: never overwrite its status.json (the board's link card reads it)
+  if (!check) await setStatus({ channels: report, bot: auth.user, team: auth.team });
   if (check) {
     console.log(`bot ${auth.user} in ${auth.team}`);
+    const live = await readJson(path.join(STATE_DIR, 'status.json'), null);
+    const h = linkHealth(live);
+    console.log(`  link (running service): ${h.level.toUpperCase()} — ${h.why}`);
+    const cur = await readJson(path.join(STATE_DIR, 'cursor.json'), {});
+    for (const [id, ts] of Object.entries(cur)) console.log(`  history cursor ${id}: ${new Date(Number(ts) * 1000).toISOString()}`);
+    // what the next catch-up (or the --sweep window) would file (read-only: nothing is filed or posted here)
+    const seenNow = await openSeen(path.join(STATE_DIR, 'seen.json'));
+    const threadsNow = await openThreads(path.join(STATE_DIR, 'threads.json'));
+    for (const [id, c] of channelById) {
+      const oldest = catchupOldest({ cursor: cur[id], since: opts.since });
+      const j = await slackApi(bot, 'conversations.history', { channel: id, oldest, limit: 200 }).catch((e) => ({ error: e.message }));
+      if (j.error) { console.log(`  catch-up #${c.name}: history unreadable — ${j.error}`); continue; }
+      const todo = historyEvents(j.messages, id, oldest).filter((ev) => !seenNow.has(`${id}:${ev.ts}`)
+        && routeEvent(ev, { botUserId: auth.user_id, channelById, threads: threadsNow.map, principals: PRINCIPALS }).kind === 'request');
+      const lastSeen = seenFloor(seenNow.keys(), id);
+      console.log(`  catch-up #${c.name}: last seen ${lastSeen ? new Date(Number(lastSeen) * 1000).toISOString() : 'none'} · ${todo.length} unfiled request(s) since ${new Date(Number(oldest) * 1000).toISOString()}${todo.length ? ` (${todo.map((e) => new Date(Number(e.ts) * 1000).toISOString().slice(0, 16)).join(', ')})` : ''}`);
+    }
     for (const r of report) console.log(`  #${r.name}: ${r.id ? (r.member ? 'ok (member)' : 'FOUND, bot not invited — /invite @' + auth.user) : 'NOT FOUND'} → ${r.owner}`);
     console.log(`  people: ${people.join(', ')}`);
     for (const rule of cfg.standing) console.log(`  standing: ${rule}`);
@@ -200,14 +222,14 @@ async function run(secrets, { check = false } = {}) {
     await drain();
   }
 
-  const failures = new Map();   // outbox item id → failed passes
-  const MAX_TRIES = 30;           // ≈ 5 min at the 10 s publish pass
+  const failures = new Map();   // outbox item id → { n, nextAt }: 3 tries (now, +1 min, +5 min), then dropped
   async function publish() {
     const r = await board('GET', '/api/intake/outbox').catch(() => null);
     const items = r?.status === 200 ? r.json.items || [] : [];
     if (!items.length) return;
     const sent = [];
     for (const it of coalesce(items)) {
+      if ((failures.get(it.id)?.nextAt || 0) > Date.now()) break;   // backing off; keep the order
       if (!it.channel || !it.thread_ts) { log(`[chat-intake] publish #${it.taskId}: no chat thread — dropped`); sent.push(it.id); continue; }
       try {
         if (it.file) {
@@ -228,11 +250,16 @@ async function run(secrets, { check = false } = {}) {
         if (it.status && statusCh?.member) await post(statusCh.id, `#${it.channel_name || 'request'} · ${renderMentions(gist, PRINCIPALS, null)}`).catch(() => {});
       } catch (e) {
         // permanent errors drop the item at once; anything else retries, but at most MAX_TRIES passes
-        const n = (failures.get(it.id) || 0) + 1;
-        failures.set(it.id, n);
-        const permanent = /channel_not_found|not_in_channel|thread_not_found|is_archived|invalid_arguments|invalid_blocks|msg_too_long|no_text/.test(e.message);
-        if (!permanent && n < MAX_TRIES) { if (n === 1) log(`[chat-intake] publish #${it.taskId}: ${e.message} (will retry)`); break; }
+        const n = (failures.get(it.id)?.n || 0) + 1;
+        const wait = publishBackoff(e.message, n);
+        if (wait != null) {
+          failures.set(it.id, { n, nextAt: Date.now() + wait });
+          log(`[chat-intake] publish #${it.taskId}: ${e.message} (try ${n}/3, next in ${Math.round(wait / 1000)} s)`);
+          break;
+        }
         log(`[chat-intake] publish #${it.taskId}: ${e.message} — dropped after ${n} tr${n === 1 ? 'y' : 'ies'}`);
+        await fetch(`${BOARD}/api/event`, { method: 'POST', signal: AbortSignal.timeout(5000), headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'bad', text: `chat intake: could not post #${it.taskId}'s update to its chat thread (${e.message}) — dropped after ${n} tr${n === 1 ? 'y' : 'ies'}` }) }).catch(() => {});
       }
       failures.delete(it.id);
       sent.push(it.id);
@@ -258,11 +285,68 @@ async function run(secrets, { check = false } = {}) {
     await setStatus({ dailyFor: day });
   }
 
+  // history catch-up: after start, after each reconnect, and every 5 min (also the missed-delivery probe)
+  const cursorFile = path.join(STATE_DIR, 'cursor.json');
+  const cursors = await readJson(cursorFile, {});
+  let sweeping = false;
+  async function sweep(why, since = null) {
+    if (sweeping) return false;
+    sweeping = true;
+    try {
+      let missed = 0;
+      const connectedMs = status.state === 'connected' && status.connectedAt ? Date.parse(status.connectedAt) : null;
+      for (const id of channelById.keys()) {
+        const oldest = catchupOldest({ cursor: cursors[id], since });
+        let newest = oldest; let page;
+        do {
+          const j = await slackApi(bot, 'conversations.history', { channel: id, oldest, limit: 200, cursor: page });
+          for (const ev of historyEvents(j.messages, id, oldest)) {
+            if (connectedMs && Number(ev.ts) * 1000 > connectedMs && missedByLink(ev, (k) => seen.has(k))
+              && routeEvent(ev, { botUserId: auth.user_id, channelById, threads: threads.map, principals: PRINCIPALS }).kind === 'request') missed++;
+            await onEvent(ev, { eventId: `hist:${id}:${ev.ts}`, teamId: auth.team_id, history: true });
+            if (Number(ev.ts) > Number(newest)) newest = ev.ts;
+          }
+          for (const m of j.messages || []) if (Number(m.ts) > Number(newest)) newest = m.ts;
+          page = j.has_more ? j.response_metadata?.next_cursor : null;
+        } while (page);
+        // the cursor only moves forward (a manual window reads further back without rewinding it)
+        if (!cursors[id] || Number(newest) > Number(cursors[id])) { cursors[id] = newest; await writeAtomic(cursorFile, cursors); }
+      }
+      await setStatus({ lastSweepOkAt: new Date().toISOString() });
+      if (since != null) log(`[chat-intake] manual sweep since ${new Date(since).toISOString()} done`);
+      if (missed) { log(`[chat-intake] history sweep (${why}): the socket missed ${missed} request(s) — filed now`); sock.kick('socket missed messages'); }
+    } catch (e) { log(`[chat-intake] history sweep (${why}): ${e.message}`); return false; }
+    finally { sweeping = false; }
+    return true;
+  }
+  // a manual window asked for with `--sweep --since … --apply` (the service owns the state files)
+  const sweepReq = path.join(STATE_DIR, 'sweep-request.json');
+  async function manualSweep() {
+    const req = await readJson(sweepReq, null);
+    if (!req) return;
+    const since = Number(req.since);
+    if (!Number.isFinite(since)) { await unlink(sweepReq).catch(() => {}); return; }
+    log(`[chat-intake] manual sweep requested since ${new Date(since).toISOString()}`);
+    if (await sweep('manual', since)) await unlink(sweepReq).catch(() => {});
+  }
+
+  let lastFrameWrite = 0;
   const sock = socketMode({
     appToken: secrets.SLACK_APP_TOKEN, onEvent, log,
-    onState: (state, err) => setStatus({ state, ...(err ? { lastError: err } : {}) }),
+    onHello: ({ reconnect }) => sweep(reconnect ? 'reconnect' : 'start'),
+    onState: (state, err) => {
+      const at = new Date().toISOString();
+      if (state === 'frame') {                     // liveness only: written at most every 30 s
+        if (Date.now() - lastFrameWrite < 30_000) { status.lastFrameAt = at; return; }
+        lastFrameWrite = Date.now();
+        return setStatus({ lastFrameAt: at });
+      }
+      return setStatus(linkStatePatch(state, err, status, at));
+    },
   });
   const timers = [
+    setInterval(() => sweep('sweep').catch(() => {}), 5 * 60_000),
+    setInterval(() => manualSweep().catch(() => {}), 30_000),
     setInterval(() => drain().catch(() => {}), 30_000),
     setInterval(() => publish().catch((e) => log(`[chat-intake] publish: ${e.message}`)), 10_000),
     setInterval(() => daily().catch(() => {}), 5 * 60_000),
@@ -272,7 +356,18 @@ async function run(secrets, { check = false } = {}) {
 }
 
 async function main() {
-  const check = process.argv.includes('--check');
+  const argv = process.argv.slice(2);
+  const sweepMode = argv.includes('--sweep');
+  const check = argv.includes('--check') || sweepMode;
+  const sinceArg = argv[argv.indexOf('--since') + 1];
+  const since = sweepMode ? parseSince(argv.includes('--since') ? sinceArg : '') : null;
+  if (sweepMode && since == null) { console.log('usage: chat-intake --sweep --since <ISO time | 12h | 2d> [--apply]'); process.exit(2); }
+  if (sweepMode && argv.includes('--apply')) {
+    await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+    await writeAtomic(path.join(STATE_DIR, 'sweep-request.json'), { since, at: new Date().toISOString() });
+    console.log(`asked the running service to file unfiled requests since ${new Date(since).toISOString()} (picked up within 30 s; see logs/chat-intake.log)`);
+    process.exit(0);
+  }
   await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
   try { status.dailyFor = JSON.parse(await readFile(path.join(STATE_DIR, 'status.json'), 'utf8')).dailyFor; } catch { /* first run */ }
   for (;;) {
@@ -284,7 +379,7 @@ async function main() {
       continue;
     }
     try {
-      const h = await run(s, { check });
+      const h = await run(s, { check, since });
       if (check) process.exit(0);
       log('[chat-intake] running');
       // re-start when the tokens change (owner rotated them)

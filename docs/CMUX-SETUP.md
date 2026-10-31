@@ -29,7 +29,7 @@ by domain.
 brew install --cask cmux        # app in /Applications/cmux.app, CLI on PATH as `cmux`
 ```
 
-**Pin 0.65.x** (tested on 0.65.0; 0.64.25 also works). The board's self-heal code targets specific 0.64/0.65 behaviour;
+**Pin 0.65.x** (tested on 0.65.2 and 0.65.0; 0.64.25 also works). The board's self-heal code targets specific 0.64/0.65 behaviour;
 see *Known quirks* below. cmux auto-updates through Sparkle and ships fixes quickly — if you move
 to a newer minor version, re-run `./install.sh verify` and watch the `cmux:bridge` card.
 
@@ -188,7 +188,7 @@ ATTENTION shows (INPUT, APPROVAL, BLOCKED, ctx) comes from the board, exactly as
 | Password migrated out of `cmux.json` | the file looks empty after load | canonical copy in `data/cmux-socket-password` |
 | Auto-resume runs before the password heal | sessions die on `auth_required` | `src/heal-restore.mjs` retries safely |
 | `workspace-group create` makes an empty placeholder anchor workspace | stray workspaces appear | `sync-groups` repairs in place; the reconciler never registers placeholders; close them with `mesh-cli.mjs close-placeholders --apply` |
-| **NODE_OPTIONS helper purged** | cmux launches Claude with `NODE_OPTIONS=--require=$TMPDIR/cmux-claude-node-options/restore-node-options.cjs`; macOS temp cleanup can delete that folder, and then every Node start from a cmux shell fails with `Cannot find module … restore-node-options.cjs` | recreate the file (a module that strips its own `--require` from `NODE_OPTIONS` and keeps other flags); `unset NODE_OPTIONS` only fixes one shell. It recurs on the next temp purge |
+| **NODE_OPTIONS helper purged** (0.64.x–0.65.0) | cmux launches Claude with `NODE_OPTIONS=--require=$TMPDIR/cmux-claude-node-options/restore-node-options.cjs`; macOS temp cleanup can delete that folder, and then every Node start from a cmux shell fails with `Cannot find module … restore-node-options.cjs` | recreate the file (a module that strips its own `--require` from `NODE_OPTIONS` and keeps other flags); `unset NODE_OPTIONS` only fixes one shell. It recurs on the next temp purge. 0.65.2 no longer launches Claude with this helper (cmux PR #18284), so the quirk doesn't apply there |
 | Attention signal ~90 % reliable | occasional delayed or duplicate needs-input, stale sidebar text | the board reads session state from the hook file, not the sidebar |
 | Sessions started outside cmux are invisible | no tile, no Feed | launch agents inside cmux workspaces |
 | Workspace UUIDs change across restores | IDs are not stable keys | the mesh keys agents by workspace and adopts renames each poll; don't build on UUIDs |

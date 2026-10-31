@@ -19,6 +19,7 @@ import { syncDemoCmux } from './src/demo-cmux.mjs';
 import { recordEvent, getEvents } from './src/events.mjs';
 import { maybeCiCostWatch } from './src/ci-cost-watch.mjs';
 import { maybeRepoStats } from './src/repo-stats.mjs';
+import { maybeReleaseDrift } from './src/release-drift.mjs';
 import { maybeBrain, verifyClose } from './src/brain.mjs';
 import { maybeViewWatch } from './src/view-watch.mjs';
 import { allowedSource, localOnly } from './src/guard.mjs';
@@ -398,6 +399,9 @@ async function poll() {
       .catch((e) => console.error('[ci-cost]', e.message));
     maybeRepoStats({ cfg: SETTINGS.repoStats, now, record: (k, t) => recordEvent(k, t).catch(() => {}) })
       .catch((e) => console.error('[repo-stats]', e.message));
+    if (!DEMO) maybeReleaseDrift({ cfg: SETTINGS.releaseDrift, ledger, now: now.getTime(), record: (k, t) => recordEvent(k, t).catch(() => {}),
+      afterCreate: (t) => afterTaskChange(t, { wake: t.owner && !isOwner(t.owner) ? [t.owner] : [] }, 'board') })
+      .catch((e) => console.error('[release-drift]', e.message));
     if (!DEMO) maybeViewWatch({ entries: SETTINGS.viewWatch, secrets: loadSecrets(), now: now.getTime(), record: (k, t) => recordEvent(k, t).catch(() => {}) }).catch(() => {});
     if (!DEMO) maybeBrain({ cfg: SETTINGS.brain, ledger, agents: dirCache, now: now.getTime(), record: (k, t) => recordEvent(k, t).catch(() => {}),
       afterCreate: (t) => afterTaskChange(t, { wake: t.owner && !isOwner(t.owner) ? [t.owner] : [] }, 'board') })

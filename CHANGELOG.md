@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-10-31
+
+### Added
+- **Release-drift watch** (`SETTINGS.releaseDrift`, off in `examples/`) for maintainers who publish a public edition with `scripts/publish.mjs`. A card, a digest line and one ledger ask appear when public files have sat committed but unreleased for more than `amberDays`.
+
+### Fixed
+- **Slack intake stays connected.** After a routine Slack disconnect whose socket never finished closing, the intake could sit silent for days with a green card. It now reconnects at once, replaces stuck sockets every 30 s, and exits for the service manager to restart it if no hello arrives for 15 min. Every 5 min it reads each request channel's history from a saved cursor to file anything the socket missed (`--sweep --since <ISO|12h|2d> [--apply]` for an older window). Posting back retries 3 times. With `linkStatus` on its JOBS entry the card judges the link, not only the process. `--check` never writes the running service's status. Socket closes are logged with their code, and a good reconnect clears the last error. See docs/CHAT-INTAKE.md "Staying connected".
+
+### Changed
+- docs/CMUX-SETUP.md: tested on cmux 0.65.2; the NODE_OPTIONS-helper quirk applies to 0.64.x–0.65.0 only.
+- README: the commercial-support line links its site, and the still screenshot is gone (the animated cmux demo shows the same view).
+
 ## [0.1.0-beta.3] - 2026-10-28
 
 ### Added
@@ -137,7 +149,8 @@ First public release.
 - Publish manifest (checked locally with `scripts/publish.mjs --check`), and the scrub gate
   and gitleaks in CI.
 
-[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v0.1.0-beta.4...HEAD
+[0.1.0-beta.4]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.1

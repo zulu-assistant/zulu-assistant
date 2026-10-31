@@ -25,8 +25,6 @@ its row rises to the top of ATTENTION, and when it's answered the row drops back
 
 ![cmux demo: an agent works, asks for permission, the INPUT row rises to the top of the phosphor sidebar, it is answered and the row drops back](docs/media/cmux-demo.gif)
 
-![The two-part console: agent panes in cmux, the board beside them, the phosphor ATTENTION sidebar](docs/media/two-part-console.png)
-
 <sub>Recorded from `./install.sh --demo --cmux`: its own cmux window, six scripted fake agents, every name synthetic.</sub>
 
 ## The problem
@@ -167,6 +165,6 @@ later, run `./install.sh star`.
 [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) ·
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · [CHANGELOG.md](CHANGELOG.md)
 
-Commercial setup & support: digitalnethosting
+Commercial setup & support: [digitalnethosting.com](https://digitalnethosting.com)
 
 MIT © Zulu Assistant contributors. cmux is a separate project under its own license.

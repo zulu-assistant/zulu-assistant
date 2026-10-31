@@ -11,8 +11,24 @@ import { JOBS, DOCKER_CONTAINERS, CRON, DISK, MEM, SETTINGS } from './config.mjs
 import * as collect from './collect.mjs';
 import { readStateSync, setupCard } from './setup.mjs';
 import { readStatsSync, repoCards } from './repo-stats.mjs';
+import { driftCard, readStateSync as readDriftSync } from './release-drift.mjs';
 import { brainCard, readStateSync as readBrainSync } from './brain.mjs';
 import { viewCards, readStateSync as readViewSync } from './view-watch.mjs';
+import { linkHealth } from './intake.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const REPO = fileURLToPath(new URL('..', import.meta.url));
+/**
+ * An always-on service that keeps a network link (JOBS `linkStatus: { file, warnMin, redMin }`):
+ * a running pid is not enough — the service's own status file must show the link alive (#340).
+ */
+export function linkCard(job, pid, now = Date.now(), read = (f) => JSON.parse(readFileSync(new URL(f, `file://${REPO}`), 'utf8'))) {
+  let st = null;
+  try { st = read(job.linkStatus.file); } catch { /* no status yet */ }
+  const h = linkHealth(st, { now, warnMin: job.linkStatus.warnMin ?? 10, redMin: job.linkStatus.redMin ?? 60 });
+  return { status: h.level === 'down' ? 'down' : h.level, detail: `running · pid ${pid} · link ${h.level === 'ok' ? 'ok' : h.level === 'warn' ? 'QUIET' : 'DOWN'}: ${h.why}` };
+}
 
 let pollCount = 0;
 
@@ -299,7 +315,8 @@ export async function snapshot() {
       }
     } else if (plist.keepAlive) {
       j.schedule = 'always-on';
-      if (lc.pid) { j.status = 'ok'; j.detail = `running · pid ${lc.pid}`; }
+      if (lc.pid && job.linkStatus) Object.assign(j, linkCard(job, lc.pid));
+      else if (lc.pid) { j.status = 'ok'; j.detail = `running · pid ${lc.pid}`; }
       else { j.status = 'down'; j.detail = 'service not running'; }
     } else if (plist.interval) {
       j.schedule = `every ${Math.round(plist.interval / 60)}m`;
@@ -400,6 +417,9 @@ export async function snapshot() {
   if (setup) jobs.push(setup);
   // GitHub stats (SETTINGS.repoStats): informational cards, fetched by server.mjs
   jobs.push(...repoCards(readStatsSync(), SETTINGS.repoStats, now));
+  // public edition vs the newest public release (SETTINGS.releaseDrift): amber only, never on the alert ladder
+  const drift = driftCard(readDriftSync(), SETTINGS.releaseDrift, now.getTime());
+  if (drift) jobs.push(drift);
   // vault + graph upkeep (SETTINGS.brain): amber only, never on the alert ladder
   const brain = brainCard(readBrainSync(), SETTINGS.brain, now.getTime());
   if (brain) jobs.push(brain);

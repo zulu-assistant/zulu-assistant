@@ -123,13 +123,38 @@ export async function downloadFile(token, file, dir, localName, { maxBytes, fetc
 /**
  * Socket Mode connection with reconnect. Every envelope is ACKED FIRST (Slack
  * re-sends un-acked envelopes after ~3 s), then handed to onEvent(event, meta).
- * Slack refreshes sockets about hourly ("disconnect" frames) — that is normal.
+ * Slack refreshes sockets every few hours ("disconnect" frames) — that is normal.
+ *
+ * Reconnecting never waits for the old socket's `close` event: a half-dead TCP link
+ * may never finish the close handshake (task #340 — 2.5 days silent with the process
+ * alive). On `disconnect` the replacement is dialled at once and the old socket is
+ * dropped; a watchdog revives any socket that is not OPEN; and when no `hello` arrives
+ * for `maxDownMs`, or `connections.open` keeps failing (not an auth error), `exit(1)`
+ * hands the restart to the service manager (launchd KeepAlive).
+ * Slack's keep-alive pings are WebSocket control frames that Node's WebSocket answers
+ * internally, so liveness is judged from what we can see (frames, socket state) plus the
+ * caller's history sweep (`kick()` forces a reconnect when the sweep finds missed messages).
  */
-export function socketMode({ appToken, onEvent, onState = () => {}, log = console.log, WebSocketImpl = globalThis.WebSocket, fetchImpl = fetch }) {
+export function socketMode({ appToken, onEvent, onState = () => {}, onHello = () => {}, log = console.log,
+  WebSocketImpl = globalThis.WebSocket, fetchImpl = fetch, timers = globalThis, now = () => Date.now(),
+  exit = (code) => process.exit(code), maxDownMs = 15 * 60e3, maxOpenFailures = 8, watchdogMs = 30e3, stuckMs = 30e3 } = {}) {
   let ws = null;
+  let wsSince = 0;               // when the current socket was created
   let stopped = false;
   let backoff = 1000;
   let timer = null;
+  let openFailures = 0;
+  let downSince = now();         // null while connected (hello seen)
+  let everConnected = false;
+
+  const drop = (sock) => {
+    if (!sock) return;
+    try { sock.close(); } catch { /* already gone */ }
+  };
+  const lost = (why) => {
+    if (downSince == null) downSince = now();
+    onState('disconnected', why);
+  };
 
   async function connect() {
     if (stopped) return;
@@ -137,34 +162,85 @@ export function socketMode({ appToken, onEvent, onState = () => {}, log = consol
     let url;
     try {
       url = (await slackApi(appToken, 'apps.connections.open', {}, { fetchImpl })).url;
+      openFailures = 0;
     } catch (e) {
       onState('error', e.message);
       log(`[chat-intake] connections.open failed: ${e.message}`);
-      if (/invalid_auth|not_allowed_token_type|account_inactive|token_revoked/.test(e.message)) { backoff = 5 * 60e3; }
+      if (/invalid_auth|not_allowed_token_type|account_inactive|token_revoked/.test(e.message)) backoff = 5 * 60e3;
+      else if (++openFailures >= maxOpenFailures) return giveUp(`connections.open failed ${openFailures}× in a row`);
       return retry();
     }
+    if (stopped) return;
     const sock = new WebSocketImpl(url);
-    ws = sock;
+    ws = sock; wsSince = now();
     sock.addEventListener('message', (m) => {
+      if (ws !== sock) return;                       // a replaced socket: ignore whatever it still says
       let msg;
       try { msg = JSON.parse(typeof m.data === 'string' ? m.data : String(m.data)); } catch { return; }
+      onState('frame');
       if (msg.envelope_id) { try { sock.send(JSON.stringify({ envelope_id: msg.envelope_id })); } catch { /* socket closing; Slack retries */ } }
-      if (msg.type === 'hello') { backoff = 1000; onState('connected'); return; }
-      if (msg.type === 'disconnect') { log(`[chat-intake] slack asked to reconnect (${msg.reason})`); try { sock.close(); } catch { /* */ } return; }
+      if (msg.type === 'hello') {
+        backoff = 1000; downSince = null;
+        const again = everConnected; everConnected = true;
+        onState('connected');
+        Promise.resolve(onHello({ reconnect: again })).catch((e) => log(`[chat-intake] after hello: ${e.message}`));
+        return;
+      }
+      if (msg.type === 'disconnect') {
+        log(`[chat-intake] slack asked to reconnect (${msg.reason}) — dialling a new socket`);
+        replace(`disconnect (${msg.reason})`);
+        return;
+      }
       if (msg.type === 'events_api' && msg.payload?.event) {
         Promise.resolve(onEvent(msg.payload.event, { eventId: msg.payload.event_id, teamId: msg.payload.team_id, retry: msg.retry_attempt || 0 }))
           .catch((e) => log(`[chat-intake] event handler: ${e.message}`));
       }
     });
-    sock.addEventListener('close', () => { if (ws === sock) { ws = null; onState('disconnected'); retry(); } });
-    sock.addEventListener('error', () => { /* close follows */ });
+    sock.addEventListener('close', (e) => {
+      if (ws !== sock) return;
+      const why = `socket closed (code ${e?.code ?? '?'}${e?.reason ? `, ${e.reason}` : ''})`;
+      log(`[chat-intake] ${why} — reconnecting`);
+      ws = null; lost(why); retry();
+    });
+    sock.addEventListener('error', () => { /* close follows — and if it never does, the watchdog acts */ });
   }
+  /** Forget the current socket (never wait for its close) and dial a new one now. */
+  function replace(why) {
+    const old = ws; ws = null;
+    drop(old);
+    lost(why);
+    clear();
+    backoff = 1000;
+    connect();
+  }
+  function clear() { if (timer) { timers.clearTimeout(timer); timer = null; } }
   function retry() {
     if (stopped || timer) return;
     const wait = backoff;
     backoff = Math.min(backoff * 2, 5 * 60e3);
-    timer = setTimeout(() => { timer = null; connect(); }, wait);
+    timer = timers.setTimeout(() => { timer = null; connect(); }, wait);
   }
+  function giveUp(why) {
+    log(`[chat-intake] link down — ${why}; exiting so the service manager restarts it`);
+    stopped = true; clear(); timers.clearInterval(dog);
+    drop(ws); ws = null;
+    exit(1);
+  }
+  const OPEN = WebSocketImpl.OPEN ?? 1;
+  const dog = timers.setInterval(() => {
+    if (stopped) return;
+    if (downSince != null && now() - downSince > maxDownMs) return giveUp(`no hello for ${Math.round((now() - downSince) / 60e3)} min`);
+    if (timer) return;                                   // a retry is already scheduled
+    if (!ws) return void retry();                        // nothing live and nothing pending
+    if (ws.readyState !== OPEN && now() - wsSince > stuckMs) {
+      log(`[chat-intake] socket stuck (readyState ${ws.readyState}) — reconnecting`);
+      replace('stuck socket');
+    }
+  }, watchdogMs);
   connect();
-  return { stop() { stopped = true; clearTimeout(timer); try { ws?.close(); } catch { /* */ } } };
+  return {
+    stop() { stopped = true; clear(); timers.clearInterval(dog); drop(ws); ws = null; },
+    /** The caller saw evidence the link is dead (history had messages the socket never delivered). */
+    kick(why = 'kicked') { if (!stopped) { log(`[chat-intake] ${why} — reconnecting`); replace(why); } },
+  };
 }

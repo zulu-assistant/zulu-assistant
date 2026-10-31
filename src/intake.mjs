@@ -394,8 +394,99 @@ export async function openSeen(file, { ttl = SEEN_TTL_MS, now = Date.now } = {})
   for (const [k, at] of Object.entries(doc)) if (at < cut) delete doc[k];
   return {
     has: (...keys) => keys.some((k) => k && doc[k] != null),
+    keys: () => Object.keys(doc),
     async add(...keys) { for (const k of keys) if (k) doc[k] = now(); await writeAtomic(file, doc); },
   };
+}
+
+// ── history catch-up (task #340) ─────────────────────────────────────────────
+// Socket Mode delivers events only while the link is up. After a restart, a
+// reconnect, and on a 5-minute sweep, the intake reads each request channel's
+// history from its cursor and feeds top-level messages through the same route →
+// seen → inbox path (same idempotency key, so nothing is ever filed twice).
+
+export const CATCHUP_MAX_DAYS = 7;
+const tsMs = (ts) => Math.round(Number(String(ts || 0)) * 1000);
+const msTs = (ms) => (ms / 1000).toFixed(6);
+
+/**
+ * Where to start reading a channel (a Slack ts string), never older than maxDays (pure).
+ * No cursor yet (first run) = the service start: the past is never re-filed by itself;
+ * `chat-intake --sweep --since <time> --apply` asks for an older window by hand.
+ * `since` (ms) is that manual window; it may only reach further back than the cursor.
+ */
+export function catchupOldest({ cursor, since, now = Date.now(), maxDays = CATCHUP_MAX_DAYS }) {
+  const cap = now - maxDays * 864e5;
+  let from = cursor || msTs(now);
+  if (since != null && since < tsMs(from)) from = msTs(since);
+  return tsMs(from) < cap ? msTs(cap) : String(from);
+}
+
+/** Newest seen message ts in a channel, from seen.json keys "channel:ts" — `--check` display only, never a catch-up floor (pure). */
+export function seenFloor(keys, channelId) {
+  let best = null;
+  for (const k of keys) {
+    if (!k.startsWith(`${channelId}:`)) continue;
+    const ts = k.slice(channelId.length + 1);
+    if (/^\d+\.\d+$/.test(ts) && (!best || Number(ts) > Number(best))) best = ts;
+  }
+  return best;
+}
+
+/** `--since` value: an ISO time or "<n>h" / "<n>d" ago → ms, or null (pure). */
+export function parseSince(v, now = Date.now()) {
+  const m = /^(\d+(?:\.\d+)?)([hd])$/.exec(String(v || '').trim());
+  if (m) return now - Number(m[1]) * (m[2] === 'h' ? 3600e3 : 864e5);
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * conversations.history messages (newest first) → top-level messages to route, oldest
+ * first, as events (`channel` and `type` filled in); thread replies are left to the socket.
+ */
+export function historyEvents(messages, channelId, oldest) {
+  return (messages || [])
+    .filter((m) => m && m.ts && Number(m.ts) > Number(oldest || 0) && (!m.thread_ts || m.thread_ts === m.ts || m.subtype === 'thread_broadcast'))
+    .map((m) => ({ type: 'message', ...m, channel: channelId }))
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+}
+
+/** A message the socket should already have delivered: older than graceMs and still unseen (pure). */
+export const missedByLink = (ev, seenHas, now = Date.now(), graceMs = 60e3) =>
+  now - tsMs(ev.ts) > graceMs && !seenHas(`${ev.channel}:${ev.ts}`);
+
+const PERMANENT = /channel_not_found|not_in_channel|thread_not_found|is_archived|invalid_arguments|invalid_blocks|msg_too_long|no_text/;
+/** Publish retry policy: wait (ms) before the next try, or null = drop now. 3 tries: now, +1 min, +5 min (pure). */
+export function publishBackoff(error, tries) {
+  if (PERMANENT.test(String(error)) || tries >= 3) return null;
+  return tries === 1 ? 60e3 : 300e3;
+}
+
+/** status.json patch for a link state change; a good hello clears the last error. */
+export function linkStatePatch(state, err, prev, at) {
+  if (state === 'connected') return { state, connectedAt: at, downSince: null, lastFrameAt: at, lastError: null, reconnects: (prev.reconnects || 0) + (prev.connectedAt ? 1 : 0) };
+  if (state === 'disconnected') return { state, downSince: prev.downSince || at, ...(err ? { lastError: err } : {}) };
+  return { state, ...(err ? { lastError: err } : {}) };
+}
+
+/** Link health for the board card and --check (pure). → { level: ok|warn|down, why } */
+export function linkHealth(status, { now = Date.now(), warnMin = 10, redMin = 60 } = {}) {
+  if (!status) return { level: 'ok', why: 'no status yet' };
+  if (status.state === 'not configured') return { level: 'ok', why: 'not configured (no chat tokens)' };
+  const age = (iso) => (iso ? (now - Date.parse(iso)) / 60e3 : Infinity);
+  const frame = age(status.lastFrameAt);
+  const sweep = age(status.lastSweepOkAt);
+  const down = status.state === 'connected' ? 0 : age(status.downSince || status.since || status.at);
+  // connected but neither a frame nor a good sweep for a while: the link may be dead while the pid lives
+  const quiet = status.state === 'connected' ? Math.min(frame, sweep, age(status.connectedAt)) : 0;
+  const worst = Math.max(down, quiet);
+  const fmt = (m) => (m === Infinity ? 'never' : m < 90 ? `${Math.round(m)}m ago` : `${Math.round(m / 60)}h ago`);
+  const why = `${status.state}${status.state !== 'connected' && down ? ` for ${Math.round(down)}m` : ''} · last frame ${fmt(frame)} · last sweep ${fmt(sweep)}` +
+    (status.reconnects ? ` · ${status.reconnects} reconnect(s)` : '');
+  if (worst >= redMin) return { level: 'down', why };
+  if (worst >= warnMin) return { level: 'warn', why };
+  return { level: 'ok', why };
 }
 
 /** Thread → task map ("channel:ts" → id), persisted so replies route after a restart. */

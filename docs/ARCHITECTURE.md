@@ -28,6 +28,7 @@ packages and no build step. The process does two jobs:
 | `src/chrome.mjs` | Optional cmux "chrome": sets workspace color and description per domain, plus task pills and progress. Off by default |
 | `src/context.mjs` | Context-window gauge per session, read from the tail of each transcript |
 | `src/view-watch.mjs` | Optional cards that read one row of a database view over PostgREST (`SETTINGS.viewWatch`: column thresholds and timestamp ages). Read-only, with the dead-man's project URL and key; amber only, never on the escalation ladder. Off by default |
+| `src/release-drift.mjs` | Optional public-edition drift watch for maintainers who publish with `scripts/publish.mjs` (`SETTINGS.releaseDrift`). It compares the publish set of the committed checkout with the git tree of the public repo's newest release, by blob sha. Output: one card (amber once unshipped changes are older than `amberDays`), a digest line, and one ledger task per drift episode, which the board cancels once a release ships it. Read-only (git plus `gh api` GETs). Off by default |
 | `src/config.mjs` | Overlay resolver (`overlay/` → core → `examples/`), registry re-exports, secrets loader |
 | `src/events.mjs` | Ring buffer behind the bottom ticker (`data/events.json`) |
 | `src/guard.mjs` | Request source guards (`allowedSource`, `localOnly`) |
