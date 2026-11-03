@@ -17,7 +17,8 @@
    - **It runs once.** The agent re-runs the command; the hook finds the grant, consumes it and lets the call through. Any change to the command is a new gate. So is running it a second time, and so is the same command from another folder or agent.
    - **Unused approvals expire.** An approval that expires before it ran is never re-armed: the next attempt asks again. That row says *↻ you approved this exact call at 13:52Z (g8); it expired before it ran*, and the agent is told so.
 5. **Decline:** the agent is told not to retry. A re-attempt is counted on the gate, and the task can't close until that is waived with a reason.
-6. **Receipts:** `gates[]` on `GET /api/tasks/N`, one ledger comment per step (`GATE g1 requested · merge · gh pr merge 38 … / APPROVED by <owner> (board, phone/tailnet) / executed 11:42:07Z (single use)`), and `task.sh audit N` (add `--json` for the raw records).
+6. **Receipts:** `gates[]` on `GET /api/tasks/N`, one ledger comment per step (`GATE g1 requested · merge · gh pr merge 38 … / APPROVED by <owner> (board, phone/tailnet) / released to run once 11:42:07Z (single-use grant) — the agent reports the outcome on this task`), and `task.sh audit N` (add `--json` for the raw records).
+   - **"Released" is not "done".** The board lets the call through; the command then runs in the agent's own process, and the board never sees whether it succeeded. The agent reports the outcome on the task. In the stored data the status is still called `executed` (the 1.0 name, kept so existing ledgers need no migration); everything you read says *released to run once*. A rename of the stored value can come with 1.1's upgrade migrations.
    - Each decision also records where it was made: `surface` is one of `board` (the WORK panel), `phone` (over the tailnet), `dock` (the `?dock=1` view), `strip` (the pinned WAITING ON YOU strip), `cli` (`task.sh gate`) or `pane` (an answer Mission Control recorded). `surfaces` lists every one that applies, e.g. a phone tap in the strip.
    - `phone` comes from the request's network address, so the page can't claim it.
    - This is a receipt only: it never changes who may decide.
@@ -92,6 +93,21 @@ Approving every merge after you've already said "go ahead with this" is noise. S
 **The fast path is tested on the real hook JSON.** A trigger matches the JSON Claude Code actually sends, where a word or flag that ends the command is followed by `",` or `"}`. It doesn't match a tidied-up copy of the command. The tests send every gated sample, with the action at the end and in the middle, in each field order, through the real `gate-hook.sh`. The hook uses the system `grep`, and a grep error counts as a hit.
 
 **Every check is logged:** each answer the board gives (pass, allow, deny, observed) adds one line to `data/guardrails/checks.jsonl`: time, agent, tool, decision, task/gate, and a 160-character excerpt with secrets withheld. A call that ran ungated but appears there was passed by the board; a call that's missing never reached it.
+
+## Crash and restart
+An approval runs **at most once**, even if the board dies mid-call. The board lets a gated call through only when `grants.json` holds an **unspent** grant for exactly that call and agent. A missing, corrupt or unreadable grants file reads as "no grant": the call is refused and becomes a new gate. Lost state can only make a run less likely, never more. The file is replaced atomically (a temp file, then a rename), and a leftover temp file is never read.
+
+Redeeming takes two writes: the grant is marked spent, then the ledger gets the receipt. The hook lets the tool run only on an `allow` it actually received. So for a crash:
+
+| the board dies… | the hook gets | what ran | the next attempt |
+|---|---|---|---|
+| before the grant is marked spent | no answer → **denied** | nothing | allowed once (this is the first run) |
+| after the grant is spent, before the receipt | no answer → **denied** | nothing | **a new gate**; the owner is asked again |
+| after the `allow` was sent | allow | the command, once, in the agent's process | **a new gate** |
+
+**Startup reconcile.** In the middle case the task's receipt is left at *approved*. When the board starts, before it accepts any request, it compares spent grants with the ledger. A gate still marked approved whose grant was spent gets its receipt, stamped with the time the grant was spent and noted `recorded after restart; outcome unknown`. The board can't tell the middle case from the last one, so it doesn't guess. A grant that expired unused gets an `expired` receipt the same way. Running it again changes nothing, and it never wakes an agent. The board log says how many spent grants it checked when there was nothing to repair.
+
+The tests in `test/gate-crash.test.mjs` cover this: a real process killed between the two writes, a normal run and then a restart, torn and corrupt grant files, and concurrent attempts at one approved call (exactly one is allowed).
 
 ## Install
 ```bash

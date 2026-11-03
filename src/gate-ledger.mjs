@@ -95,14 +95,20 @@ export function settleAfterGates(t, ownerId) {
   }
 }
 
-/** executed / expired / rerun_declined / attempt — written by the gate service. */
-export function gateEvent(t, { gate, event }, iso) {
+/**
+ * executed / expired / rerun_declined / attempt — written by the gate service.
+ * `executed` is the stored 1.0 name; it means "released to run once": the board let the call
+ * through and the agent reports the outcome. `at` + `note` come from the startup reconcile (#369).
+ */
+export function gateEvent(t, { gate, event, at, note }, iso) {
   const g = findGate(t, gate);
-  if (event === 'executed') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'executed'; g.executed_at = iso; }
+  if (at != null && (typeof at !== 'string' || Number.isNaN(Date.parse(at)))) throw new GateError(400, 'gate event "at" must be an ISO time');
+  if (event === 'executed') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'executed'; g.executed_at = at || iso; }
   else if (event === 'expired') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'expired'; }
   else if (event === 'rerun_declined') { g.rerunsAfterDecline += 1; g.attempts += 1; }
   else if (event === 'attempt') g.attempts += 1;
   else throw new GateError(400, `unknown gate event ${event}`);
+  if (note != null) g.note = String(note).slice(0, 200);
   return g;
 }
 
@@ -122,7 +128,7 @@ export function auditRows(t) {
   for (const g of t.gates || []) {
     rows.push({ at: g.requested_at, gate: g.id, event: g.status === 'dry_required' || g.status === 'needs_focus' ? g.status : 'requested', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: g.engine });
     if (g.decided_at) rows.push({ at: g.decided_at, gate: g.id, event: g.via === 'standing' ? 'auto-approved' : g.decision === 'approve' ? 'approved' : 'declined', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.decided_by, via: g.via === 'standing' ? `program go ${g.go}` : g.via + (g.surfaces?.length && g.surfaces.join('+') !== g.via ? ` · ${g.surfaces.join('+')}` : '') + (g.recorded_by ? ` (recorded by ${g.recorded_by})` : ''), surface: g.surface || null, reason: g.reason });
-    if (g.executed_at) rows.push({ at: g.executed_at, gate: g.id, event: 'executed', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: 'single-use grant' });
+    if (g.executed_at) rows.push({ at: g.executed_at, gate: g.id, event: 'released (run once)', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: g.note ? `single-use grant · ${g.note}` : 'single-use grant' });
     if (g.status === 'expired') rows.push({ at: g.expires_at, gate: g.id, event: 'expired', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: '' });
     if (g.rerunsAfterDecline) rows.push({ at: g.decided_at, gate: g.id, event: `re-attempted ×${g.rerunsAfterDecline} after decline`, cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: '' });
   }
@@ -177,6 +183,10 @@ export function createGateStore(dir) {
         return { task: g.task, gate: g.gate };
       });
     },
+    /** Spent grants for the startup reconcile: only where and when, never the grant itself. */
+    async spentGrants() {
+      return (await readJson(f('grants.json'), [])).filter((g) => g.used_at).map((g) => ({ task: g.task, gate: g.gate, used_at: g.used_at }));
+    },
     async dryRecords() { return readJson(f('dry.json'), []); },
     recordDry({ agent, cwd, dryHash, script, task, phase, now = Date.now() }) {
       return serial(async () => {
@@ -224,11 +234,15 @@ export function createGateStore(dir) {
         }
       });
     },
-    async writeTriggers(lines) {
-      await mkdir(dir, { recursive: true, mode: 0o700 });
-      const tmp = `${f('triggers')}.${process.pid}.tmp`;
-      await writeFile(tmp, lines.join('\n') + '\n', { mode: 0o644 });   // patterns only — no secrets; the hook reads it
-      await rename(tmp, f('triggers'));
+    // serialized + a unique tmp name: two first checks after a policy change used to race on one
+    // tmp path, and the loser's rename threw (a spurious deny; #369's concurrency test found it)
+    writeTriggers(lines) {
+      return serial(async () => {
+        await mkdir(dir, { recursive: true, mode: 0o700 });
+        const tmp = `${f('triggers')}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
+        await writeFile(tmp, lines.join('\n') + '\n', { mode: 0o644 });   // patterns only — no secrets; the hook reads it
+        await rename(tmp, f('triggers'));
+      });
     },
   };
 }

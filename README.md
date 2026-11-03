@@ -33,7 +33,8 @@ Your agents work on their own, until they reach something that can't be taken ba
 `main`, a deploy, a script's `--commit` run, a message sent, a store write, a delete outside the
 working tree. Then **the command doesn't run.** It waits for you on the board, your phone or your
 terminal, showing the exact command, folder and agent. One approval lets that exact call run **once**,
-and the task keeps a receipt of the attempt, your decision and the run.
+and the task keeps a receipt of the attempt, your decision and the release (the agent reports how the
+run went).
 
 - **Enforced by the system, not the model's judgment:** a hook in every Claude Code and Codex session.
   It fails closed: board down means gated calls are denied.

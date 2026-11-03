@@ -920,6 +920,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 await gates.loadPolicy().catch((e) => console.error('[guardrails]', e.message));   // writes data/guardrails/triggers for the hook
+// receipts a crash left half-written (#369): before listen, so nothing can mint first
+await gates.reconcile().catch((e) => console.error('[guardrails] reconcile', e.message));
 server.listen(SETTINGS.port, '0.0.0.0', () => {
   console.log(`[ops-board] http://localhost:${SETTINGS.port} (+ tailnet, source-guarded)${DEMO ? ' — DEMO MODE (synthetic data)' : ''}`);
   recordEvent('sys', DEMO ? 'Ops Board started in demo mode — synthetic fleet, nothing real is touched' : 'Ops Board started').catch(() => {});

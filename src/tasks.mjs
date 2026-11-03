@@ -371,7 +371,10 @@ export function applyPatch(prev, patch, ctx = {}) {
     }
     case 'gate_event': {                       // executed / expired / rerun_declined / attempt (gate service only)
       const g = gateEvent(t, patch, iso);
-      if (['executed', 'expired'].includes(patch.event)) comment(patch.event === 'executed' ? `GATE ${g.id} executed ${iso.slice(11, 19)}Z (single use)` : `GATE ${g.id} expired unused`, 'gate', { gate: { id: g.id, event: patch.event } });
+      // "executed" = released to run once: the board let the call through; it never sees the result
+      if (['executed', 'expired'].includes(patch.event)) comment(patch.event === 'executed'
+        ? `GATE ${g.id} released to run once ${g.executed_at.slice(11, 19)}Z (single-use grant) — ${patch.note ? g.note : 'the agent reports the outcome on this task'}`
+        : `GATE ${g.id} expired unused${patch.note ? ` (${g.note})` : ''}`, 'gate', { gate: { id: g.id, event: patch.event } });
       if (patch.event === 'rerun_declined') comment(`GATE ${g.id} re-attempted after it was declined`, 'gate', { gate: { id: g.id, event: 'rerun_declined' } });
       break;
     }

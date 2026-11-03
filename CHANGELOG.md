@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-03
+
+A Guardrails hardening release, prompted by a question in the project's Discussions: can a crash or restart make an approved action run twice? It can't, and this release proves it with tests, completes any receipt a crash left half-written, and says plainly what a "run" receipt means. No settings to change: update, then restart the board.
+
+### Added
+- **Guardrails crash-and-restart tests** (`test/gate-crash.test.mjs`): a board killed between spending a grant and writing its receipt, a normal run then a restart, torn and corrupt grant files, and concurrent attempts at one approved call. An approval never runs twice. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md#crash-and-restart).
+- **Startup reconcile for gate receipts.** A receipt a crash left at *approved* is completed when the board starts, stamped with when the grant was spent and noted `recorded after restart; outcome unknown`.
+
+### Changed
+- **The "executed" receipt now says what it means:** `released to run once … — the agent reports the outcome on this task`, in the task comment, the ticker and `task.sh audit`. The board lets the call through; it never sees the result. The stored status is still `executed`, so existing ledgers need no migration.
+
+### Fixed
+- **Guardrails: simultaneous gated calls right after the policy loads could be refused by mistake.** Two writes of the hook's trigger file could collide, and the losing call was denied with an error. That was a wrongly refused call, never a double run. The writes now take turns, each with its own temp file.
+
 ## [1.0.0] - 2026-10-31
 
 The first stable release. Its headline is **Guardrails**: an agent's irreversible actions wait for your approval, run once, and leave a receipt. The release also adds a written security model, backup and restore, and a context autopilot that compacts agents before they run out of room.
@@ -193,7 +207,8 @@ First public release.
 - Publish manifest (checked locally with `scripts/publish.mjs --check`), and the scrub gate
   and gitleaks in CI.
 
-[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/zulu-assistant/zulu-assistant/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v1.0.1
 [1.0.0]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v1.0.0
 [0.1.0-beta.4]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/zulu-assistant/zulu-assistant/releases/tag/v0.1.0-beta.3

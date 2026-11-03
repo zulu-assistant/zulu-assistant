@@ -10,6 +10,9 @@ import { classify, isEnforced, compileTriggers, triggerLines, cmdHash, describeT
 import { createGateStore, auditRows, focusOf } from './gate-ledger.mjs';
 import { containsSecret, LIVE_STATUSES, activeProgramGo } from './tasks.mjs';
 
+/** The startup reconcile's receipt note: the board can't tell "died before the allow" from "after". */
+export const RESTART_NOTE = 'recorded after restart; outcome unknown';
+
 const MODES = ['enforce', 'observe', 'off'];
 
 /** Validate a policy object; returns a list of problems (empty = ok). */
@@ -173,7 +176,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, mcName
     const grant = await store.redeem({ cmdHash: hash, agent, now: now() });
     if (grant && !grant.expired) {
       const u = await ledger.update(grant.task, { op: 'gate_event', actor: 'board', gate: grant.gate, event: 'executed' }, { gateSystem: true });
-      recordEvent('sys', `guardrails: ${agent} ran gate ${grant.gate} on #${grant.task} (single use)`).catch(() => {});
+      recordEvent('sys', `guardrails: gate ${grant.gate} on #${grant.task} released to ${agent} to run once`).catch(() => {});
       await afterTaskChange(u.task, u, 'board');
       return { decision: 'allow', reason: `approved by the owner (task #${grant.task} gate ${grant.gate}) — runs once`, task: grant.task, gate: grant.gate };
     }
@@ -312,12 +315,35 @@ export function createGateService({ root, ledger, policyFile, identifyWs, mcName
     return { status, detail: bits.join(' · '), pending: pending.length };
   }
 
+  /**
+   * Startup reconcile (#369): a board that died after spending a grant but before writing the receipt
+   * leaves the gate `approved`. Record it from grants.json. Must run before anything can mint (mint
+   * drops spent grants). Idempotent: a gate no longer `approved` is skipped. Never wakes anyone.
+   */
+  async function reconcile() {
+    const spent = await store.spentGrants();
+    let repaired = 0;
+    for (const s of spent) {
+      const t = await ledger.get(s.task).catch(() => null);
+      const g = (t?.gates || []).find((x) => x.id === s.gate);
+      if (!g || g.status !== 'approved') continue;
+      const expired = s.used_at === 'expired';
+      try {
+        await ledger.update(s.task, { op: 'gate_event', actor: 'board', gate: s.gate, event: expired ? 'expired' : 'executed', ...(expired ? {} : { at: s.used_at }), note: RESTART_NOTE }, { gateSystem: true });
+        repaired += 1;
+        recordEvent('sys', `guardrails: gate ${s.gate} on #${s.task} ${expired ? 'expired' : 'released to run once'} — receipt ${RESTART_NOTE}`).catch(() => {});
+      } catch (e) { console.error(`[guardrails] reconcile #${s.task} ${s.gate}: ${e.message}`); }
+    }
+    if (!repaired) console.log(`[guardrails] reconcile: ${spent.length} spent grant(s) checked, nothing to repair`);
+    return { checked: spent.length, repaired };
+  }
+
   async function audit(taskId) {
     const t = await ledger.get(taskId);
     return t ? auditRows(t) : null;
   }
 
-  return { check, afterDecision, card, audit, loadPolicy, store, autoFocus, setFocus: (a, id) => store.setFocus(a, id, { explicit: true }), policy: () => policy, policyError: () => policyError };
+  return { check, afterDecision, card, audit, reconcile, loadPolicy, store, autoFocus, setFocus: (a, id) => store.setFocus(a, id, { explicit: true }), policy: () => policy, policyError: () => policyError };
 }
 
 /** Claude: Bash/Read/Edit/Write/mcp__*; Codex shells arrive as shell/exec_command/local_shell. */

@@ -21,7 +21,7 @@ Zulu Assistant runs AI coding agents on **your own Mac, under your own user acco
 ## What Guardrails stops
 - **Misread scope and confident mistakes.** A merge, deploy, `--commit` run, send, store write or delete outside the working tree doesn't run until you approve that exact call on the board, your phone or your own terminal. Each step leaves a receipt on the task.
 - **Relayed or ambiguous "go".** Only your decision counts: the board's decision token, or an answer Mission Control records from your own words. A request carrying an agent or chat identity can't approve, token or not.
-- **Approval reuse.** A grant is single-use. It is bound to the exact command text (or the tool's whole input), the folder, the engine, the agent, and an expiry. It never leaves the board, so there is nothing to copy and replay.
+- **Approval reuse.** A grant is single-use. It is bound to the exact command text (or the tool's whole input), the folder, the engine, the agent, and an expiry. It never leaves the board, so there is nothing to copy and replay. A crash or restart can't run it twice either: only an unspent grant allows a call, lost or corrupt grant state counts as no grant, and a receipt a crash left half-written is completed at startup ([crash and restart](GUARDRAILS.md#crash-and-restart)).
 - **Chained dry run → write.** A script's write form needs a completed dry run first, in a separate call.
 - **Unreadable commands.** If a command mentions a gated action and the gate can't read it with certainty, the whole call is gated. This covers variables in command position, `eval`, piping into a shell, interpreter heredocs and `find -exec`.
 - **Failures.** If the board is down, slow or silent, or its policy is broken, gated calls are **denied**, not allowed.
