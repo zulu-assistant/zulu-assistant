@@ -8,6 +8,8 @@ cd "$ROOT"
 export CMUX_SOCKET_PASSWORD="$(cat "$ROOT/data/cmux-socket-password")" CMUX_QUIET=1
 . "$ROOT/scripts/env.sh"   # Node/claude on PATH (nvm pin → newest → Homebrew)
 mkdir -p "$ROOT/data/handoffs"
+# the gate knows this headless pass as headless:triage (no workspace to resolve; scripts/gate-hook.mjs passes it on)
+export MESH_GATE_IDENTITY=triage
 TRIAGE="$(mc_resolve config/TRIAGE.md)"
 # engine: config/models.json engine.triage (scripts/engine.mjs). Codex has no per-tool
 # allowlist: its pass runs in the workspace-write sandbox (writes only inside this

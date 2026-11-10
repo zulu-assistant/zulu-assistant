@@ -15,7 +15,13 @@ import {
 } from '../src/mesh.mjs';
 import { applyChrome, groupPlan, groupRepairPlan, isDisposablePlaceholder, domainTable } from '../src/chrome.mjs';
 import { resolve as resolveConfig } from '../src/config.mjs';
-import { CHECKLIST } from '../src/tasks.mjs';
+import { CHECKLIST, requestOf } from '../src/tasks.mjs';
+import { createWorktree, cleanWorktree, worktreeMode, prState } from '../src/worktree.mjs';
+import { adoptDecision, sweepTasks, closeBlockers, workerCapacity, prsToRead, mapCapped, PR_READ_DAYS, PR_READ_CAP } from '../src/worker-lifecycle.mjs';
+import { SETTINGS } from '../src/config.mjs';
+import os from 'node:os';
+
+const expandHome = (p) => String(p).replace(/^~(?=\/|$)/, os.homedir());
 
 const CHECK_WORDS = {
   docs_updated: 'docs updated', report_written: 'the report',
@@ -28,7 +34,10 @@ import { fileURLToPath } from 'node:url';
 
 
 const BOARD = process.env.MESH_BOARD || 'http://127.0.0.1:3210';
-const argv = process.argv.slice(2);
+const SIGNED = (() => { const all = process.argv.slice(2); const c = all.indexOf('--'); return all.some((x, i) => x === '--signed' && (c < 0 || i < c)); })();
+const rawArgv = process.argv.slice(2);
+const cut = rawArgv.indexOf('--');                       // `task test N -- <command>`: the command's own words are never ours
+const argv = rawArgv.filter((x, i) => x !== '--signed' || (cut >= 0 && i > cut));
 
 function parse(args) {
   const pos = []; const flags = {};
@@ -46,8 +55,21 @@ function parse(args) {
 
 const die = (msg, code = 1) => { console.error(`mesh: ${msg}`); process.exit(code); };
 
+// --signed: the OWNER's own shell proves the owner's name with the board's decision token, so a
+// message or comment typed by the owner reaches panes as the owner's and not as "unverified".
+// An agent has no use for it: its own name needs no proof, and it must never sign as the owner.
+let signedHeaders = null;
+async function signed() {
+  if (signedHeaders) return signedHeaders;
+  const token = (await readFile(process.env.MESH_DECISION_TOKEN_FILE || new URL('../data/mesh-decision-token', import.meta.url), 'utf8').catch(() => '')).trim();
+  if (!token) die('--signed: no decision token in data/ (is this the board\'s checkout, and has the board run once?)');
+  signedHeaders = { 'x-mesh-decision': token };
+  return signedHeaders;
+}
+
 async function api(method, p, body, extraHeaders = {}) {
   let r;
+  if (SIGNED && method !== 'GET') extraHeaders = { ...(await signed()), ...extraHeaders };
   try {
     r = await fetch(BOARD + p, {
       method, headers: { 'content-type': 'application/json', ...extraHeaders },
@@ -91,23 +113,38 @@ const HELP = `usage:
                                      classes (merges into private repos, local launchd loads) run without a tap
   task.sh revoke-go <id> ["why"]     end the task's program go (it also ends when the task closes)
   task.sh approved-in-pane <id> "<what the owner said, when>" [--decline]
-                                     record an answer the owner gave in your pane
+                                     record an answer the owner gave in your pane. An approval is a proposal:
+                                     it counts when the owner confirms it on the board (no program go, no plan
+                                     approval before that). A decline is recorded at once.
   task.sh check <id> <item>...   (items: SETTINGS.ledger.checklist — mesh-cli.mjs checklist)
   task.sh close <id> --handoff <report path> [--pr <url>] [--vault <note>] [--repo <path>] [--checklist all|a,b,..] ["summary"]
+                          [--unrun "<check not run, and why>"]…  (recorded in the completion packet)
+  task.sh worktree <id> [--repo <path>] [--base <branch>]   the task's own git worktree (<repo-parent>/wt-<id>,
+                          branch task/<id>-<slug>); idempotent; prints the path. Ignored files are never copied in.
+  task.sh worktree-clean <id> [--keep-branch] | --owner <agent>   remove it only when safe (no uncommitted files,
+                          no live process inside, commits on the remote); never forces; exit 3 on a refusal
+  task.sh test <id> -- <command…>   run a check here and stamp it on the task (exit code, git rev, branch,
+                          dirty, time; output is not stored); the command's exit code is passed through
                 [--no-vault "<reason>"] [--no-graph "<reason>"]   (when the board verifies vault_synced / graphify_updated)
                 [--no-gates "<reason>"]   (guardrails: waive gates_resolved)
+                [--pr-not-landed "<reason>"]   (a close is refused while the linked PR has not landed; this waives it)
   task.sh focus <id>      (guardrails: the task your gated commands' receipts land on; claim/start set it
                           only when you haven't set one yourself on a live task)
   task.sh gate <id> <gate> approve|decline ["reason"]
                           OWNER ONLY, from the owner's own shell (e.g. a ! line): decide a gate with the
                           board's decision token. An agent running this is itself gated (class self).
-  task.sh audit <id> [--json]   (guardrails: every gate request, decision and run on the task)
+  task.sh audit <id> [--json] [--verify]   (guardrails: every gate request, decision and run on the task;
+                --verify recomputes the receipt chain and compares it with the task's gates, exit 1 on a difference)
   task.sh gate-approved <id> <gate> "<what the owner said, where>" [--decline]
-                                     mission-control only: record a gate answer the owner gave in a pane
+                                     mission-control only: record a gate answer the owner gave in a pane. An
+                                     approval is a proposal: the gate stays pending and nothing is released
+                                     until the owner confirms it on the board. A decline is recorded at once.
   task.sh assign <id> <agent> | cancel <id> ["why"] | reopen <id>
   task.sh set-requester <id> <agent> "<why>"   (mission-control only: fix a misattributed requester)
   task.sh list [--owner <agent>] [--status open,blocked,..|live] | show <id> | mine
   agent-send.sh <name|title> "<message>" [--task <id>] [--wake] [--as <your-name>]
+  … --as <owner> --signed    (the owner's own shell only: proves the owner's name with the decision token;
+                             without it a message under the owner's name is delivered marked UNVERIFIED)
   mesh agents | whoami | slug "<title>" | outbox [drop <agent>] | sync-names [--apply] [--only <agent>]
   mesh sync-colors [--apply] | sync-groups [--apply] | close-placeholders [--apply]  (owner only)`;
 
@@ -124,7 +161,12 @@ async function task(sub, pos, flags) {
     const r = await api('PATCH', `/api/tasks/${id}`, { actor: await whoami(flags), ...body });
     console.log(fmtTask(r.task));
     for (const d of r.deliveries || []) console.log(`  → ${d.to || ''} ${d.delivered ? 'delivered' : d.queued ? `queued (${d.reason})` : d.msg || ''}`);
+    if (r.unverifiedSender) console.log(`  ⚠ ${r.note || 'recorded as from an unverified caller'}`);
+    return r;
   };
+  // a recorded pane answer is a proposal (SETTINGS.paneAnswers 'confirm'): say so, or the agent waits on nothing
+  const waiting = (x) => x?.proposal && !x.proposal.confirmed_at && !x.proposal.overruled_at;
+  const HEARD = '  recorded as a pane answer — it counts when the owner confirms it on the board. Nothing runs and no program go starts until then; do not retry yet.';
   switch (sub) {
     case 'create': {
       if (!pos[0]) die('create needs a title');
@@ -134,6 +176,7 @@ async function task(sub, pos, flags) {
       });
       console.log(fmtTask(r.task));
       for (const d of r.deliveries || []) console.log(`  → ${d.to} ${d.delivered ? 'woken' : d.queued ? `wake queued (${d.reason})` : d.msg || ''}`);
+      if (r.unverifiedSender) console.log(`  ⚠ ${r.note || 'filed as from an unverified caller'}`);
       return;
     }
     case 'claim': case 'start': case 'unblock': case 'cancel': case 'reopen':
@@ -155,10 +198,13 @@ async function task(sub, pos, flags) {
       return patch({ op: 'request_approval', policy_item: flags.policy, text: note(1), ...(flags.program ? { kind: 'program' } : {}) });
     case 'revoke-go':
       return patch({ op: 'revoke_go', text: note(1) });
-    case 'approved-in-pane':
+    case 'approved-in-pane': {
       // `--decline "<text>"` parses the text as the flag's value — accept it either way
-      return patch({ op: 'record_decision', decision: flags.decline ? 'decline' : 'approve',
+      const r = await patch({ op: 'record_decision', decision: flags.decline ? 'decline' : 'approve',
         text: note(1) ?? (typeof flags.decline === 'string' ? flags.decline : undefined) });
+      if (waiting(r.task.approval)) console.log(HEARD);
+      return;
+    }
     case 'check':
       return patch({ op: 'checklist', checklist: Object.fromEntries(pos.slice(1).map((k) => [k, true])) });
     case 'close': {
@@ -170,16 +216,30 @@ async function task(sub, pos, flags) {
       if (typeof flags['no-vault'] === 'string') waive.vault_synced = flags['no-vault'];
       if (typeof flags['no-graph'] === 'string') waive.graphify_updated = flags['no-graph'];
       if (typeof flags['no-gates'] === 'string') waive.gates_resolved = flags['no-gates'];
+      // --pr-not-landed "<reason>": close although the linked PR has not landed (kept on the task)
+      if (typeof flags['pr-not-landed'] === 'string') waive.pr_landed = flags['pr-not-landed'];
+      if (flags['pr-not-landed'] === true) die('--pr-not-landed needs a reason: --pr-not-landed "<why the task closes before its PR lands>"');
       if (flags['no-vault'] === true || flags['no-graph'] === true || flags['no-gates'] === true) die('--no-vault / --no-graph / --no-gates need a reason: --no-vault "<why no vault note>"');
-      return patch({ op: 'close', checklist, links: links(flags), text: note(1), ...(Object.keys(waive).length ? { waive } : {}) });
+      // --unrun "<check you did not run, and why>" (repeatable): recorded in the completion packet
+      const unrun = flags.unrun === undefined ? [] : [].concat(flags.unrun).filter((u) => typeof u === 'string');
+      if (flags.unrun === true) die('--unrun needs the check: --unrun "<what was not run, and why>"');
+      return patch({ op: 'close', checklist, links: links(flags), text: note(1), ...(Object.keys(waive).length ? { waive } : {}), ...(unrun.length ? { unrun } : {}) });
     }
     case 'focus': {
       const r = await api('POST', '/api/gates/focus', { actor: await whoami(flags), task: Number(id) });
       return console.log(`${r.agent}: gated commands now land on #${r.focus}`);
     }
     case 'audit': {
-      const r = await api('GET', `/api/tasks/${id}/audit`);
-      if (flags.json) return console.log(JSON.stringify(r, null, 2));
+      const r = await api('GET', `/api/tasks/${id}/audit${flags.verify ? '?verify=1' : ''}`);
+      if (flags.json) { console.log(JSON.stringify(r, null, 2)); if (r.verify && !r.verify.ok) process.exitCode = 1; return; }
+      if (r.verify) {
+        const v = r.verify;
+        console.log(v.off ? `#${id}: the receipt chain is off (SETTINGS.receiptChain)` : v.ok
+          ? `#${id}: receipts verified — the chain (${v.lines} lines, head ${String(v.head.hash).slice(0, 12)}) matches this task's gates`
+          : `#${id}: RECEIPTS DO NOT VERIFY — ${v.problems.length} difference(s):`);
+        for (const p of v.problems || []) console.log(`  ${p.gate ? `${p.gate} ` : ''}${p.seq ? `line ${p.seq}: ` : ''}${p.why}`);
+        if (!v.ok) process.exitCode = 1;
+      }
       if (!r.rows.length) return console.log(`#${id}: no gates`);
       for (const x of r.rows) console.log(`${String(x.at).replace('T', ' ').slice(0, 19)}  ${x.gate.padEnd(4)} ${String(x.event).padEnd(12)} ${String(x.cls).padEnd(9)} ${x.actor}${x.via ? ` (${x.via})` : ''}\n      ${x.command}  [${x.cwd}]${x.reason ? `\n      reason: ${x.reason}` : ''}`);
       return;
@@ -195,14 +255,28 @@ async function task(sub, pos, flags) {
       const r = await api('PATCH', `/api/tasks/${id}`, { op: 'gate_decide', gate, decision, ...(pos[3] ? { reason: pos[3] } : {}) },
         { 'x-mesh-decision': token, 'x-mesh-via': 'cli' });
       const g = (r.task.gates || []).find((x) => x.id === gate);
+      // typed in a terminal on a board that takes decisions from its page only: kept as a row to confirm
+      if (r.proposed) return console.log(`#${id} ${gate}: NOT approved yet. Your typed approval was kept as a row: confirm it on the board page with one click. Nothing runs until then.`);
       return console.log(`#${id} ${gate}: ${g?.status || decision}${g?.expires_at && decision === 'approve' ? ` (runs once, by ${String(g.expires_at).slice(11, 16)}Z)` : ''}`);
     }
-    case 'gate-approved':
+    case 'gate-approved': {
       if (!pos[1]) die('gate-approved needs the gate id: task.sh gate-approved <task> <gate> "<what the owner said>" [--decline]');
-      return patch({ op: 'gate_record', gate: pos[1], decision: flags.decline ? 'decline' : 'approve',
+      const r = await patch({ op: 'gate_record', gate: pos[1], decision: flags.decline ? 'decline' : 'approve',
         text: note(2) ?? (typeof flags.decline === 'string' ? flags.decline : undefined) });
+      if (waiting((r.task.gates || []).find((g) => g.id === pos[1]))) console.log(HEARD);
+      return;
+    }
     case 'assign':
       return patch({ op: 'assign', owner: pos[1], text: note(2) });
+    case 'adopt': {
+      // spawn-time: hand a task Mission Control owns (or nobody does) to the new worker, quietly —
+      // the worker has the brief, so no "assigned" wake is typed into its pane. Anyone else's task is left alone.
+      const t = await api('GET', `/api/tasks/${id}`);
+      const { agents } = await api('GET', '/api/agents');
+      const d = adoptDecision(t, pos[1], agents);
+      if (!d.assign) return d.silent ? undefined : console.log(`#${id}: not reassigned — ${d.why}`);
+      return patch({ op: 'assign', owner: pos[1], quiet: true, text: `assigned to the worker at spawn (was ${t.owner || 'unowned'})` });
+    }
     case 'set-requester':   // mission-control only: repair a misattributed task
       return patch({ op: 'set_requester', requester: pos[1], text: note(2) });
     case 'list': case 'mine': {
@@ -214,12 +288,52 @@ async function task(sub, pos, flags) {
       console.log(tasks.length ? tasks.map(fmtTask).join('\n') : '(no tasks)');
       return;
     }
+    case 'worktree': {
+      // the task's own git worktree: <repo-parent>/wt-<id> on task/<id>-<slug>; idempotent; the path goes to stdout
+      const t = await api('GET', `/api/tasks/${id}`);
+      const repo = expandHome(typeof flags.repo === 'string' ? flags.repo : t.links?.repo || process.cwd());
+      const r = await createWorktree({ repo, task: t.id, title: t.title, base: typeof flags.base === 'string' ? flags.base : undefined });
+      if (!r.ok) die(`worktree for #${t.id}: ${r.why}`, 2);
+      if (!r.existed || t.links?.worktree !== r.path) {
+        await api('PATCH', `/api/tasks/${t.id}`, { actor: await whoami(flags), op: 'link', links: { worktree: r.path, branch: r.branch } });
+        await api('PATCH', `/api/tasks/${t.id}`, { actor: await whoami(flags), op: 'comment', text: `worktree ${r.existed ? 'linked' : 'created'}: ${r.path} (branch ${r.branch}${r.base ? `, from ${r.base}` : ''}) — ignored files (data/, .env*) are not in it` });
+      }
+      console.error(`#${t.id}: worktree ${r.existed ? 'already there' : 'created'} — branch ${r.branch}`);
+      console.log(r.path);
+      return;
+    }
+    case 'worktree-clean': {
+      // remove a task's worktree only when safe (no uncommitted files, no live process, commits on the remote); never forces
+      // --owner: the worker's own tasks PLUS the task it was spawned on (the directory records it),
+      // so a task Mission Control still owns is swept with its worker
+      const targets = flags.owner
+        ? (await ownerSweep(String(flags.owner))).filter((x) => x.links?.worktree)
+        : [await api('GET', `/api/tasks/${id}`)];
+      if (!targets.length) return console.log(flags.owner ? `(no worktrees on ${flags.owner}'s tasks)` : '(no worktree)');
+      let refused = 0;
+      for (const t of targets) {
+        if (!t.links?.worktree) { console.log(`#${t.id}: no worktree linked`); continue; }
+        const r = await cleanWorktree({ path: t.links.worktree, pr: t.links?.pr || null, keepBranch: Boolean(flags['keep-branch']) });
+        const kept = r.keptByRequest ? 'kept (--keep-branch)' : 'kept: not merged';
+        const text = r.ok
+          ? (r.removed ? `worktree removed: ${t.links.worktree}${r.branch ? ` (branch ${r.branch} ${r.branchDeleted ? 'deleted' : kept}; proof: ${r.proof})` : ''}` : `worktree already gone: ${t.links.worktree}`)
+          : `worktree cleanup refused: ${r.why} (${t.links.worktree})`;
+        if (!r.ok) refused++;
+        console.log(`#${t.id}: ${text}`);
+        if (r.removed || !r.ok) await api('PATCH', `/api/tasks/${t.id}`, { actor: await whoami(flags), op: 'comment', text }).catch(() => {});
+      }
+      if (refused) process.exit(3);
+      return;
+    }
     case 'show': {
       const t = await api('GET', `/api/tasks/${id}`);
       console.log(fmtTask(t));
       console.log(`  checklist: ${Object.entries(t.checklist).map(([k, v]) => `${v ? '✔' : '✗'} ${k}`).join('  ')}`);
       if (Object.keys(t.links).length) console.log(`  links: ${JSON.stringify(t.links)}`);
       if (t.approval) console.log(`  approval: ${JSON.stringify(t.approval)}`);
+      // the original request, whenever the last 10 comments no longer show it
+      const rq = requestOf(t);
+      if (rq && !t.comments.slice(-10).some((c) => c.at === rq.at && c.text === rq.text)) console.log(`  request (${rq.at.slice(5, 16)} ${rq.who}): ${rq.text}`);
       for (const c of t.comments.slice(-10)) console.log(`  ${c.at.slice(5, 16)} ${c.who}: ${c.text}`);
       return;
     }
@@ -227,10 +341,64 @@ async function task(sub, pos, flags) {
   }
 }
 
+/** A closing worker's tasks: the ones it owns + its spawn task (src/worker-lifecycle.mjs sweepTasks). */
+async function ownerSweep(name, { withSpawn = false } = {}) {
+  const { tasks } = await api('GET', `/api/tasks?owner=${encodeURIComponent(name)}`);
+  const { agents } = await api('GET', '/api/agents');
+  const me = agents.find((a) => a.name === name);
+  const spawn = Number(me?.spawnTask) || null;
+  const all = [...tasks];
+  if (spawn && !all.some((t) => Number(t.id) === spawn)) {
+    const r = await fetch(`${BOARD}/api/tasks/${spawn}`, { signal: AbortSignal.timeout(15000) }).then((x) => (x.ok ? x.json() : null)).catch(() => null);
+    if (r?.id) all.push(r);
+  }
+  const set = sweepTasks(all, name, spawn);
+  return withSpawn ? { tasks: set, spawn } : set;
+}
+
+/** Shell-quote one argv word for the recorded command text. */
+const quoteWord = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);
+
+/**
+ * task.sh test N -- <command…>: run the command here (output to this terminal, never
+ * stored), then record { command, exit, rev, branch, dirty, cwd, at, ms } on task N for
+ * the completion packet. The command's own exit code is passed through, so it can stand
+ * in for the plain test run. A board that is down costs the stamp, never the run.
+ */
+async function testStamp(rest) {
+  const sep = rest.indexOf('--');
+  const id = rest[0];
+  const words = sep >= 0 ? rest.slice(sep + 1) : [];
+  if (!/^\d+$/.test(id || '') || sep < 0 || !words.length) die('usage: task.sh test <id> [--as <you>] -- <command…>');
+  const { flags } = parse(rest.slice(1, sep));
+  const { spawnSync } = await import('node:child_process');
+  const git = (...a) => { const r = spawnSync('git', a, { encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : null; };
+  const rev = git('rev-parse', 'HEAD');
+  const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
+  const status = git('status', '--porcelain');
+  const dirty = status === null ? false : status.length > 0;   // checked BEFORE the run: what was tested is what is committed
+  const t0 = Date.now();
+  const r = spawnSync(words[0], words.slice(1), { stdio: 'inherit' });
+  const exit = r.error ? -1 : r.status ?? (r.signal ? 128 : -1);
+  const stamp = { command: words.map(quoteWord).join(' '), exit, rev, branch, dirty, cwd: process.cwd(), at: new Date(t0).toISOString(), ms: Date.now() - t0 };
+  try {
+    const res = await fetch(`${BOARD}/api/tasks/${id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(15000),
+      body: JSON.stringify({ actor: await whoami(flags), op: 'test_stamp', stamp }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) console.error(`mesh: test ran (exit ${exit}) but the stamp was not recorded: ${j.msg || res.status}`);
+    else console.error(`#${id}: test stamp recorded — exit ${exit} at ${rev ? rev.slice(0, 7) : '?'}${dirty ? ' (dirty tree: counts as stale)' : ''}`);
+  } catch (e) { console.error(`mesh: test ran (exit ${exit}) but the board was unreachable (${e.message}); no stamp`); }
+  process.exit(r.error ? 127 : exit < 0 ? 1 : exit);
+}
+
 async function main() {
   const [cmd, sub, ...rest] = argv;
   if (!cmd || cmd === 'help' || cmd === '--help') return console.log(HELP);
 
+  // task.sh test N [--as me] -- <command…>: everything after -- is the command, never parsed as our flags
+  if (cmd === 'task' && sub === 'test') return testStamp(rest);
   if (cmd === 'task') { const { pos, flags } = parse(rest); return task(sub, pos, flags); }
 
   if (cmd === 'send') {
@@ -239,6 +407,7 @@ async function main() {
     if (!to || !text) die('usage: agent-send.sh <name|title> "<message>" [--task <id>] [--wake]');
     const r = await api('POST', '/api/mesh/send', { to, text, from: await whoami(flags), task: flags.task, wake: Boolean(flags.wake) });
     console.log(r.delivered ? `delivered to ${r.to}` : r.queued ? `queued for ${r.to}: ${r.reason}` : (r.msg || JSON.stringify(r)));
+    if (r.unverifiedSender) console.log('  ⚠ the board could not verify your name: the message goes out marked as from an unverified sender');
     return;
   }
 
@@ -259,6 +428,9 @@ async function main() {
     return console.log(outbox.length ? outbox.map((m) => `${m.to}: ${m.line} — ${m.lastReason || ''}`).join('\n') : '(outbox empty)');
   }
 
+  // worktree-mode worker|resident [<name>] → off | observe | on (SETTINGS.worktrees; MESH_WORKTREE=0|1 overrides)
+  if (cmd === 'worktree-mode') return console.log(worktreeMode(SETTINGS.worktrees, { kind: sub === 'resident' ? 'resident' : 'worker', name: rest[0] || '' }));
+
   if (cmd === 'whoami') { const { flags } = parse([sub, ...rest].filter(Boolean)); return console.log(await whoami(flags)); }
   if (cmd === 'slug') return console.log(slugTitle([sub, ...rest].join(' ')));
   // the configured close checklist in words (agent prompts render it); --keys = raw item names
@@ -275,6 +447,7 @@ async function main() {
         name: slugTitle(flags.title), title: flags.title, workspaceId: flags.workspace,
         vendor: flags.vendor || 'claude', kind: flags.kind || 'worker',
         repo: flags.repo || null, cwd: flags.repo || null,
+        ...(/^\d+$/.test(String(flags.task || '')) ? { spawnTask: Number(flags.task) } : {}),   // the task it was spawned on (close sweep)
         owns: flags.owns ? [].concat(flags.owns) : (i >= 0 ? doc.agents[i].owns : []),
         escalate_to: 'mission-control', status: 'active', added_at: new Date().toISOString(),
       };
@@ -283,6 +456,38 @@ async function main() {
       if (i >= 0) doc.agents[i] = entry; else doc.agents.push(entry);
     });
     return console.log(`registered ${slugTitle(flags.title)} (${flags.workspace})`);
+  }
+
+  // close-check <agent>: what stands in the way of closing its workspace — live tasks and open PRs.
+  // Exit 0 = nothing; exit 3 = blockers listed (agent-close.sh refuses without its override flag).
+  if (cmd === 'close-check') {
+    const name = [sub, ...rest].filter(Boolean).join(' ');
+    if (!name) die('usage: mesh close-check <agent>');
+    const { tasks, spawn } = await ownerSweep(name, { withSpawn: true });
+    // PRs are read for live tasks, the spawn task and tasks closed in the last few days only,
+    // a few at a time — an agent with dozens of old closed tasks must not cost dozens of gh calls
+    const pick = prsToRead(tasks, { spawnTask: spawn });
+    const prs = await mapCapped(pick.read, PR_READ_CAP, async (t) => {
+      const p = await prState(t.links.pr);
+      return { task: t.id, url: t.links.pr, state: p ? p.state : null };
+    });
+    const b = closeBlockers(tasks, prs);
+    for (const u of b.unread) console.error(`close-check: could not read ${u} (gh) — not counted`);
+    const note = `${prs.length} PR(s) read${pick.skipped ? `, ${pick.skipped} on tasks closed more than ${PR_READ_DAYS} days ago not read` : ''}`;
+    if (b.ok) return console.log(`${name}: no live tasks, no open PRs (${note})`);
+    for (const l of b.lines) console.log(l);
+    console.log(`(${note})`);
+    process.exit(3);
+  }
+
+  // worker-count: live workers against SETTINGS.workers.max (default 3). Prints a warning line when
+  // one more spawn would exceed it; always exit 0 (a warning, never a refusal).
+  if (cmd === 'worker-count') {
+    const r = await fetch(`${BOARD}/api/agents`, { signal: AbortSignal.timeout(5000) }).then((x) => x.json()).catch(() => null);
+    if (!r?.agents) return;                                  // board down: nothing to count, nothing to warn about
+    const c = workerCapacity(r.agents, SETTINGS.workers);
+    if (c.line) console.log(c.line);
+    return;
   }
 
   if (cmd === 'deregister') {

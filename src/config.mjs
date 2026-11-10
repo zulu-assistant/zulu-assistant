@@ -14,6 +14,10 @@
 import { existsSync, mkdirSync, copyFileSync, statSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { findCmux, profileOf } from './profile.mjs';
+
+// The one writer of owner-only (mode 600) files; see src/private-file.mjs for why there is only one.
+export { writePrivate, makePrivate, privateWriteStream, isOwnerOnly, PRIVATE_MODE } from './private-file.mjs';
 
 export const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const OVERLAY = process.env.MC_OVERLAY || path.join(ROOT, 'overlay');
@@ -92,7 +96,14 @@ export function mergeLocal(reg, local) {
 }
 let localDoc = null;
 try { localDoc = JSON.parse(readFileSync(LOCAL_FILE, 'utf8')); } catch { /* no setup answers yet */ }
-const registry = mergeLocal(registryModule, localDoc);
+const merged = mergeLocal(registryModule, localDoc);
+// cmux: the configured path when it exists, else `cmux` on PATH, else absent (src/profile.mjs)
+const cmux = findCmux(merged.SETTINGS?.cmuxBin);
+const registry = { ...merged, SETTINGS: { ...merged.SETTINGS, cmuxBin: cmux.bin } };
+/** Is there a cmux binary on this machine? False = no tiles, no mesh delivery, no cmux notices. */
+export const CMUX_PRESENT = cmux.present;
+/** 'full' | 'guardrails' (SETTINGS.profile; absent = full). */
+export const PROFILE = profileOf(registry.SETTINGS);
 export const { DOMAINS, ENDPOINTS, PROCESSES, CRON, CRON_DRIFT, MEM, CONTEXT, DISK, JOBS, DOCKER_CONTAINERS, SETTINGS } = registry;
 // optional in older registries: no levers = remediation never runs
 export const REMEDIATION_LEVERS = registry.REMEDIATION_LEVERS || [];

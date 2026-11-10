@@ -2,7 +2,7 @@
 // docker daemon or launchctl must never hang the board (see the watchdog
 // lesson: timeout-less checks silently defeat self-healing).
 import { execFile } from 'node:child_process';
-import { readFile, stat, readdir } from 'node:fs/promises';
+import { readFile, stat, readdir, open } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { acrossWindows } from './cmux-windows.mjs';
@@ -104,19 +104,47 @@ export async function logMtime(file) {
   try { return (await stat(file)).mtimeMs; } catch { return null; }
 }
 
-export async function tailFile(file, lines = 60) {
+// Read only the END of a file (the workstream reaches hundreds of MB and logs
+// grow without bound): at most `bytes`, the partial first line dropped, cached
+// by size + mtime so an unchanged file costs one stat. Returns '' on any error.
+export const TAIL_BYTES = 256 * 1024;
+const tailCache = new Map();                    // file → { size, mtimeMs, bytes, text }
+export const tailStats = { reads: 0, hits: 0 }; // tests + diagnostics
+export async function readTail(file, bytes = TAIL_BYTES) {
   if (!file) return '';
+  let fh;
   try {
-    const fh = await readFile(file);
-    const text = fh.toString('utf8');
-    return text.split('\n').slice(-lines).join('\n');
+    const st = await stat(file);
+    const c = tailCache.get(file);
+    if (c && c.size === st.size && c.mtimeMs === st.mtimeMs && c.bytes === bytes) { tailStats.hits++; return c.text; }
+    const start = Math.max(0, st.size - bytes);
+    const len = st.size - start;
+    fh = await open(file, 'r');
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = len ? await fh.read(buf, 0, len, start) : { bytesRead: 0 };
+    let text = buf.subarray(0, bytesRead).toString('utf8');
+    if (start > 0) {                            // the cut landed mid-line (maybe mid-character): drop that line
+      const nl = text.indexOf('\n');
+      text = nl === -1 ? '' : text.slice(nl + 1);
+    }
+    tailStats.reads++;
+    if (tailCache.size > 64) tailCache.clear();
+    tailCache.set(file, { size: st.size, mtimeMs: st.mtimeMs, bytes, text });
+    return text;
   } catch { return ''; }
+  finally { try { await fh?.close(); } catch { /* already closed */ } }
+}
+
+export async function tailFile(file, lines = 60) {
+  const text = await readTail(file);
+  return text ? text.split('\n').slice(-lines).join('\n') : '';
 }
 
 // ---- cmux workstream (agent activity feed) ----
-export async function getAgentFeed(limit = 40) {
+export async function getAgentFeed(limit = 40, file = SETTINGS.cmuxWorkstream) {
   try {
-    const raw = await readFile(SETTINGS.cmuxWorkstream, 'utf8');
+    const raw = await readTail(file);
+    if (!raw) return [];
     const lines = raw.trim().split('\n');
     const items = [];
     for (const line of lines.slice(-limit).reverse()) {
@@ -180,7 +208,8 @@ export async function getSessions() {
         workspaceId: s.workspaceId || '',
         note: s.lastBody || s.lastSubtitle || '',
         active: activeIds.has(id),
-        updatedAt: (s.launchCommand?.capturedAt || 0) * 1000,
+        // the hook's own last update (#402); the launch time only when the hook never wrote one
+        updatedAt: (s.updatedAt || s.launchCommand?.capturedAt || 0) * 1000,
       }))
       .filter((s) => s.active || (s.updatedAt / 1000) > cutoff)
       .sort((a, b) => Number(b.active) - Number(a.active) || b.updatedAt - a.updatedAt)

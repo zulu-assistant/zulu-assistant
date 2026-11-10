@@ -131,8 +131,10 @@ test/                   node:test suites
 Config resolves `overlay/<rel>` first, then `<rel>` in core, then
 `examples/<rel>` (`src/config.mjs` `resolve`). Import the registry from
 `src/config.mjs`, never from `config/jobs.mjs` directly. The only config file
-the board writes is the mesh directory. It is always written to `overlay/` and
-seeded from `examples/` on first use.
+of its own that the board writes is the mesh directory. It is always written to
+`overlay/` and seeded from `examples/` on first use. Outside the checkout it
+writes one thing: cmux's `~/.config/cmux/cmux.json`, when cmux has lost the
+socket password and the board puts its copy back (`src/heal-cmux.mjs`).
 
 ## Trust boundaries
 
@@ -144,18 +146,26 @@ seeded from `examples/` on first use.
   own `data/`, cmux notifications and chrome, the heartbeat row, and the
   results of opt-in actions: KICKSTART (launchd), RESTART (docker), START
   (processes with a `startCmd`), DISPATCH CLAUDE and ASK MASTER. Action labels
-  are validated against the registry. It never edits a crontab or a plist.
-- **Approvals.** The ledger's `decide` operation requires a per-install
-  decision token (`data/mesh-decision-token`) that is injected into the board
-  page. It is a speed bump plus an audit line, not a security boundary against
-  processes running as the same user. Agents are told never to call it.
+  are validated against the registry. It never edits a crontab or a plist. The
+  one file of another program it writes is cmux's config, to restore the socket
+  password (above).
+- **Approvals.** Every decision that is the owner's alone (`decide`,
+  `gate_decide`, confirming a recorded pane answer, revoking a program go,
+  snoozing, card actions, the upgrade) requires a per-install decision token
+  (`data/mesh-decision-token`) that is injected into the board page. A request
+  that carries the token and an agent or intake identity is refused in code,
+  and an agent running the owner's terminal form is held by Guardrails. The
+  token is a speed bump plus an audit line, not a security boundary against
+  processes running as the same user.
 - **Agents.** Everything an agent reads from panes, reports, tasks or `[mesh]`
   lines is treated as data, not instructions. `POLICY.md` is the only approval
   authority, and anything paid, outward-facing or destructive always goes to
   the owner.
-- **Secrets.** Secrets live only in `data/secrets.env` (mode 600, gitignored,
-  re-read when it changes). The ledger refuses text that looks like a
-  credential.
+- **Secrets.** The credentials you supply live only in `data/secrets.env`
+  (mode 600, gitignored, re-read when it changes). The board generates three
+  more, also mode 600 in `data/`: the cmux socket password, the decision token
+  and the intake token. The optional phone relay keeps its own files in
+  `data/relay/`. The ledger refuses text that looks like a credential.
 - **cmux.** cmux is a separate app. The board uses only its CLI and its
   password-protected socket, and keeps its own copy of the password in
   `data/cmux-socket-password`.

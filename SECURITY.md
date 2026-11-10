@@ -58,20 +58,34 @@ action.
 
 ## Approval decisions
 
-Ledger approvals (`decide`) require a random per-install **decision token**
-(`data/mesh-decision-token`, mode 600) that is injected into the board page
-and checked with a constant-time compare. Every decision is logged with the
-source IP. The token is a speed bump and an audit trail. It is **not** a
-boundary against other processes running as the same macOS user, which can
-read the file. Agents are instructed never to call `decide`.
+Every decision that is yours alone requires a random per-install **decision
+token** (`data/mesh-decision-token`, mode 600): approvals and plan reviews
+(`decide`), gate decisions (`gate_decide`), confirming or rejecting a recorded
+pane answer, revoking a program go, snoozing a waiting row, card actions and
+the one-click upgrade. The token is injected into the board page and checked
+with a constant-time compare, and every decision is logged with the source IP.
+
+- A request that carries the token and **also** an agent or chat-intake
+  identity is refused in code. A request that carries the token and names no
+  one is taken as yours.
+- An agent running the owner's terminal form (`task.sh gate …`, or a ledger or
+  mesh command with `--signed`) is held by Guardrails (class `self`).
+- The token is a speed bump and an audit trail. It is **not** a boundary
+  against other processes running as the same macOS user: the file is readable
+  by them, and the board page that carries the token can be fetched by any
+  local process. See [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md).
 
 ## Secrets
 
-- All credentials live in `data/secrets.env`: gitignored, mode 600, re-read
-  on change. The template is `secrets.env.example`. A missing key turns that
-  feature off; nothing falls back to other files.
-- The cmux socket password is kept in `data/cmux-socket-password` (mode 600,
-  gitignored) and passed via environment variable to cmux CLI calls.
+- The credentials **you supply** live in `data/secrets.env`: gitignored, mode
+  600, re-read on change. The template is `secrets.env.example`. A missing key
+  turns that feature off; nothing falls back to other files.
+- The board generates and keeps three more credential files, all in `data/`,
+  mode 600 and gitignored: `cmux-socket-password` (passed via environment
+  variable to cmux CLI calls, and put back into `~/.config/cmux/cmux.json`
+  when cmux loses it), `mesh-decision-token` and `intake-token`.
+- The optional phone relay keeps its server's user database and the phone's
+  token under `data/relay/`.
 - The task ledger **refuses text that looks like a credential**, such as API
   key and token patterns.
 - The dead-man workflow reads its endpoint, key and SMTP credentials from

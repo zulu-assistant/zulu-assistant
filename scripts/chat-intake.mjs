@@ -13,12 +13,13 @@
 // docs/CHAT-INTAKE.md (public). Never logs a token; never runs an attachment.
 import { readFile, writeFile, mkdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { ROOT, SETTINGS, PRINCIPALS, OWNER, loadSecrets, resolve } from '../src/config.mjs';
+import { ROOT, SETTINGS, PRINCIPALS, OWNER, loadSecrets, resolve, writePrivate } from '../src/config.mjs';
 const OWNER_NAME = OWNER.name;
 import {
   loadChannels, routeEvent, plainText, parseContract, requestBody, replyBody, withheldBody, titleFor,
   ownerFor, safeFileName, renderMentions, coalesce, openSeen, openThreads, openInbox, writeAtomic, chatFileProblem,
   catchupOldest, parseSince, seenFloor, historyEvents, missedByLink, linkHealth, linkStatePatch, readJson, publishBackoff,
+  unmappedChannels,
 } from '../src/intake.mjs';
 import { slackApi, listChannels, userNames, mentionedIds, downloadFile, socketMode, uploadToThread } from '../src/intake-slack.mjs';
 
@@ -63,7 +64,9 @@ async function run(secrets, { check = false, ...opts } = {}) {
   report.push({ name: cfg.statusChannel, id: statusCh?.id || null, member: Boolean(statusCh?.member), owner: '(status publisher)' });
   const people = [...PRINCIPALS.values()].map((p) => `${p.id}=${p.slack.length ? 'linked' : 'NO chat id'}`);
   // --check / --sweep run beside the live service: never overwrite its status.json (the board's link card reads it)
-  if (!check) await setStatus({ channels: report, bot: auth.user, team: auth.team });
+  // channel discovery (#365): visible channels no route covers; the board files one task per channel
+  const unmapped = unmappedChannels(visible, cfg);
+  if (!check) await setStatus({ channels: report, bot: auth.user, team: auth.team, unmapped, unmappedAt: new Date().toISOString() });
   if (check) {
     console.log(`bot ${auth.user} in ${auth.team}`);
     const live = await readJson(path.join(STATE_DIR, 'status.json'), null);
@@ -84,6 +87,7 @@ async function run(secrets, { check = false, ...opts } = {}) {
       console.log(`  catch-up #${c.name}: last seen ${lastSeen ? new Date(Number(lastSeen) * 1000).toISOString() : 'none'} · ${todo.length} unfiled request(s) since ${new Date(Number(oldest) * 1000).toISOString()}${todo.length ? ` (${todo.map((e) => new Date(Number(e.ts) * 1000).toISOString().slice(0, 16)).join(', ')})` : ''}`);
     }
     for (const r of report) console.log(`  #${r.name}: ${r.id ? (r.member ? 'ok (member)' : 'FOUND, bot not invited — /invite @' + auth.user) : 'NOT FOUND'} → ${r.owner}`);
+    for (const u of unmapped) console.log(`  #${u.name}: NOT ROUTED (${u.member ? 'bot is a member' : 'bot not invited'}) — add a route or list it in ignoreChannels`);
     console.log(`  people: ${people.join(', ')}`);
     for (const rule of cfg.standing) console.log(`  standing: ${rule}`);
     return null;
@@ -156,7 +160,7 @@ async function run(secrets, { check = false, ...opts } = {}) {
       const extra = [];
       if (overflow) {
         await mkdir(filesDir(task.id), { recursive: true, mode: 0o700 });
-        await writeFile(path.join(filesDir(task.id), 'message.txt'), overflow, { mode: 0o600 });
+        await writePrivate(path.join(filesDir(task.id), 'message.txt'), overflow);
         extra.push(`full request text → ${path.relative(ROOT, filesDir(task.id))}/message.txt (quoted data)`);
       }
       const saved = await saveFiles(task.id, files);
@@ -350,6 +354,8 @@ async function run(secrets, { check = false, ...opts } = {}) {
     setInterval(() => drain().catch(() => {}), 30_000),
     setInterval(() => publish().catch((e) => log(`[chat-intake] publish: ${e.message}`)), 10_000),
     setInterval(() => daily().catch(() => {}), 5 * 60_000),
+    // a channel created after start shows up within the hour (the board files it)
+    setInterval(() => listChannels(bot).then((v) => setStatus({ unmapped: unmappedChannels(v, cfg), unmappedAt: new Date().toISOString() })).catch(() => {}), 60 * 60_000),
   ];
   drain().catch(() => {});
   return { stop() { sock.stop(); timers.forEach(clearInterval); } };

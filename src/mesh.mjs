@@ -545,41 +545,98 @@ export function staleReason(m, currentStatus, now = Date.now()) {
   return null;
 }
 
-/** One pass over queued messages. Returns {delivered, expired, dropped, still}. */
-export async function drainOutbox({ file = OUTBOX_FILE, now = Date.now(), resolve, deliver = deliverNow, taskStatus = async () => undefined } = {}) {
-  const box = await readOutbox(file);
-  if (!box.length) return { delivered: [], expired: [], dropped: [], still: [] };
-  const delivered = []; const expired = []; const dropped = []; const still = [];
-  for (const m of box) {
-    if (now - m.queuedAt > OUTBOX_TTL_MS) { expired.push(m); continue; }
-    if (m.taskId) {
-      const cur = await taskStatus(m.taskId);
-      const why = cur === undefined ? null : staleReason(m, cur, now);   // undefined = ledger not consulted
-      if (why) { dropped.push({ ...m, dropReason: why }); continue; }
+// Every read-modify-write of an outbox file goes through ONE promise chain per
+// file (like the ledger's writer): a message queued while a drain is typing into
+// panes must never be overwritten by that drain's final write (gate wakes included).
+const outboxChains = new Map();
+function withOutbox(file, fn) {
+  const prev = outboxChains.get(file) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  outboxChains.set(file, next.catch(() => {}));
+  return next;
+}
+const outboxKey = (m) => `${m.to}\u0000${m.queuedAt}\u0000${m.line}`;
+const draining = new Set();
+
+/**
+ * One pass over queued messages. Returns {delivered, expired, dropped, still}.
+ * Delivery (screen reads + typing, seconds per message) runs OUTSIDE the lock on
+ * a copy; the final write re-reads the file under the lock and only removes or
+ * updates the entries this pass handled, so anything queued meanwhile survives.
+ * A second drain of the same file while one runs returns at once (`busy`).
+ */
+export async function drainOutbox({ file = OUTBOX_FILE, now = Date.now(), resolve, deliver = deliverNow, taskStatus = async () => undefined, holdOpen = async () => undefined } = {}) {
+  const empty = { delivered: [], expired: [], dropped: [], still: [] };
+  if (draining.has(file)) return { ...empty, busy: true };
+  draining.add(file);
+  try {
+    const box = await withOutbox(file, () => readOutbox(file));
+    if (!box.length) return empty;
+    const delivered = []; const expired = []; const dropped = []; const still = [];
+    const gone = new Set(); const updated = new Map();
+    for (const m of box) {
+      if (now - m.queuedAt > OUTBOX_TTL_MS) { expired.push(m); gone.add(outboxKey(m)); continue; }
+      if (m.taskId) {
+        const cur = await taskStatus(m.taskId);
+        const why = cur === undefined ? null : staleReason(m, cur, now);   // undefined = ledger not consulted
+        if (why) { dropped.push({ ...m, dropReason: why }); gone.add(outboxKey(m)); continue; }
+      }
+      // a "not approved yet" notice is true only while its gate or request still waits: once that
+      // was decided the agent has (or will get) the decision itself, and the old notice would
+      // contradict it. `false` = no longer waiting; undefined = not consulted, so it is kept.
+      if (m.kind === HOLD_KIND && (await holdOpen(m)) === false) { dropped.push({ ...m, dropReason: 'decided since this was queued' }); gone.add(outboxKey(m)); continue; }
+      const agent = await resolve(m.to);
+      let next;
+      if (!agent) next = { ...m, lastReason: 'target not in directory' };
+      else {
+        const r = await deliver(agent, m.line, { wake: m.wake });
+        if (r.delivered) { delivered.push(m); gone.add(outboxKey(m)); continue; }
+        next = { ...m, attempts: (m.attempts || 0) + 1, lastReason: r.queued };
+      }
+      updated.set(outboxKey(m), next);
     }
-    const agent = await resolve(m.to);
-    if (!agent) { still.push({ ...m, lastReason: 'target not in directory' }); continue; }
-    const r = await deliver(agent, m.line, { wake: m.wake });
-    if (r.delivered) delivered.push(m);
-    else still.push({ ...m, attempts: (m.attempts || 0) + 1, lastReason: r.queued });
-  }
-  await writeJsonAtomic(file, still);
-  return { delivered, expired, dropped, still };
+    const kept = await withOutbox(file, async () => {
+      const cur = await readOutbox(file);
+      const out = cur.filter((m) => !gone.has(outboxKey(m))).map((m) => updated.get(outboxKey(m)) || m);
+      await writeJsonAtomic(file, out);
+      return out;
+    });
+    for (const m of kept) still.push(m);
+    return { delivered, expired, dropped, still };
+  } finally { draining.delete(file); }
 }
 
-export const NEVER_SUPERSEDED = new Set(['approval', 'done', 'decision', 'gate', 'context']);
-export async function enqueue(msg, file = OUTBOX_FILE) {
-  let box = await readOutbox(file);
-  // one pending wake per (target, text) — no storms; and a newer wake about
-  // the same task SUPERSEDES the older one (only the latest state is useful)
-  if (box.some((m) => m.to === msg.to && m.line === msg.line)) return box.length;
-  // (a queued done notice, approval or decision — including a guardrails gate
-  // decision — is never superseded: a later comment must not swallow "Task #N done"
-  // or "GATE g8 APPROVED — run it" (#343: g8's wake was replaced by MC's next message)
-  if (msg.taskId) box = box.filter((m) => !(m.to === msg.to && m.taskId === msg.taskId && !NEVER_SUPERSEDED.has(m.kind)));
-  box.push(msg);
-  await writeJsonAtomic(file, box);
-  return box.length;
+// A "hold" is the board telling an agent that something is NOT approved yet (a pane answer or a
+// typed approval that waits for the owner's confirm click, or one the owner rejected). A later
+// comment must not swallow it: an agent that never hears it goes on waiting for nothing, or acts.
+// It carries `ref` ({ gate } or { approval: true }) so the drain can drop it once that was decided.
+export const HOLD_KIND = 'hold';
+export const NEVER_SUPERSEDED = new Set(['approval', 'done', 'decision', 'gate', 'context', HOLD_KIND]);
+export function enqueue(msg, file = OUTBOX_FILE) {
+  return withOutbox(file, async () => {
+    let box = await readOutbox(file);
+    // one pending wake per (target, text) — no storms; and a newer wake about
+    // the same task SUPERSEDES the older one (only the latest state is useful)
+    if (box.some((m) => m.to === msg.to && m.line === msg.line)) return box.length;
+    // (a queued done notice, approval or decision — including a guardrails gate
+    // decision — is never superseded: a later comment must not swallow "Task #N done"
+    // or "GATE g8 APPROVED — run it" (#343: g8's wake was replaced by MC's next message);
+    // nor a hold, "not approved yet": Mission Control's review of the pane-answer change)
+    if (msg.taskId) box = box.filter((m) => !(m.to === msg.to && m.taskId === msg.taskId && !NEVER_SUPERSEDED.has(m.kind)));
+    box.push(msg);
+    await writeJsonAtomic(file, box);
+    return box.length;
+  });
+}
+
+/** Remove queued messages matching `pred` (serialised with drain + enqueue). Returns the removed ones. */
+export function dropFromOutbox(pred, file = OUTBOX_FILE) {
+  return withOutbox(file, async () => {
+    const box = await readOutbox(file);
+    const keep = box.filter((m) => !pred(m));
+    if (keep.length !== box.length) await writeJsonAtomic(file, keep);
+    return box.filter((m) => pred(m));
+  });
 }
 
 // ---- launch kick (fixes the "prompt lands in the input box but never submits" race) ----

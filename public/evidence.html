@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidence · %%BRAND%%</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  /* compact ~360px column, the same rules as ?dock=1; depth drawn with light only */
+  body.ev { padding: 10px 10px 34px; font-size: 12px; }
+  .ev header { gap: 8px; margin-bottom: 8px; }
+  .ev h1 { font-size: 13px; letter-spacing: .18em; }
+  #ev-filter {
+    width: 100%; background: var(--card); color: var(--ink-bright); border: 1px solid var(--card-edge);
+    border-radius: 3px; padding: 5px 8px; font: inherit; margin-bottom: 6px;
+  }
+  #ev-filter:focus { outline: none; border-color: var(--accent); box-shadow: var(--glow-green); }
+  #ev-meta { color: var(--ink-3); font-size: 10px; letter-spacing: .08em; margin-bottom: 8px; }
+  .ev-group { color: var(--ink-3); font-size: 10px; letter-spacing: .18em; margin: 10px 0 4px; }
+  .ev-row { background: var(--card); border: 1px solid var(--card-edge); border-radius: 4px; margin-bottom: 6px; padding: 6px 8px; }
+  .ev-row.ev-live { border-left: 2px solid var(--accent); }
+  .ev-row[open] { box-shadow: var(--glow-green); }
+  .ev-row summary { cursor: pointer; list-style: none; }
+  .ev-row summary::-webkit-details-marker { display: none; }
+  .ev-id { color: var(--ink-bright); font-weight: 700; }
+  .ev-title { color: var(--ink); overflow-wrap: anywhere; }
+  .ev-badge { font-size: 10px; letter-spacing: .08em; }
+  .ev-dim { color: var(--ink-3); }
+  .ok { color: var(--status-ok); }
+  .warn { color: var(--status-warning); }
+  .bad { color: var(--status-critical); }
+  .ev-sec { border-top: 1px solid var(--card-edge); margin-top: 6px; padding-top: 6px; overflow-wrap: anywhere; }
+  .ev-h { color: var(--ink-2); font-size: 10px; letter-spacing: .16em; margin-bottom: 3px; }
+  .ev-req, .ev-sum { color: var(--ink-2); margin-bottom: 3px; }
+  .ev-tests, .ev-gates { list-style: none; }
+  .ev-tests li, .ev-gates li { margin: 2px 0; }
+  .ev-gates li + li { border-top: 1px dotted var(--card-edge); padding-top: 3px; }
+  .ev-gid { color: var(--ink-bright); }
+  .ev-cls { color: var(--ink-2); border: 1px solid var(--card-edge); border-radius: 2px; padding: 0 4px; font-size: 10px; }
+  .ev-times { color: var(--ink-2); font-size: 11px; }
+  code { color: var(--ink-bright); font: inherit; }
+  .ev-empty { color: var(--ink-3); padding: 12px 0; }
+</style>
+</head>
+<body class="ev">
+  <header><div class="brand"><span class="brand-mark"></span><h1>EVIDENCE</h1></div></header>
+  <input id="ev-filter" type="search" placeholder="filter: #id, title, owner, gate…" autocomplete="off" spellcheck="false">
+  <div id="ev-meta">loading…</div>
+  <main id="ev-list"></main>
+  <script src="/evidence.js"></script>
+</body>
+</html>

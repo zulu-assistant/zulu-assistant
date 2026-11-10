@@ -5,7 +5,7 @@ most of it is downloads and macOS permission dialogs. Nothing here is automated 
 accounts: every login goes through the tool's own flow, and nothing is uploaded anywhere.
 
 ## Before you start
-- A Mac on macOS 14 or later, with an admin account (Homebrew needs it).
+- A Mac on macOS 26 (the version each release is tested on; older versions are untested), with an admin account (Homebrew needs it).
 - A GitHub account (for `zulu setup`'s GitHub step and for sending feedback).
 - A Claude subscription or Anthropic API key, and/or a ChatGPT plan or OpenAI API key —
   you choose which engine runs Mission Control during setup.

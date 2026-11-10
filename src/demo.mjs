@@ -68,6 +68,9 @@ export function demoJobs(now = Date.now()) {
     job('endpoint:site', 'Website example.com', 'cloud', 'ok', 'HTTP 200', 'http check'),
     job('endpoint:status', 'Status page', 'cloud', 'ok', 'HTTP 200', 'http check'),
     job('endpoint:hooks', 'Webhook receiver', 'cloud', 'ok', 'HTTP 401 (up)', 'http check'),
+    // the one-click upgrade card (#346): its UPDATE button arms and clicks like the real one; nothing runs
+    { ...job('update', 'Zulu update', 'cloud', 'warn', 'v1.0.1 available (demo) · this install is v1.0.0', 'checked every 6h'),
+      upgrade: { to: 'v1.0.1', from: 'v1.0.0', notesUrl: null } },
   ];
 }
 

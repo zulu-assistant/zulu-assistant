@@ -1,17 +1,18 @@
 // Guardrails: the gate records on a ledger task (pure) — gates[], decisions, the
 // close check — plus the small stores the gate service keeps under data/guardrails/
 // (grants, dry runs, watched scripts, focus, observe log). docs/GUARDRAILS.md.
-import { readFile, writeFile, rename, mkdir, appendFile, chmod } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
+import { writePrivate, makePrivate } from './private-file.mjs';
 import { randomBytes } from 'node:crypto';
+import { cleanContext, MAX_WORDS } from './row-context.mjs';
 import path from 'node:path';
 
 export class GateError extends Error {
   constructor(status, message) { super(message); this.status = status; this.extra = {}; }
 }
-export const MAX_CMD = 1500;          // what the panel row shows
-const MAX_FULL = 20000;               // what gates[] keeps (the full approved text; longer inputs are cut and say so)
-const cap = (s, n) => (s.length > n ? `${s.slice(0, n)}\n… [${s.length - n} more chars — full text: task.sh audit <id> --json]` : s);
-const STATUSES = ['pending', 'approved', 'declined', 'expired', 'executed', 'dry_required', 'needs_focus'];
+const MAX_CMD = 1500;                 // a dry run's recorded command
+const MAX_FULL = 20000;               // what gates[] keeps and the panel row shows (the full approved text; longer inputs are cut and say so)
+const STATUSES = ['pending', 'approved', 'declined', 'expired', 'executed', 'dry_required', 'needs_focus', 'disputed'];
 
 // ── on the task (pure) ──────────────────────────────────────────────────────
 /** Append a gate record. `g.command` must already be redacted (gate-service does it). */
@@ -31,6 +32,8 @@ export function addGate(t, g, iso) {
     dryRun: g.dryRun ? { required: !!g.dryRun.required, seen_at: g.dryRun.seen_at || null, dryHash: g.dryRun.dryHash || null, command: g.dryRun.command ? String(g.dryRun.command).slice(0, MAX_CMD) : null } : { required: false, seen_at: null, dryHash: null },
     // the same call was approved before and expired unused (shown on the row; never re-armed)
     previously: g.previously ? { gate: String(g.previously.gate || ''), task: Number(g.previously.task) || null, at: g.previously.at || null } : null,
+    // row context (src/row-context.mjs): chip ids from a fixed table, and the agent's own description of the call
+    context: cleanContext(g.context), agentReason: g.agentReason ? String(g.agentReason).slice(0, MAX_WORDS) : null,
     status, decision: null, decided_by: null, decided_at: null, via: null, reason: null, recorded_by: null,
     expires_at: null, executed_at: null, attempts: 1, rerunsAfterDecline: 0,
   };
@@ -49,7 +52,55 @@ export function findGate(t, id) {
   return g;
 }
 export const pendingGates = (t) => (t.gates || []).filter((g) => g.status === 'pending')
-  .map((g) => ({ id: g.id, cls: g.cls, label: g.label, why: g.why, command: cap(g.command, MAX_CMD), commandRedacted: g.commandRedacted, bin: g.bin, cwd: g.cwd, agent: g.agent, tool: g.tool, requested_at: g.requested_at, dryRun: g.dryRun, previously: g.previously || null }));
+  .map((g) => ({ id: g.id, cls: g.cls, label: g.label, why: g.why, command: g.command, commandRedacted: g.commandRedacted, bin: g.bin, cwd: g.cwd, agent: g.agent, tool: g.tool, requested_at: g.requested_at, dryRun: g.dryRun, previously: g.previously || null,
+    context: g.context || [], agentReason: g.agentReason || null, ref: g.ref || null,
+    ...(openProposal(g) ? { proposal: openProposal(g) } : {}) }));
+
+// ── pane answers (SETTINGS.paneAnswers 'confirm') ───────────────────────────
+// An approval the owner gave in an agent's pane is typed into the ledger by an agent, under a name
+// the agent declares. So it is a PROPOSAL: it sits on the gate (or the approval request) and counts
+// only when the owner confirms it on the board. Nothing is minted and no program go starts before.
+const PROPOSAL_TEXT = 600;
+
+/** The recorded pane answer still waiting for the owner, or null. `x` = a gate or an approval request. */
+export function openProposal(x) {
+  return x?.proposal && !x.proposal.confirmed_at && !x.proposal.overruled_at ? x.proposal : null;
+}
+
+/**
+ * Build a proposal record. `text` must already be checked for secrets by the caller.
+ * kind 'typed' = an approval typed in a terminal on this machine (it carried the decision token,
+ * but did not come from the board page): the board cannot tell WHO typed it, so `by` is the word
+ * "terminal" and never a name. No kind = a pane answer an agent recorded.
+ */
+export const newProposal = ({ text, by, iso, byMc = false, kind = null }) => ({ decision: 'approve', text: String(text || '').trim().slice(0, PROPOSAL_TEXT), by: String(by || '').slice(0, 80), at: iso, ...(byMc ? { by_mc: true } : {}), ...(kind === 'typed' ? { kind: 'typed' } : {}) });
+
+/** "the pane answer recorded by <name>" / "the approval typed in a terminal": a proposal, in words. */
+export const proposalWhat = (p) => (p?.kind === 'typed' ? 'the approval typed in a terminal' : `the pane answer recorded by ${p?.by}`);
+
+/** Record a pane approval, or a typed one, on a pending gate. The gate stays pending. */
+export function proposeGate(t, { gate, text }, { iso, by, byMc = false, kind = null }) {
+  const g = findGate(t, gate);
+  if (g.status !== 'pending') throw new GateError(409, `gate ${g.id} on #${t.id} is ${g.status}, not pending`);
+  // a typed approval never replaces an answer that already waits: the owner confirms that one, or rejects it
+  if (kind === 'typed' && openProposal(g)) throw new GateError(409, `gate ${g.id} on #${t.id} already has an answer waiting: confirm it on the board page`);
+  g.proposal = newProposal({ text, by, iso, byMc, kind });
+  return g;
+}
+
+/**
+ * "Not what I said": the owner rejects a recorded pane answer. The gate (or request) stays as it
+ * was; the rejected record is kept (the last 5) so the receipt shows it happened.
+ * → the rejected proposal, or null when none was waiting.
+ */
+export function rejectProposal(x, { iso, by }) {
+  const p = openProposal(x);
+  if (!p) return null;
+  const { prev, ...record } = p;   // `prev` (where the task was before the record) is for the caller, not the receipt
+  x.disowned = [...(x.disowned || []), { ...record, rejected_at: iso, rejected_by: by }].slice(-5);
+  delete x.proposal;
+  return p;
+}
 
 /**
  * Where the owner decided: a receipt field only, never an authority (#350 acceptance gate).
@@ -58,13 +109,15 @@ export const pendingGates = (t) => (t.gates || []).filter((g) => g.status === 'p
  * pinned WAITING ON YOU strip) · board: the WORK panel on this Mac. → { surface, surfaces }:
  * `surfaces` keeps every one that applies (a phone tap in the strip = ['phone','strip']),
  * `surface` the most specific (cli > dock > phone > strip > board).
+ * `local` (the server sets it: the source address is one of THIS machine's own): a call the
+ * machine makes to its own tailnet address has a tailnet source too, and is not the phone.
  */
-export function decisionSurface({ via = null, remote = '', client = '' } = {}) {
+export function decisionSurface({ via = null, remote = '', client = '', local = false } = {}) {
   if (via === 'cli') return { surface: 'cli', surfaces: ['cli'] };
   const said = new Set(String(client || '').toLowerCase().split(',').map((s) => s.trim()));
   const all = [];
   if (said.has('dock')) all.push('dock');
-  if (/^100\./.test(String(remote || '').replace(/^::ffff:/, ''))) all.push('phone');
+  if (!local && /^100\./.test(String(remote || '').replace(/^::ffff:/, ''))) all.push('phone');
   if (said.has('strip')) all.push('strip');
   if (!all.length) all.push('board');
   return { surface: all[0], surfaces: all };
@@ -80,6 +133,13 @@ export function decideGate(t, { gate, decision, reason }, { iso, via, by, record
   g.reason = reason ? String(reason).slice(0, 300) : null;
   if (decision === 'approve') { g.status = 'approved'; g.expires_at = new Date(now + g.ttlMinutes * 60e3).toISOString(); }
   else g.status = 'declined';
+  // a recorded pane answer was waiting: this decision settles it. Only the owner's own board
+  // decision can CONFIRM it; a decline (from the board or recorded) overrules it; a direct pane
+  // approval ('direct' mode) just takes its place, since it carries its own recorded_by.
+  const p = openProposal(g);
+  if (p && decision === 'decline') g.proposal = { ...p, overruled_at: iso };
+  else if (p && via === 'board') g.proposal = { ...p, confirmed_at: iso };
+  else if (p) delete g.proposal;
   return g;
 }
 
@@ -106,6 +166,8 @@ export function gateEvent(t, { gate, event, at, note }, iso) {
   if (event === 'executed') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'executed'; g.executed_at = at || iso; }
   else if (event === 'expired') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'expired'; }
   else if (event === 'rerun_declined') { g.rerunsAfterDecline += 1; g.attempts += 1; }
+  // a grant was presented for this gate and the receipt chain holds no approval for it: nothing ran
+  else if (event === 'disputed') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'disputed'; g.disputed_at = at || iso; }
   else if (event === 'attempt') g.attempts += 1;
   else throw new GateError(400, `unknown gate event ${event}`);
   if (note != null) g.note = String(note).slice(0, 200);
@@ -127,8 +189,17 @@ export function auditRows(t) {
   const rows = [];
   for (const g of t.gates || []) {
     rows.push({ at: g.requested_at, gate: g.id, event: g.status === 'dry_required' || g.status === 'needs_focus' ? g.status : 'requested', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: g.engine });
-    if (g.decided_at) rows.push({ at: g.decided_at, gate: g.id, event: g.via === 'standing' ? 'auto-approved' : g.decision === 'approve' ? 'approved' : 'declined', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.decided_by, via: g.via === 'standing' ? `program go ${g.go}` : g.via + (g.surfaces?.length && g.surfaces.join('+') !== g.via ? ` · ${g.surfaces.join('+')}` : '') + (g.recorded_by ? ` (recorded by ${g.recorded_by})` : ''), surface: g.surface || null, reason: g.reason });
+    // a pane answer an agent recorded, or an approval typed in a terminal: shown for what it is — a record, not a decision
+    const typed = (p) => p.kind === 'typed';
+    const paneRow = (p, via) => ({ at: p.at, gate: g.id, event: typed(p) ? 'typed approval recorded' : 'pane answer recorded', cls: g.cls, command: g.command, cwd: g.cwd, actor: typed(p) ? 'a terminal on this machine' : p.by, via, reason: p.text });
+    if (g.proposal) rows.push(paneRow(g.proposal, g.proposal.confirmed_at ? 'confirmed by the owner on the board' : g.proposal.overruled_at ? 'a later decision said otherwise' : 'not a decision — waiting for the owner to confirm on the board'));
+    for (const d of g.disowned || []) {
+      rows.push(paneRow(d, 'rejected by the owner'));
+      rows.push({ at: d.rejected_at, gate: g.id, event: typed(d) ? 'typed approval rejected' : 'pane answer rejected', cls: g.cls, command: g.command, cwd: g.cwd, actor: d.rejected_by || 'owner', via: typed(d) ? 'board · not typed by the owner' : 'board · not what was said' });
+    }
+    if (g.decided_at) rows.push({ at: g.decided_at, gate: g.id, event: g.via === 'standing' ? 'auto-approved' : g.decision === 'approve' ? 'approved' : 'declined', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.decided_by, via: g.via === 'standing' ? `program go ${g.go}` : g.via + (g.surfaces?.length && g.surfaces.join('+') !== g.via ? ` · ${g.surfaces.join('+')}` : '') + (g.recorded_by ? ` (recorded by ${g.recorded_by})` : '') + (g.proposal?.confirmed_at ? ` · confirming ${proposalWhat(g.proposal)}` : ''), surface: g.surface || null, reason: g.reason });
     if (g.executed_at) rows.push({ at: g.executed_at, gate: g.id, event: 'released (run once)', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: g.note ? `single-use grant · ${g.note}` : 'single-use grant' });
+    if (g.status === 'disputed') rows.push({ at: g.disputed_at, gate: g.id, event: 'DISPUTED: a grant with no approval in the receipt chain (not run)', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: '' });
     if (g.status === 'expired') rows.push({ at: g.expires_at, gate: g.id, event: 'expired', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: '' });
     if (g.rerunsAfterDecline) rows.push({ at: g.decided_at, gate: g.id, event: `re-attempted ×${g.rerunsAfterDecline} after decline`, cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: '' });
   }
@@ -147,9 +218,9 @@ async function readJson(file, fallback) { try { return JSON.parse(await readFile
 async function writeAtomic(file, value) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
-  await writeFile(tmp, JSON.stringify(value, null, 1), { mode: 0o600 });
+  await writePrivate(tmp, JSON.stringify(value, null, 1));
   await rename(tmp, file);
-  await chmod(file, 0o600).catch(() => {});
+  await makePrivate(file).catch(() => {});
 }
 
 /**
@@ -217,7 +288,7 @@ export function createGateStore(dir) {
     observe(entry) {
       return serial(async () => {
         await mkdir(dir, { recursive: true, mode: 0o700 });
-        await appendFile(f('observed.jsonl'), JSON.stringify(entry) + '\n', { mode: 0o600 });
+        await writePrivate(f('observed.jsonl'), JSON.stringify(entry) + '\n', { append: true });
       });
     },
     /** One line per /api/gates/check the board answered (pass/allow/deny), so no check is ever blind. */
@@ -225,17 +296,19 @@ export function createGateStore(dir) {
       return serial(async () => {
         await mkdir(dir, { recursive: true, mode: 0o700 });
         const file = f('checks.jsonl');
-        await appendFile(file, JSON.stringify(entry) + '\n', { mode: 0o600 });
-        // keep it small: past ~2 MB, keep the newest half
-        const text = await readFile(file, 'utf8').catch(() => '');
-        if (text.length > 2e6) {
+        await writePrivate(file, JSON.stringify(entry) + '\n', { append: true });
+        // keep it small: past ~4 MB, keep the newest half (the size is read first, the file only when it is over)
+        if (((await stat(file).catch(() => null))?.size || 0) > 4e6) {
+          const text = await readFile(file, 'utf8').catch(() => '');
           const lines = text.trim().split('\n');
-          await writeFile(file, lines.slice(Math.floor(lines.length / 2)).join('\n') + '\n', { mode: 0o600 });
+          await writePrivate(file, lines.slice(Math.floor(lines.length / 2)).join('\n') + '\n');
         }
       });
     },
     // serialized + a unique tmp name: two first checks after a policy change used to race on one
     // tmp path, and the loser's rename threw (a spurious deny; #369's concurrency test found it)
+    /** The generated triggers file as it is on disk, or null when it is missing (the integrity check compares it). */
+    readTriggers() { return readFile(f('triggers'), 'utf8').catch(() => null); },
     writeTriggers(lines) {
       return serial(async () => {
         await mkdir(dir, { recursive: true, mode: 0o700 });

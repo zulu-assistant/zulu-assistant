@@ -4,9 +4,13 @@ This runbook takes a logged-in macOS account to a running Zulu Assistant:
 
 - **the Ops Board** on `http://localhost:3210` — status of your LaunchAgents, Docker containers,
   endpoints, crontab jobs, disk, memory and live agent sessions;
-- **cmux**, the agent terminal the board drives (see [CMUX-SETUP.md](CMUX-SETUP.md));
+- **cmux**, the agent terminal the board drives (see [CMUX-SETUP.md](CMUX-SETUP.md)). The agent half
+  needs it (session tiles, the mesh, Mission Control). The board's fleet monitoring runs without it,
+  and so does demo mode. To install without cmux, see §2b (Guardrails only);
 - **Mission Control** and the **Agent Mesh** (see `MISSION-CONTROL.md`, `AGENT-MESH.md`);
-- optionally **the brain**: an Obsidian vault, Graphify and Claude memory (see [BRAIN.md](BRAIN.md));
+- **the brain**: an Obsidian vault, Graphify and Claude memory (see [BRAIN.md](BRAIN.md)). The board
+  runs without it, but this installer sets it up by default and `zulu setup` treats its two steps as
+  required (see §3 for how to leave it out);
 - optionally **team chat intake**: teammates post requests in Slack, and they become tasks (see [3c](#3c-optional-team-chat-intake-slack)).
 
 One command does the scriptable work, then a guided setup collects what only you can provide:
@@ -30,14 +34,14 @@ and what the setup cannot automate.
 
 | Tool | Pin | Why | Install |
 |---|---|---|---|
-| macOS | 26.x (Darwin 25) | launchd and TCC behaviour described here | — |
+| macOS | 26 (tested on 26.6) | launchd and TCC behaviour described here; older versions are untested | — |
 | Homebrew | any | installs cmux, gh, uv | https://brew.sh |
 | Node | **22** (nvm recommended) | zero-dependency server; launchd has no shell profile, so `scripts/env.sh` resolves Node itself (nvm pin → newest nvm → Homebrew) | `nvm install 22` |
 | Claude Code | **≥ 2.1.280** (tested 2.1.296) | current model IDs need it; the mesh's readiness kick works around a 2.1.280 unsubmitted-prompt bug | `npm i -g @anthropic-ai/claude-code` |
 | cmux | **0.65.x** (0.64.x also works) | the code works around specific cmux quirks (see CMUX-SETUP.md) | `brew install --cask cmux` |
 | gh | any, logged in | clone, PRs, Actions secrets for the dead-man switch | `brew install gh` |
-| Codex CLI | optional, tested 0.162.1 | Codex as Mission Control / worker engine, Codex panes | `npm i -g @openai/codex` |
-| uv + Graphify | optional, `graphifyy==0.9.83` | code memory (BRAIN.md) | `brew install uv` |
+| Codex CLI | optional to run, tested 0.162.1; installed by default (`ZULU_SKIP=codex` leaves it out) | Codex as Mission Control / worker engine, Codex panes | `npm i -g @openai/codex` |
+| uv + Graphify | optional to run, `graphifyy==0.9.83`; installed by default (`ZULU_SKIP="graphify"`) | code memory (BRAIN.md) | `brew install uv` |
 | Tailscale | optional | phone access to the board | App Store build |
 
 Pin overrides go in `data/local.env` (gitignored), e.g. `MC_NODE_VERSION=v22.x.y` or `MC_PORT=3211`.
@@ -77,6 +81,17 @@ that turns the phosphor sidebar on for the demo window only:
 `cmux right-sidebar set custom phosphor --window <id> --no-focus`. No cmux? The board-only demo
 still runs. What it writes and how it cleans up: [CMUX-SETUP.md](CMUX-SETUP.md#the-cmux-demo).
 
+## 2b. Guardrails only
+
+```bash
+./install.sh --guardrails   # --dry-run shows the plan and writes nothing
+```
+
+The board, the ledger, the gate hook and the page with the waiting rows. No cmux, no Mission Control, no
+Homebrew packages, no scheduled triage job, no brain. What it does, how to try it and what it cannot do
+without the rest: [QUICKSTART-GUARDRAILS.md](QUICKSTART-GUARDRAILS.md). You can run the full install later;
+your ledger and policy stay.
+
 ## 3. Full install
 
 ```bash
@@ -89,10 +104,14 @@ In order, it:
    git/gh/uv, cmux, the Claude Code and Codex CLIs, Graphify, Obsidian — asks once, then installs
    only those. `ZULU_SKIP="obsidian codex"` leaves items out; `--yes` skips the question.
 2. **Runs `init`**: copies `examples/` → `overlay/`, never overwriting a file that exists.
-3. **Runs `scripts/bootstrap.sh install`** (below).
-4. **Offers `zulu setup`** — the guided part (next section). The board shows a *Zulu setup* card
+3. **Runs `scripts/bootstrap.sh install`** (below). This loads two LaunchAgents without a further
+   question: the board, and **scheduled triage**, which costs money (see the note under the list).
+4. **Sets up the brain, without asking** (the same as `./install.sh --brain`): copies the example
+   skills into `~/.claude/skills/`, and merges the example hook guards into `~/.claude/settings.json`
+   (your own entries are kept). It then writes `data/setup-state.json` and links `~/.local/bin/zulu`.
+5. **Offers `zulu setup`** — the guided part (next section). The board shows a *Zulu setup* card
    until it is done; `zulu setup --status` prints the checklist any time.
-5. **Asks once** whether to star the GitHub repo. The default is No; the answer is remembered.
+6. **Asks once** whether to star the GitHub repo. The default is No; the answer is remembered.
    `./install.sh star` (or `bin/zulu star`) does it later.
 
 Other entry points:
@@ -124,6 +143,21 @@ What `bootstrap.sh install` does:
 6. Installs cmux Tier 1 (Dock seed + phosphor sidebar) with `scripts/cmux-tier1-install.mjs`.
 7. Applies cmux pane chrome. This needs a running cmux, so it is skipped until §4 is done.
 8. Seeds the agent directory `overlay/config/agents.json` (empty; the board registers live workspaces).
+9. Brain, when a vault exists: installs the vault's Claude skills and global `~/.claude/CLAUDE.md`.
+   Graphify: installs it with `uv` if missing, installs its Claude skill and its git hooks
+   (a rebuild after each commit and checkout in this checkout), builds the first `graphify-out/`, and
+   registers a `graphify` MCP server in your user-level Claude config (`claude mcp add -s user`).
+
+**What costs money.** Scheduled triage (`<prefix>.mission-control-triage`) runs a headless
+`claude -p` pass four times a day (08:30, 12:30, 16:30, 20:30) on your Claude plan or API key. To go
+without it, unload it after the install: `launchctl bootout gui/$(id -u)/<prefix>.mission-control-triage`.
+(On a test account, `scripts/bootstrap.sh install --sandbox` skips it, along with the vault's backup job.) Nothing else the
+installer loads calls a paid service.
+
+**To leave the brain out:** `ZULU_SKIP="obsidian graphify uv" ./install.sh` keeps those tools off the
+machine. The skills and hook guards in step 4 are still copied; remove them from `~/.claude/` if you do
+not want them. In `zulu setup`, the vault and brain steps are marked required: skip them and the setup
+card stays open.
 
 ### Your configuration
 
@@ -166,7 +200,7 @@ Zulu never stores a credential. Redo one step with `zulu setup --step <id>`.
 | `residents` | pick repos to give a long-lived resident agent |
 | `verify` | `zulu check`, board answer, start Mission Control on your chosen engine |
 
-Problems? `zulu doctor` writes a redacted diagnostic file to `data/` (never uploaded) for an issue.
+Problems? [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists what usually goes wrong and what to do. `zulu doctor` writes a redacted diagnostic file to `data/` (never uploaded) for an issue. Which model runs each role: [MODELS.md](MODELS.md).
 
 ## 3c. Optional: team chat intake (Slack)
 
@@ -251,6 +285,17 @@ Restart the agent sessions to pick it up. Start in `"mode": "observe"` in
 `overlay/policy.json` if you want a log of what *would* be gated before anything
 is blocked. Everything else: [GUARDRAILS.md](GUARDRAILS.md).
 
+## 3e. Optional: approvals on your phone (relay)
+
+The board can buzz your phone when a gate or an approval waits on you. Pushes go through a small
+[ntfy](https://ntfy.sh) server on your tailnet.
+
+- **On macOS the server runs in Docker.** Homebrew's `ntfy` is the client only, so it can't serve.
+- **Users and tokens** are made with one-off containers, while the server is stopped.
+
+The full steps, the container recipe and the threat model are in [RELAY.md](RELAY.md).
+The board side stays off until you set `SETTINGS.relay`.
+
 ## 4. Manual steps
 
 No script can do these. Do them early; some need an app relaunch.
@@ -282,7 +327,11 @@ No script can do these. Do them early; some need an app relaunch.
 
 ## 5. Secrets
 
-All credentials live in **one file, `data/secrets.env`** (gitignored, mode 600). Start from the
+All credentials **you supply** live in **one file, `data/secrets.env`** (gitignored, mode 600). The
+board also keeps a few credential files it generates itself, all under `data/` and mode 600:
+`cmux-socket-password`, `mesh-decision-token` and `intake-token`. If you run the phone relay, its
+server keeps a user database and you keep the phone's token under `data/relay/`
+([RELAY.md](RELAY.md)). Start from the
 template and fill only what you want:
 
 ```bash
@@ -332,15 +381,39 @@ On a fresh Mac most job cards read DOWN or missing until you register your own j
 
 Then start Mission Control: `./install.sh mission-control`.
 
+**Trying the installer without touching launchd:** run it under a temp `HOME` with `ZULU_NO_LAUNCHD=1`. Plists are still written, but nothing is loaded, unloaded or restarted: `install.sh`, `scripts/bootstrap.sh`, `zulu setup`, a backup restore and the job installers all skip `launchctl`. `zulu upgrade` and `zulu rollback` refuse (they have to restart the board); `zulu upgrade --check` still works. No board runs until you start one yourself.
+
 ## 7. Rollback
 
 **Before a big change, take a backup:** `./install.sh backup` (or `zulu backup`) writes your ledger, state and config
-(`data/` + `overlay/`) to `data/backups/zulu-backup-<time>.tgz`. Secrets are left out unless you add `--with-secrets`.
+(`data/` + `overlay/`) to `data/backups/zulu-backup-<time>.tgz`. Credentials are left out unless you add `--with-secrets`.
 It's lean by default: from `data/handoffs/` it keeps only text files up to 1 MB (reports, plans, notes), and it prints its size and
 what it left out. `--full` keeps media and big exports too.
-`zulu restore <file>` shows what would change; `--apply` restores it, taking a safety backup of the current state first. Secrets come back only with
-`--with-secrets` on the restore too. A backup from a newer version is refused (upgrade first). Moving an older backup forward needs migrations,
-which arrive with one-click upgrades in 1.1; until then a backup from another schema version is refused too. 1.0 has a single schema, so any 1.0 backup restores.
+
+What counts as a credential, in every kind of backup:
+- **A folder marked `.nobackup`** is skipped whole, and `--with-secrets` does not change that. The phone relay's folder (`data/relay/`) is marked. Mark any folder of your own with `touch <folder>/.nobackup`.
+- **A file only you can read** (mode 600) is left out, unless it is in one of the board's own state folders (`data/tasks/`, the Guardrails state, `data/chat-intake/`, `data/github-intake/`). That covers `data/secrets.env`, the socket password, and chat attachments under `data/handoffs/`, which are saved owner-only. A file an agent wrote owner-only is left out too.
+- **A small file whose text looks like a key or password** is left out.
+
+The backup lists what it left out and why. `--with-secrets` includes the last two groups; keep that archive private.
+
+`zulu restore <file>` shows what would change; `--apply` restores it, taking a safety backup of the current state first. Credentials come back only with
+`--with-secrets` on the restore too. Each restored file gets the mode it had, and a restore never writes into a folder marked `.nobackup`. A backup from a newer version is refused (upgrade first). A backup from an older schema is restored and then
+migrated forward by `scripts/migrate.mjs`, the same migrations an upgrade runs. Any 1.0 backup restores.
+
+**A daily backup of the ledger.** `zulu backup --state` (or `scripts/state-backup.sh`) writes a small archive, `data/backups/zulu-state-<time>.tgz`:
+the ledger (`data/tasks/`), the board's state files and `overlay/`. It leaves out handoffs, logs, anything over 5 MB, credentials (the same three rules as above; it has no `--with-secrets` form) and the decision token.
+After a good write it keeps its newest 14 archives (`--keep N`) and removes older ones. It only ever removes files named `zulu-state-<time>.tgz`;
+your manual backups and the `before-restore-*` safety copies are never touched.
+
+- **Schedule it:** `scripts/state-backup-install.sh` prints the LaunchAgent it would install (daily 03:15, with a catch-up run after a reboot or sleep);
+  add `--apply` to install it and `--remove` to take it out. It uses the selfheal runner from the vault (`./install.sh --brain`).
+- **Watch it:** set `backupWatch: { maxAgeHours: 36 }` in `SETTINGS` (`overlay/config/jobs.mjs`). The `backup:state` card goes amber when the newest
+  archive is older than that, or when there is none. It never goes red.
+- **Restore from it:** the same two steps as any backup. `zulu restore data/backups/zulu-state-<time>.tgz` lists what would change and writes nothing.
+  With `--apply` it first takes a safety copy of the current state (`before-restore-<time>.tgz`), then copies the archive's files back and restarts the board.
+  Files that are not in the archive (handoffs, for example) are left as they are. To get one task back, restore the newest archive that still has it;
+  tasks created after that archive are kept, tasks changed after it go back to the archived version.
 
 | What | Undo |
 |---|---|
@@ -353,13 +426,30 @@ which arrive with one-click upgrades in 1.1; until then a backup from another sc
 
 ## 7b. Upgrading
 
-1.0 upgrades by hand. A one-click UPDATE button, with tested-version checks and migrations, is coming in 1.1.
+**From 1.2: one click.** 1.2.0 is the first release you can upgrade *from* this way (from 1.0.x, use the manual steps below once). When a newer release is out, the board's **update** card shows **⇧ UPDATE TO vX.Y.Z**. Or run `zulu upgrade` (`--check` first shows what would happen).
+It runs the steps below for you, adds migrations and a test run, and rolls back by itself if anything fails. [UPGRADE.md](UPGRADE.md) has the details, the settings and manual recovery.
+
+**Upgrading from 1.0, or by hand:**
 
 ```sh
 ./install.sh backup                       # a restore point first
 git pull --ff-only                        # the new release
+node scripts/migrate.mjs                  # data and overlay migrations (the one-click path runs these itself)
 ./install.sh                              # re-runs the idempotent install steps (never overwrites your overlay/)
 launchctl kickstart -k gui/$(id -u)/<prefix>.master-console   # restart the board on the new code
+./install.sh verify
+```
+
+**An upgrade does not change your rules.** `overlay/policy.json` is yours, so rules added in a newer release do not reach it, including the gate's protection of its own files. The guardrails card says how many are missing: *N shipped rules are not in yours*, with the classes. To take them, compare the two files and copy the new classes and rules into yours. Also add every list under `lists` that yours does not have: new rules refer to new lists, and without them the policy is invalid and the board falls back to the shipped default. Keep your own values in the lists you already have, and your `defaultMode`:
+
+```sh
+diff overlay/policy.json examples/policy.json
+```
+
+After copying them, render the rules page again, or `verify` fails on it:
+
+```sh
+node scripts/policy-render.mjs --write overlay/POLICY.md overlay/policy.json
 ./install.sh verify
 ```
 

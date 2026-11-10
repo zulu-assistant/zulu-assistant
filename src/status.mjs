@@ -7,22 +7,37 @@
 //   failed    serious   — last exit code non-zero
 //   overdue   critical  — selfheal slot missed beyond grace
 //   down      critical  — KeepAlive service without a PID / not loaded / container down
-import { JOBS, DOCKER_CONTAINERS, CRON, DISK, MEM, SETTINGS } from './config.mjs';
+import { JOBS, DOCKER_CONTAINERS, CRON, DISK, MEM, SETTINGS, loadSecrets, CMUX_PRESENT, PROFILE } from './config.mjs';
 import * as collect from './collect.mjs';
 import { readStateSync, setupCard } from './setup.mjs';
 import { readStatsSync, repoCards } from './repo-stats.mjs';
 import { driftCard, readStateSync as readDriftSync } from './release-drift.mjs';
+import { upgradeCard, readStateSync as readUpgradeSync } from './upgrade.mjs';
+import { relayCard, readStateSync as readRelaySync } from './relay.mjs';
 import { brainCard, readStateSync as readBrainSync } from './brain.mjs';
+import { githubIntakeCard, readStatusSync as readGithubIntakeSync } from './github-intake.mjs';
+import { readingCard, readStateSync as readReadingSync } from './operating-reading.mjs';
 import { viewCards, readStateSync as readViewSync } from './view-watch.mjs';
+import { parserWatchCard, readStateSync as readParserWatchSync } from './parser-watch.mjs';
+import { backupCard, newestArchiveSync } from './backup-watch.mjs';
 
 const GATE_CARD = fileURLToPath(new URL('../data/guardrails-card.json', import.meta.url));
 export function readGateCardSync(file = GATE_CARD) { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } }
-/** Guardrails card (pure): amber while a gate waits > 30 min or the hook is missing; red only for a broken policy. */
+/**
+ * Guardrails card (pure): amber while a gate waits > 30 min or the hook is missing; red for a
+ * broken policy — and for the integrity check (src/gate-integrity.mjs, `c.integrity`): red when a
+ * gate file differs from what landed, the hook is no longer registered as installed, or a landed
+ * change has not been running here for too long; amber while the checkout is merely behind.
+ */
 export function gateCard(c, now = Date.now()) {
   if (!c) return null;
   const stale = now - (c.at || 0) > 10 * 60e3;
-  const status = stale ? 'stale' : c.status === 'failed' && /policy invalid/.test(c.detail || '') ? 'failed' : c.status === 'ok' ? 'ok' : 'warn';
-  return { label: 'guardrails', name: 'Guardrails (owner gates)', domain: 'infra', schedule: 'every poll', logAvailable: false, status, detail: c.detail };
+  const integ = c.integrity && typeof c.integrity === 'object' ? c.integrity : null;
+  const red = (c.status === 'failed' && /policy invalid/.test(c.detail || '')) || integ?.status === 'down';
+  const status = stale ? 'stale' : red ? 'failed' : c.status === 'ok' && integ?.status !== 'warn' ? 'ok' : 'warn';
+  // what is wrong comes first: the row is read from the left
+  const detail = !integ ? c.detail : integ.status === 'down' || integ.status === 'warn' ? `${integ.detail} · ${c.detail}` : `${c.detail} · ${integ.detail}`;
+  return { label: 'guardrails', name: 'Guardrails (owner gates)', domain: 'infra', schedule: 'every poll', logAvailable: false, status, detail };
 }
 import { linkHealth } from './intake.mjs';
 import { readFileSync } from 'node:fs';
@@ -270,7 +285,31 @@ function ago(ms) {
   return `${Math.round(s / 86400)}d ago`;
 }
 
+/**
+ * The Guardrails-only profile (SETTINGS.profile 'guardrails'): no collector runs. The snapshot is
+ * the board's own cards: the gate, setup, a newer release, the phone relay, the ledger backup.
+ */
+export function boardCardsSnapshot(now = new Date()) {
+  const jobs = [];
+  const setup = setupCard(readStateSync());
+  if (setup) jobs.push(setup);
+  const upgrade = upgradeCard(readUpgradeSync(), SETTINGS.upgrade, SETTINGS.repoUrl, now.getTime());
+  if (upgrade) jobs.push(upgrade);
+  const relay = relayCard(readRelaySync(), SETTINGS.relay, SETTINGS.relay ? loadSecrets() : {});
+  if (relay) jobs.push(relay);
+  const gate = gateCard(readGateCardSync(), now.getTime());
+  if (gate) jobs.push(gate);
+  const backupAge = SETTINGS.backupWatch ? backupCard(newestArchiveSync(), SETTINGS.backupWatch, now.getTime()) : null;
+  if (backupAge) jobs.push(backupAge);
+  const attention = jobs.filter((x) => x.status !== 'ok');
+  return {
+    at: Date.now(), dockerReachable: false, jobs, timeline: [], sessions: [],
+    counts: { ok: jobs.length - attention.length, attention: attention.length, total: jobs.length, agents: 0, agentsNeedInput: 0 },
+  };
+}
+
 export async function snapshot() {
+  if (PROFILE === 'guardrails') return boardCardsSnapshot();
   pollCount += 1;
   const [plists, launchctl, markers, docker, sessions, endpoints, disk, mem, procs, crons] = await Promise.all([
     collect.getPlists(), collect.getLaunchctl(), collect.getMarkers(), collect.getDocker(),
@@ -417,8 +456,10 @@ export async function snapshot() {
   jobs.push({
     label: 'cmux:bridge', name: 'cmux bridge (dispatch + notify)', domain: 'infra',
     schedule: 'socket check', logAvailable: false,
-    status: bridge.ok ? 'ok' : 'down',
-    detail: bridge.ok ? 'socket auth OK'
+    // no cmux on this Mac: say so (amber, off the alert ladder). Never "socket auth OK" for a program that is not there.
+    status: !CMUX_PRESENT ? 'warn' : bridge.ok ? 'ok' : 'down',
+    detail: !CMUX_PRESENT ? `cmux is not installed (nothing at ${SETTINGS.cmuxBin}, none on PATH): no agent tiles, no mesh delivery, no cmux notices. The fleet cards, email and SMS still work.`
+      : bridge.ok ? 'socket auth OK'
       : `${bridge.detail} — restore: data/cmux-socket-password → cmux.json automation.socketPassword, then cmux reload-config (docs/CMUX-SETUP.md)`,
   });
 
@@ -430,14 +471,32 @@ export async function snapshot() {
   // public edition vs the newest public release (SETTINGS.releaseDrift): amber only, never on the alert ladder
   const drift = driftCard(readDriftSync(), SETTINGS.releaseDrift, now.getTime());
   if (drift) jobs.push(drift);
+  // one-click upgrade (SETTINGS.upgrade, #346): a newer public release; the UPDATE button only on a release install
+  const upgrade = upgradeCard(readUpgradeSync(), SETTINGS.upgrade, SETTINGS.repoUrl, now.getTime());
+  if (upgrade) jobs.push(upgrade);
+  // push approvals (SETTINGS.relay, #415): amber after repeated push failures, never red
+  const relay = relayCard(readRelaySync(), SETTINGS.relay, SETTINGS.relay ? loadSecrets() : {});
+  if (relay) jobs.push(relay);
+  // GitHub issues + discussions intake (SETTINGS.githubIntake, #434): amber only
+  const ghIntake = githubIntakeCard(readGithubIntakeSync(), SETTINGS.githubIntake, now.getTime());
+  if (ghIntake) jobs.push(ghIntake);
   // vault + graph upkeep (SETTINGS.brain): amber only, never on the alert ladder
   const brain = brainCard(readBrainSync(), SETTINGS.brain, now.getTime());
   if (brain) jobs.push(brain);
+  // weekly operating reading (SETTINGS.operatingReading): info only, always ok
+  const reading = readingCard(readReadingSync(), SETTINGS.operatingReading);
+  if (reading) jobs.push(reading);
   // guardrails (docs/GUARDRAILS.md): pending gates, hook installed, policy health — written by the server each poll
   const gate = gateCard(readGateCardSync(), now.getTime());
   if (gate) jobs.push(gate);
   // database views (SETTINGS.viewWatch): amber only, never on the alert ladder
   jobs.push(...viewCards(readViewSync(), SETTINGS.viewWatch, now.getTime()));
+  // supplier parse failures → fix tasks (SETTINGS.parserWatch, #456): amber only when it can't read or file
+  const parserWatch = parserWatchCard(readParserWatchSync(), SETTINGS.parserWatch, now.getTime());
+  if (parserWatch) jobs.push(parserWatch);
+  // scheduled ledger backup (SETTINGS.backupWatch): amber when the newest archive is too old, never red
+  const backupAge = SETTINGS.backupWatch ? backupCard(newestArchiveSync(), SETTINGS.backupWatch, now.getTime()) : null;
+  if (backupAge) jobs.push(backupAge);
 
   const attention = jobs.filter((x) => x.status !== 'ok');
   return {

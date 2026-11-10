@@ -75,6 +75,7 @@ test('a demo server never touches the real board\'s data/', { timeout: 30000 }, 
         const p = path.join(d, e.name);
         const rel = path.relative(DATA, p);
         if (/^demo[-.]/.test(rel)) continue;                                   // the demo's own files
+        if (/^guardrails\/(checks|observed)\.jsonl$/.test(rel)) continue;     // the LIVE board appends these on other agents' hook calls mid-run
         if (e.isDirectory()) await walk(p);
         else { const s = await stat(p).catch(() => null); if (s) out[rel] = `${s.size}:${s.mtimeMs}`; }
       }
@@ -93,6 +94,12 @@ test('a demo server never touches the real board\'s data/', { timeout: 30000 }, 
     }
     assert.ok(status?.demo, 'demo server answered');
     await new Promise((r) => setTimeout(r, 2500));                           // a couple of polls
+    // board self-readings (#467): per-stage duration + last error, on every board
+    const st = await fetch(`http://127.0.0.1:${port}/api/status`).then((r) => r.json());
+    assert.ok(st.poll.stages.snapshot.runs >= 1 && Number.isFinite(st.poll.stages.snapshot.ms), 'poll stages are exposed');
+    assert.equal(st.poll.stages.snapshot.error, null);
+    assert.equal(st.poll.rejections, 0);
+    assert.ok(!st.poll.stages.alerts && !st.poll.stages.heartbeat, 'demo never alerts or beats');
     const r = await fetch(`http://127.0.0.1:${port}/api/star`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"event":"shown"}' });
     assert.equal(r.status, 200);
   } finally { child.kill(); }

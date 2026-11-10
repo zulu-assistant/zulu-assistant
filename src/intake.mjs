@@ -13,7 +13,8 @@
 // - the board → chat direction is a narrow publisher: status changes, waits on a
 //   person, approvals-happen-on-the-board, close (first line + PR link only).
 import { readFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, rename } from 'node:fs/promises';
+import { writePrivate } from './private-file.mjs';
 import path from 'node:path';
 
 export const MAX_QUOTE = 1500;          // the ledger caps a comment at 2000 chars
@@ -52,11 +53,41 @@ export function channelsFrom(doc) {
     orderRe,
     maxFileBytes: Number(d.maxFileMB || 100) * 1024 * 1024,
     maxTaskBytes: Number(d.maxTaskMB || 300) * 1024 * 1024,
+    // channels the owner chose not to route (e.g. the workspace's general channel): never reported as unmapped
+    ignoreChannels: (Array.isArray(d.ignoreChannels) ? d.ignoreChannels : []).map((n) => String(n).replace(/^#/, '').toLowerCase()).filter(Boolean),
   };
 }
 
 export function loadChannels(file) {
   try { return channelsFrom(JSON.parse(readFileSync(file, 'utf8'))); } catch { return channelsFrom({}); }
+}
+
+/**
+ * Channel discovery (#365): every channel the bot can see that no route covers,
+ * so a new request channel is never silently unread. visible = listChannels()
+ * Map name → { id, member }. → [{ name, id, member }] sorted by name.
+ */
+export function unmappedChannels(visible, cfg) {
+  const known = new Set([...cfg.channels.map((c) => c.name), cfg.statusChannel, ...(cfg.ignoreChannels || [])].filter(Boolean));
+  return [...(visible || new Map()).entries()]
+    .filter(([name, v]) => v?.id && !known.has(name))
+    .map(([name, v]) => ({ name, id: v.id, member: Boolean(v.member) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** A discovered channel → the ledger task input (requester board, one per channel id, ever). */
+export function discoveryTask(ch, { owner = null } = {}) {
+  return {
+    title: `Slack channel #${ch.name} is not routed: map it or ignore it`,
+    requester: 'board', owner, priority: 'normal',
+    source: { via: 'channel-discovery', key: `slack-channel:${ch.id}` },
+    body: [
+      `The chat intake can see #${ch.name} (${ch.id}), but config/channels.json has no route for it${ch.member ? '' : ' and the bot is not a member'}.`,
+      'Requests posted there are not filed. Choose one:',
+      `- route it: add a channels[] entry (owner + contract), ${ch.member ? '' : 'have the owner add the bot to the channel, '}restart the intake, then \`scripts/chat-intake.sh --sweep --since <when>\` (dry run) → --apply;`,
+      `- or ignore it: add "${ch.name}" to ignoreChannels.`,
+    ].join('\n'),
+  };
 }
 
 /** Slack member id → principal ({id, name}) from PRINCIPALS (Map id → {slack: [...]}). */
@@ -382,7 +413,7 @@ export function chatFileProblem(rel, { size, isFile = true, attachmentsDir = 'da
 async function writeAtomic(file, data) {
   await mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(data, null, 1), { mode: 0o600 });
+  await writePrivate(tmp, JSON.stringify(data, null, 1));
   await rename(tmp, file);
 }
 const readJson = async (file, dflt) => { try { return JSON.parse(await readFile(file, 'utf8')); } catch { return dflt; } };

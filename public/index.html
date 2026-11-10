@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="mesh-decision" content="%%MESH_DECISION%%">
 <meta name="board-boot" content="%%BOOT_ID%%">
+<meta name="evidence-panel" content="%%EVIDENCE%%">
 <title>%%BRAND%%</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
@@ -37,6 +38,8 @@
 <section class="decisions hidden" id="decisions" aria-label="decisions waiting on you">
   <h2><span class="glyph">⛨</span> <span id="decisions-title">WAITING ON YOU</span></h2>
   <div class="decisions-list" id="decisions-list"></div>
+  <div class="decisions-empty">⛨ nothing waiting on you</div>
+  <div class="decisions-fold" id="decisions-fold"></div>
 </section>
 
 <section class="timeline-row" id="timeline-row">
@@ -45,7 +48,7 @@
 </section>
 
 <section id="attention-row" class="attention hidden">
-  <h2><span class="glyph">▲</span> NEEDS ATTENTION</h2>
+  <h2><span class="glyph">▲</span> <span id="attention-title">NEEDS ATTENTION</span></h2>
   <div class="attention-grid" id="attention-grid"></div>
 </section>
 
@@ -111,6 +114,7 @@
 
 <div class="boot" id="boot" aria-hidden="true"><pre id="boot-text"></pre></div>
 
+<script src="attention.js"></script>
 <script src="decide.js"></script>
 <script src="app.js"></script>
 </body>

@@ -19,6 +19,8 @@ for t in "${targets[@]}"; do
   if [ "$remove" = 1 ]; then
     [ -f "$dst" ] || { echo "skip   $dst (absent)"; continue; }
     "$NODE_BIN" "$ROOT/scripts/merge-hooks.mjs" "$dst" --remove 'scripts/gate-hook.sh' $([ "$apply" = 1 ] || echo --dry-run)
+    # the settings-change hook that is installed next to it (Claude Code only)
+    [ "$kind" = claude ] && "$NODE_BIN" "$ROOT/scripts/merge-hooks.mjs" "$dst" --remove 'scripts/gate-config-hook.sh' $([ "$apply" = 1 ] || echo --dry-run)
     continue
   fi
   REPO="$ROOT" "$ROOT/scripts/render-tmpl.sh" "$ROOT/examples/$kind/guardrails-hooks.json.tmpl" "$tmp/$kind.json"

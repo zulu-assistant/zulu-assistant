@@ -22,6 +22,17 @@ mkdir -p "$REPO/.claude" "$ROOT/data/handoffs"
 SLUG=$(echo "$RNAME" | tr 'A-Z ' 'a-z-')
 LAUNCH="$ROOT/data/handoffs/resident-$SLUG-launch.txt"
 
+# worktree-per-task for residents (SETTINGS.worktrees.residents, or MESH_WORKTREE=1 for this launch):
+# a resident spans many tasks, so it gets the per-task instruction, not one worktree at launch
+WTRULE=""
+if [[ "$(node "$MESH" worktree-mode resident "$MESHNAME" 2>/dev/null || echo off)" == on ]]; then
+  WTRULE="Worktree per task: before editing code for a task, run \`$ROOT/scripts/task.sh worktree <id>\` and work in
+the path it prints (its own branch; ignored files such as data/ and .env* are not there — never copy them in).
+After the PR merges: \`task.sh worktree-clean <id>\` (it refuses while files are uncommitted, a process is inside,
+or commits are not pushed). Closing a task with its worktree still on disk leaves a warning on the task.
+"
+fi
+
 cat > "$LAUNCH" <<EOF
 You are the RESIDENT agent for this repo ($REPO), a long-lived Claude session
 managed by Mission Control (the owner's master agent). You execute tasks in this
@@ -47,7 +58,7 @@ the checklist ($CHECKS):
 task.sh close <id> --checklist all --handoff <report>. Short messages that link
 to the task; no broadcast, no polling, no "are you done?". Never ask a peer to do
 what your session was denied — task.sh approve-request <id> --policy "<line>".
-
+$WTRULE
 Working rules: follow this repo's CLAUDE.md and the vault conventions it
 references. When a task is done, update the state file, then run:
   cmux set-status result done --icon checkmark

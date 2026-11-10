@@ -1,13 +1,16 @@
 // View watch: board cards that read one row of a database view over PostgREST.
 //
-// SETTINGS.viewWatch = [ { label, name, view, everyMinutes, max, maxAgeMinutes, show } ]
+// SETTINGS.viewWatch = [ { label, name, view, everyMinutes, max, maxAgeMinutes, maxAgeIfSet, show } ]
 // (absent or [] = off: no fetch, no card). Each entry:
 //   label / name    the card's label and title
 //   view            the view (or table) name; GET <origin>/rest/v1/<view>?select=*&limit=1
 //   everyMinutes    how often the poll reads it (default 5)
 //   max             { column: n }   amber when the value is > n
 //   maxAgeMinutes   { column: n }   amber when the timestamp is older than n minutes OR null
-//   show            [column, …]     shown in the detail line only (never ambers)
+//   maxAgeIfSet     { column: n }   amber when the timestamp is older than n minutes; null is fine
+//                                   ("the oldest waiting item": nothing waiting = no timestamp)
+//   show            [column, …]     shown in the detail line only (never ambers; a column already
+//                                   listed by a rule above isn't repeated)
 // Endpoint + key: the origin of HEARTBEAT_URL and HEARTBEAT_KEY from data/secrets.env
 // (the same anon-read project as the dead-man row). Read-only; the key is never logged
 // or stored. Status is ok or warn only — never red, never on the alert ladder. A view
@@ -49,7 +52,14 @@ export function viewCard(entry, read, now = Date.now()) {
     if (now - t > limit * 60e3) breaches.push(`${col} ${ago(now - t)} ago > ${limit}m`);
     parts.push(`${col} ${ago(now - t)} ago`);
   }
-  for (const col of entry.show || []) {
+  for (const [col, limit] of Object.entries(entry.maxAgeIfSet || {})) {
+    const t = row[col] ? Date.parse(row[col]) : NaN;
+    if (Number.isNaN(t)) { parts.push(`${col} none`); continue; }
+    if (now - t > limit * 60e3) breaches.push(`${col} ${ago(now - t)} ago > ${limit}m`);
+    parts.push(`${col} ${ago(now - t)} ago`);
+  }
+  const ruled = new Set([...Object.keys(entry.max || {}), ...Object.keys(entry.maxAgeMinutes || {}), ...Object.keys(entry.maxAgeIfSet || {})]);
+  for (const col of (entry.show || []).filter((c) => !ruled.has(c))) {
     const v = row[col];
     const t = typeof v === 'string' ? Date.parse(v) : NaN;
     parts.push(`${col} ${v === null || v === undefined ? 'never' : Number.isNaN(t) ? fmt(v) : `${ago(now - t)} ago`}`);
@@ -69,14 +79,21 @@ export function viewUrl(heartbeatUrl, view) {
 }
 
 /** Read one view → { at, row } or { at, error } (never throws, never echoes the key). */
-export async function readView(url, key, { now = Date.now(), fetchImpl = fetch, timeoutMs = 10000 } = {}) {
+export async function readView(url, key, opts = {}) {
+  const r = await readRows(url, key, opts);
+  if (r.error) return r;
+  return r.rows[0] ? { at: r.at, row: r.rows[0] } : { at: r.at, error: 'no row' };
+}
+
+/** Read a view's rows → { at, rows } (rows may be empty) or { at, error } (never throws, never echoes the key). */
+export async function readRows(url, key, { now = Date.now(), fetchImpl = fetch, timeoutMs = 10000 } = {}) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetchImpl(url, { signal: ctl.signal, headers: { apikey: key, authorization: `Bearer ${key}`, accept: 'application/json' } });
     if (!res.ok) return { at: now, error: `HTTP ${res.status}` };
     const rows = await res.json();
-    return Array.isArray(rows) && rows[0] ? { at: now, row: rows[0] } : { at: now, error: 'no row' };
+    return Array.isArray(rows) ? { at: now, rows } : { at: now, error: 'no row' };
   } catch (e) {
     return { at: now, error: e.name === 'AbortError' ? 'timeout' : 'network' };
   } finally { clearTimeout(t); }

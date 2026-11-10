@@ -3,10 +3,11 @@
 //
 //   node scripts/cmux-tier1-install.mjs            dry run: what would be written/backed up
 //   node scripts/cmux-tier1-install.mjs --apply    back up any existing target (.bak-<ts>),
-//                                                  copy, `cmux sidebar validate phosphor`
+//                                                  copy, `cmux sidebar validate` each sidebar
 //   node scripts/cmux-tier1-install.mjs --revert   restore backups / remove files we installed
 //
-// Sources (canonical, versioned): system/cmux/dock.json, system/cmux/sidebars/phosphor.js.
+// Sources (canonical, versioned): system/cmux/dock.json, system/cmux/sidebars/phosphor.js and the
+// optional system/cmux/sidebars/ledger-node.js (#416).
 // Rendered on the way: __REPO__ → this checkout ($HOME-relative), __BRAND__ →
 // the registry's SETTINGS.brand (upper-case), so the same files serve any install.
 // This does NOT switch the active sidebar or open the Dock — that stays the owner's
@@ -25,7 +26,10 @@ const RECORD = path.join(ROOT, 'data', 'cmux-tier1-install.json');
 export const FILES = [
   { src: 'system/cmux/dock.json', dest: path.join(CFG, 'dock.json') },
   { src: 'system/cmux/sidebars/phosphor.js', dest: path.join(CFG, 'sidebars', 'phosphor.js') },
+  // optional (#416): installed so it can be picked, never selected here
+  { src: 'system/cmux/sidebars/ledger-node.js', dest: path.join(CFG, 'sidebars', 'ledger-node.js') },
 ];
+const SIDEBARS = ['phosphor', 'ledger-node'];
 
 const exists = (p) => access(p).then(() => true, () => false);
 export function render(text, { root = ROOT, home = os.homedir(), brand = 'Zulu Assistant' } = {}) {
@@ -74,7 +78,8 @@ async function main() {
     const prev = JSON.parse(await readFile(RECORD, 'utf8').catch(() => '[]'));
     await writeFile(RECORD, JSON.stringify([...prev, ...rec], null, 2));
   }
-  console.log(cmux('sidebar', 'validate', 'phosphor').trim());
+  for (const s of SIDEBARS) console.log(cmux('sidebar', 'validate', s).trim());
+  console.log('optional sidebar installed, not selected: cmux right-sidebar set custom ledger-node --no-focus');
   console.log('revert: node scripts/cmux-tier1-install.mjs --revert');
 }
 

@@ -365,13 +365,14 @@ test('approval flow: request → only the board decider can approve', () => {
   assert.equal(no.task.status, 'blocked');
 });
 
-test('approval answered in the pane: owner records it; nothing stays pending', () => {
+test('approval answered in the pane, paneAnswers "direct" (before 1.3): owner records it; nothing stays pending', () => {
+  const direct = { paneAnswers: 'direct' };   // the default is 'confirm': test/pane-answers.test.mjs
   const claimed = applyPatch(newTask(base, { id: 30, now: 0 }), { op: 'claim', actor: 'app-ops' }).task;
   const t = applyPatch(claimed, { op: 'request_approval', actor: 'app-ops', policy_item: 'external writes' }).task;
   // only the task owner (or MC) records, and only with the owner's words
   assert.throws(() => applyPatch(t, { op: 'record_decision', actor: 'web-docs', text: 'ok' }), (e) => e.status === 403);
   assert.throws(() => applyPatch(t, { op: 'record_decision', actor: 'app-ops' }), (e) => e.status === 400);
-  const rec = applyPatch(t, { op: 'record_decision', actor: 'app-ops', text: 'owner said go in pane 10:58' });
+  const rec = applyPatch(t, { op: 'record_decision', actor: 'app-ops', text: 'owner said go in pane 10:58' }, direct);
   assert.equal(rec.task.status, 'in_progress');
   assert.deepEqual(rec.task.blocked_on, []);
   assert.equal(rec.task.approval.decision, 'approve');
@@ -379,7 +380,8 @@ test('approval answered in the pane: owner records it; nothing stays pending', (
   assert.equal(rec.task.approval.decided_by, OWNER.id);
   assert.equal(rec.task.approval.recorded_by, 'app-ops');
   assert.deepEqual(rec.wake, []);
-  assert.throws(() => applyPatch(rec.task, { op: 'record_decision', actor: 'app-ops', text: 'again' }), (e) => e.status === 409);
+  assert.throws(() => applyPatch(rec.task, { op: 'record_decision', actor: 'app-ops', text: 'again' }, direct), (e) => e.status === 409);
+  // a recorded decline takes effect at once in both modes
   const dec = applyPatch(t, { op: 'record_decision', actor: 'mission-control', decision: 'decline', text: 'owner said no' });
   assert.equal(dec.task.status, 'blocked');
   assert.deepEqual(dec.task.blocked_on, [OWNER.id]);
@@ -398,9 +400,14 @@ test('approval: moving on without a decision settles it as unrecorded; cancel wi
   assert.equal(started.approval.decided_by, null);
   assert.equal(undecidedApproval(started), false);
   const closed = applyPatch(started, { op: 'close', actor: 'app-ops', checklist: 'all', links: { handoff: 'r.md' } }).task;
-  const late = applyPatch(closed, { op: 'record_decision', actor: 'app-ops', text: 'owner approved in pane' }).task;
+  const late = applyPatch(closed, { op: 'record_decision', actor: 'app-ops', text: 'owner approved in pane' }, { paneAnswers: 'direct' }).task;
   assert.equal(late.status, 'done');
   assert.equal(late.approval.decision, 'approve');
+  // 'confirm' (the default): on a closed task the record is a note nobody confirmed — the settlement stands
+  const heard = applyPatch(closed, { op: 'record_decision', actor: 'app-ops', text: 'owner approved in pane' }, { paneAnswers: 'confirm' }).task;
+  assert.equal(heard.status, 'done');
+  assert.equal(heard.approval.decision, 'unrecorded');
+  assert.equal(heard.approval.proposal.by, 'app-ops');
   assert.equal(applyPatch(t, { op: 'cancel', actor: 'app-ops' }).task.approval.decision, 'withdrawn');
   // a comment while waiting leaves it pending
   assert.equal(applyPatch(t, { op: 'comment', actor: 'app-ops', text: 'still waiting' }).task.approval.decision, null);

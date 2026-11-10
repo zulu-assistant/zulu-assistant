@@ -137,6 +137,31 @@ test('graphFacts: a docs-only commit (root + nested .md, .txt) never puts the gr
   assert.equal(f.behind, true);
 });
 
+test('graphFacts: a data-only commit (xlsx, csv, images, pdf, any case) never puts the graph behind (#426)', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'brain-')), 'r');
+  await gitRepo(dir, { hook: true });
+  const codeAt = Number(execFileSync('git', ['-C', dir, 'log', '-1', '--format=%ct'])) * 1000;
+  await mkdir(path.join(dir, 'graphify-out'));
+  await writeFile(path.join(dir, 'graphify-out', 'graph.json'), '{}');
+  const built = new Date(codeAt + 1000);
+  await utimes(path.join(dir, 'graphify-out', 'graph.json'), built, built);
+  await mkdir(path.join(dir, 'templates'));
+  for (const f of ['templates/Feed.xlsx', 'templates/feed.csv', 'shot.PNG', 'docs.pdf', 'cal.ics', 'deps.lock']) await writeFile(path.join(dir, f), 'x');
+  const at = String(Math.floor(codeAt / 1000) + 3600);
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  execFileSync('git', ['-C', dir, 'add', '.']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '--no-verify', '-m', 'data'], { env: { ...env, GIT_COMMITTER_DATE: `${at} +0000` } });
+  let f = await graphFacts(dir, { now: codeAt + 3 * H });
+  assert.equal(f.commitAt, codeAt, 'the data commit is not the last code commit');
+  assert.equal(f.behind, false);
+  // code next to data in one commit still counts
+  await writeFile(path.join(dir, 'a.mjs'), 'export const a = 3;\n');
+  await writeFile(path.join(dir, 'templates', 'feed.csv'), 'y');
+  execFileSync('git', ['-C', dir, 'commit', '-qam', 'code+data', '--no-verify'], { env: { ...env, GIT_COMMITTER_DATE: `${Number(at) + 60} +0000` } });
+  f = await graphFacts(dir, { now: codeAt + 3 * H });
+  assert.equal(f.behind, true);
+});
+
 test('vaultCandidates resolves every links.vault shape seen in closed tasks', () => {
   assert.deepEqual(vaultCandidates('Proj/Proj.md', '/v'), ['/v/Proj/Proj.md']);
   assert.deepEqual(vaultCandidates('Proj/Note', '/v'), ['/v/Proj/Note', '/v/Proj/Note.md']);

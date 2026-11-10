@@ -95,7 +95,7 @@ test('the approval row shows the full input (an edit as old/new, an MCP call as 
   assert.match(describeToolCall('Edit', { file_path: '/w/a', old_string: 'x', new_string: 'y' }), /^Edit \/w\/a\n--- old\nx\n\+\+\+ new\ny$/);
 });
 
-test('a very large input: the row is capped, gates[] keeps up to 20k chars, comments stay one line', async () => {
+test('a very large input: gates[] keeps up to 20k chars and says it cut, the row shows all of that (#444), comments stay one line', async () => {
   const s = await setup();
   const big = 'mutation { ' + 'x'.repeat(30000) + ' }';
   const r = await s.call(MUTATE, { query: big });
@@ -104,6 +104,6 @@ test('a very large input: the row is capped, gates[] keeps up to 20k chars, comm
   const g = t.gates.at(-1);
   assert.ok(g.command.length > 19000 && g.command.length < 20200); assert.match(g.command, /cut at 20000 chars/);
   const row = summarize([t]).needsApproval[0].gates[0];
-  assert.ok(row.command.length < 1700); assert.match(row.command, /more chars — full text: task\.sh audit/);
+  assert.equal(row.command, g.command);
   assert.ok(t.comments.every((c) => c.text.length <= 2000));
 });

@@ -5,8 +5,8 @@
 // Tokens come from data/secrets.env (the owner types them; agents never handle
 // them): SLACK_APP_TOKEN (xapp-, connections:write) opens the socket,
 // SLACK_BOT_TOKEN (xoxb-) reads channels/files and posts in threads.
-import { createWriteStream } from 'node:fs';
-import { mkdir, chmod, rename, stat } from 'node:fs/promises';
+import { mkdir, rename, stat } from 'node:fs/promises';
+import { privateWriteStream, makePrivate } from './private-file.mjs';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { Readable } from 'node:stream';
@@ -86,7 +86,7 @@ export function userNames(token, opts) {
 export const mentionedIds = (text) => [...String(text || '').matchAll(/<@([UW][A-Z0-9]+)/g)].map((m) => m[1]);
 
 /**
- * Download one Slack file into dir as an UNTRUSTED file: 0600, never executable,
+ * Download one Slack file into dir as an UNTRUSTED file: owner-only, never executable,
  * quarantine-flagged on macOS, size-capped. Never opened, unzipped or run here.
  * → { name, bytes, sha256 } or { skipped: why }
  */
@@ -107,11 +107,11 @@ export async function downloadFile(token, file, dir, localName, { maxBytes, fetc
     if (maxBytes && bytes > maxBytes) src.destroy(new Error('size cap'));
   });
   try {
-    await pipeline(src, createWriteStream(tmp, { mode: 0o600 }));
+    await pipeline(src, privateWriteStream(tmp));
   } catch (e) {
     return { skipped: e.message === 'size cap' ? 'too large' : `download failed (${e.message})` };
   }
-  await chmod(tmp, 0o600);
+  await makePrivate(tmp);
   await rename(tmp, final);
   if (process.platform === 'darwin') {
     await new Promise((r) => execFile('xattr', ['-w', 'com.apple.quarantine', `0081;${Math.floor(Date.now() / 1000).toString(16)};chat-intake;`, final], () => r()));

@@ -87,11 +87,31 @@ The owner may also answer in the agent's own pane. The agent then records it:
 scripts/task.sh approved-in-pane <id> "<what the owner said, when>" [--decline]
 ```
 
-The approval is stored with `via: "pane"` and the name of the agent that
-recorded it. If a task moves on (start, unblock, close…) without any recorded
+**A recorded "yes" is a proposal, not a decision.** The record is typed by an
+agent, under a name the agent declares for itself, so by itself it proves
+nothing. The owner's row on the board quotes it, says who recorded it, and
+offers three buttons:
+
+- **CONFIRM**: now it is the owner's approval. The receipt says it confirmed a
+  pane answer and who recorded that.
+- **DECLINE**: the owner decides otherwise.
+- **NOT WHAT I SAID**: the record is thrown out and kept on the receipt as
+  rejected. Nothing is decided; the request goes on waiting. The agent that
+  recorded it and Mission Control are told.
+
+Until the owner confirms, the task stays in `needs_approval`, no program go
+starts and a plan-first plan is not approved. A recorded "no" (`--decline`)
+takes effect at once, because it only reduces what runs.
+
+`SETTINGS.paneAnswers: 'direct'` restores the behaviour before 1.2: the record
+is the decision, stored with `via: "pane"` and the recorder's name. Choose it
+only if you accept that an agent can then approve its own request.
+
+If a task moves on (start, unblock, close…) without any recorded
 decision, the ledger settles the approval as `unrecorded` (a cancel makes it
 `withdrawn`). An approval is only ever pending while the task is in
-`needs_approval`.
+`needs_approval`. Recording a "yes" on a live task that had moved on puts it
+back in `needs_approval`; on a closed task it stays a note nobody confirmed.
 
 **Gates** ([GUARDRAILS.md](GUARDRAILS.md)) are approvals the system asks for
 itself. When an agent tries an irreversible command, the gate hook stops it and

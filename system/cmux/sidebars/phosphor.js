@@ -103,8 +103,12 @@ function attentionOf(w) {
   if (!w) return null;
   const task = taskOf(w);
   if (inputOf(w)) return { tier: 0, label: "INPUT" };
-  if (/APPROVAL/.test(task)) return { tier: 1, label: "APPROVAL" };
-  if (/BLOCKED/.test(task)) return { tier: 2, label: "BLOCKED" };
+  // anchored to the status token ("#7 APPROVAL"): the label ends with the task TITLE (#416), which may contain any word.
+  // " · ⏾ n snoozed" (attention ring, the last segment, after the title): the owner snoozed everything this
+  // workspace's tasks have waiting on them; "+n snoozed" = some of it, so the row stays
+  const asleep = / · ⏾ \d+ snoozed$/.test(task);
+  if (!asleep && /#\d+ APPROVAL\b/.test(task)) return { tier: 1, label: "APPROVAL" };
+  if (!asleep && /#\d+ BLOCKED\b/.test(task)) return { tier: 2, label: "BLOCKED" };
   if (w.unread > 0) return { tier: 3, label: "UNREAD" };
   return null;
 }

@@ -11,7 +11,8 @@ and the rules below keep it that way.
 ## Dev setup
 
 Requirements: macOS, Node ≥ 22, git. Docker and cmux are optional for
-development.
+development: demo mode and the tests need neither. A real install uses cmux
+for the agent half (see [docs/INSTALL.md](docs/INSTALL.md)).
 
 ```sh
 git clone https://github.com/zulu-assistant/zulu-assistant.git
@@ -86,6 +87,32 @@ against the registry, and logged to the event ticker. See
 The phosphor look is deliberate: green on black, a monospace font, and glyph
 plus label on every status chip, never color alone. Honor
 `prefers-reduced-motion`. See `PRODUCT.md` before making visual changes.
+
+## How a pull request lands
+
+This repository is a **generated copy**. The maintainers work in a private source repository that
+also holds one owner's own configuration; each release copies the public files from there
+(`publish/manifest.json` lists them, `scripts/publish.mjs` copies them, and a scrub gate checks the
+result). The history here is one commit per release.
+
+That decides what happens to your pull request:
+
+1. Open it against `main` here, as usual. CI runs the tests and the scrub gate on it.
+2. A maintainer reviews it here. Review comments and changes happen on your PR.
+3. When it is accepted, a maintainer applies your diff in the source repository with you as the
+   commit's author (`Co-authored-by` when it had to be adapted).
+4. Your PR is then **closed, not merged**, with a comment that names the release that will carry it.
+   A merge here would be overwritten by the next release copy.
+5. The release notes and `CHANGELOG.md` credit you.
+
+So a closed PR with a "lands in vX.Y.Z" comment is the accepted outcome. If that release goes out
+without your change, say so on the PR: that is a bug on our side.
+
+Two things that follow from the copy model:
+
+- Files under `overlay/`, `data/` and `graphify-out/` are yours and never part of a PR.
+- A change to a public-only file (this file, `README.md`, `docs/`, `.github/`) is welcome the same
+  way; in the source repository those live under `publish/public/`.
 
 ## Pull requests
 

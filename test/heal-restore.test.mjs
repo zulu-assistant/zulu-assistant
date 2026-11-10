@@ -12,7 +12,7 @@ import {
 // ---- fixtures (trimmed from real `cmux read-screen` output) ----------------
 
 const PROMPT = 'user@mac my-app %';
-const SESSION = '14c8d9e4-1d11-41e6-bb6e-b0614d128cab';
+const SESSION = '7f3a9c20-5b1e-4d2a-9e44-0c6d1b2a3f10';
 
 const FAILED_SCROLLBACK = [
   PROMPT + ' cmux restore claude ' + SESSION,

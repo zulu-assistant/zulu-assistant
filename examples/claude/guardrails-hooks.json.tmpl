@@ -11,6 +11,11 @@
         "matcher": "Bash",
         "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-hook.sh'", "timeout": 15 } ]
       }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-config-hook.sh'", "timeout": 30 } ]
+      }
     ]
   }
 }

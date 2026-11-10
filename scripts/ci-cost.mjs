@@ -155,7 +155,7 @@ function estimateFromJobs(owner, repos, now) {
 async function postComment(taskId, text, wake) {
   const port = process.env.MC_PORT || 3210;
   const r = await fetch(`http://127.0.0.1:${port}/api/tasks/${taskId}`, {
-    method: 'PATCH', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(30000),
+    method: 'PATCH', headers: { 'content-type': 'application/json', ...(process.env.MESH_BOARD_TOKEN ? { 'x-mesh-board': process.env.MESH_BOARD_TOKEN } : {}) }, signal: AbortSignal.timeout(30000),
     body: JSON.stringify({ actor: 'board', op: 'comment', text, wake }),
   });
   const j = await r.json().catch(() => ({}));

@@ -118,8 +118,19 @@ export const SETTINGS = {
   // database views on cards (src/view-watch.mjs): one row read over PostgREST with the
   // HEARTBEAT_URL origin + HEARTBEAT_KEY, amber on thresholds. Off here. Example entry:
   //   { label: 'jobs:queue', name: 'Job queue', view: 'queue_status', everyMinutes: 5,
-  //     max: { stuck: 0 }, maxAgeMinutes: { last_run_at: 15 }, show: ['last_done_at'] }
+  //     max: { stuck: 0 }, maxAgeMinutes: { last_run_at: 15 }, maxAgeIfSet: { oldest_waiting_at: 60 }, show: ['last_done_at'] }
   viewWatch: [],
+  // one fix task per supplier whose documents stop parsing (src/parser-watch.mjs). Off here. Reads a
+  // per-supplier view with the keys above; { view, owner, requester, repo, stagingDir, template, everyMinutes }
+  parserWatch: null,
+  // scheduled ledger backup (src/backup-watch.mjs): a `backup:state` card that goes amber when the
+  // newest archive in data/backups/ is older than maxAgeHours (never red). null = no card.
+  // Turn it on after installing the daily job (scripts/state-backup-install.sh):
+  //   backupWatch: { maxAgeHours: 36 },
+  backupWatch: null,
+  // extra host names this board answers to for writes (src/request-guard.mjs). localhost, tailnet
+  // addresses, *.ts.net names and this machine's hostname are always accepted. Hostnames only, no port.
+  allowedHosts: [],
   port: Number(process.env.MC_PORT) || 3210,   // MC_PORT via data/local.env
   pollSeconds: 60,
   // escalation ladder: cmux notify is instant; a red persisting this long also
@@ -144,25 +155,114 @@ export const SETTINGS = {
   selfhealMarkerDir: `${process.env.HOME}/Library/Application Support/selfheal-runner`,
   selfhealLegacyMarkerDir: `${process.env.HOME}/.cache/selfheal-runner`,
   cmuxWorkstream: `${process.env.HOME}/.cmuxterm/workstream.jsonl`,
-  cmuxBin: '/opt/homebrew/bin/cmux',
+  // cmux: looked up on PATH (scripts/env.sh puts Homebrew's folders there for launchd). Set a full path to pin one.
+  // Not found = the board says so on the cmux:bridge card; a Guardrails-only install never calls it.
+  cmuxBin: process.env.CMUX_BIN || 'cmux',
   // interval jobs: stale when the log is quiet for staleFactor × StartInterval
   staleFactor: 3,
   realertHours: 6,
   // weekly GitHub Actions cost reading posted to a ledger task (src/ci-cost-watch.mjs);
   // set e.g. { task: <ledger task id>, weekday: 1, hour: 8 } once CI runs on paid macOS minutes
   ciCostWatch: null,
+  // weekly operating reading from the ledger (src/operating-reading.mjs): closes, reopens, waits on you,
+  // gate outcomes + approval-to-action time, completion packets, worktrees. mode 'off' | 'observe' (a ticker
+  // line + the ops:reading card) | 'on' (also a weekly board comment on one ledger task, created once).
+  // e.g. { mode: 'on', weekday: 1, hour: 8, owner: 'mission-control' } (task: <id> to post on an existing one)
+  operatingReading: { mode: 'off' },
   // GitHub stats for your repos (stars, forks, watchers, clones, views — kept beyond GitHub's
   // 14 days) as board cards + a digest section; uses your gh login (traffic needs push access).
   // e.g. { repos: ['you/your-repo'], everyHours: 6 }
   repoStats: null,
+  // GitHub issues + discussions as an intake front door (src/github-intake.mjs, docs/GITHUB-INTAKE.md): one task per thread,
+  // read-only, never replies. mode 'off' | 'observe' (ticker only) | 'on'.
+  // e.g. { mode: 'observe', repo: 'you/your-repo', everyMinutes: 15, maxPerPoll: 10, ignoreAuthors: ['your-login'] }
+  githubIntake: { mode: 'off' },
   // context autopilot (src/context-autopilot.mjs): the board saves an agent's state and types
   // /compact at its next idle moment (thresholds in CONTEXT). mode 'off' | 'observe' (ticker
   // lines only) | 'on'; only/exclude: agent names; continuity: { <agent>: <state file> } for
   // agents without <repo>/.claude/RESIDENT-STATE.md.
   // e.g. { mode: 'on', only: ['my-resident'], exclude: [], continuity: {} }
   contextAutopilot: { mode: 'off' },
+  // completion packet at close (src/completion-packet.mjs): an evidence block on the task — the request,
+  // the PR and its head, test runs stamped by `task.sh test N -- <cmd>`, checks not run, gates, the
+  // closer's summary (labelled generated). Never blocks a close. 'observe' = a ticker line only.
+  // e.g. { mode: 'on', only: ['my-resident'] }
+  completionPacket: { mode: 'off' },
+  // receipt chain (src/receipt-chain.mjs): every gate change appends one hash-chained line to
+  // receipts.jsonl in the Guardrails state folder, and an approved call runs only when the chain holds
+  // the approval the running board recorded. 'observe' = lines and a "would dispute" ticker line, the
+  // call passes; 'off' = no file, no check. Check a task with: task.sh audit N --verify
+  receiptChain: { mode: 'on' },
+  // evidence panel (src/evidence.mjs, page /?evidence=1): per task, the completion packet and the gate
+  // receipts, read-only, from the ledger. A second Dock browser tab (system/cmux/dock.json). 'off' = no page, no API.
+  // install profile (src/profile.mjs): 'full' = the fleet board, the mesh and the heals; 'guardrails' = the ledger,
+  // the gate and the waiting rows only (no cmux, no collector). `./install.sh --guardrails` sets it in config/local.json.
+  profile: 'full',
+  evidencePanel: { mode: 'on' },
+  // worktree-per-task (src/worktree.mjs): each spawned worker codes in its own git worktree,
+  // <repo-parent>/wt-<task> on branch task/<task>-<slug>; ignored files (data/, .env*) are never copied in.
+  // `task.sh worktree-clean N` removes one only when nothing would be lost. residents: true adds the
+  // per-task instruction to resident launches. MESH_WORKTREE=0|1 overrides one launch.
+  worktrees: { mode: 'on', workers: true, residents: false },
+  // how many spawned workers may be live at once before a spawn prints a warning (it never refuses)
+  workers: { max: 3 },
+  // pane answers (src/tasks.mjs paneAnswersMode): what an approval you gave in an agent's pane is worth
+  // once an agent records it (task.sh approved-in-pane / gate-approved).
+  //   'confirm' (also when this key is absent): a proposal. You get a row that quotes it, and it counts
+  //             when you confirm it on the board. Until then: no grant, no program go, no plan approval.
+  //   'direct'  the record IS the decision (the behaviour before 1.2). It rests on a name the agent
+  //             declares for itself; choose it only if you accept that.
+  // A recorded decline takes effect at once in both modes: it only reduces what runs.
+  paneAnswers: 'confirm',
+  // caller evidence (src/caller.mjs): the board works out WHO is calling from the process that holds
+  // the connection (lsof, the process ancestry, cmux's session map), not from the name the caller
+  // declares. Absent = off.
+  //   mode      'observe' = the evidence is recorded next to the declared name (the guardrails check
+  //             log, the server log, a "[caller mismatch]" ticker line); nothing is refused.
+  //             'on' is reserved for a later release: take a week of observe readings first.
+  //   tripwire  the decision door, for requests made on this machine:
+  //             'agent'   an owner decision (approve, decline, a card action, an upgrade, a snooze)
+  //                       that an agent session is behind is refused and named. A decision typed as
+  //                       a `!` line inside an agent's pane is one of those: decide on the board page.
+  //             'browser' also: a decision must come from a browser or web view. Under 'agent' the
+  //                       board only logs what this would refuse ("[door] would refuse"); read
+  //                       those lines before you turn it up. A typed approval is refused under it.
+  //             false     the door is open.
+  //   browsers  app names (without ".app") that count as a browser, e.g. ['Safari', 'Firefox'];
+  //             absent = the built-in list. WebKit web views (Safari, the cmux Dock) always count.
+  //   jobs      launchd jobs that may use a name: { '<label>': '<name>' },
+  //             e.g. { 'com.example.mission-control-triage': 'headless:triage' }
+  // A request from another device (your phone) and a failed lookup are never refused by the door.
+  callerEvidence: { mode: 'observe', tripwire: 'agent', jobs: {} },
+  // Gate integrity (src/gate-integrity.mjs, docs/GUARDRAILS.md): compare the gate's own files in this
+  // checkout with what has landed on the remote's default branch (a release install: with its tag),
+  // and check that the hook is still registered exactly as installed. The result is part of the
+  // guardrails card: red when a gate file differs or the hook is dropped, amber while the checkout
+  // is behind. It only reads. 'off' until you turn it on:
+  //   gateIntegrity: { mode: 'on', behindMinutes: 0 },   // 0 = being behind stays amber, never red
+  gateIntegrity: { mode: 'off' },
+  // status taxonomy (src/agent-state.mjs): each agent tile says what the agent is doing (working / input /
+  // idle / stopped / UNKNOWN), where that came from (the hook files, or a screen read: "screen") and how
+  // sure it is ("?" = low confidence). Never "done" — only a ledger close is. Screen reads are bounded.
+  statusTaxonomy: { mode: 'on', runningFreshMinutes: 20, maxReadsPerPoll: 8, readCacheSeconds: 120 },
+  // attention ring (src/attention.mjs): the WAITING ON YOU strip shows one row per task (expand on click)
+  // and each row can be snoozed 15m / 1h / 4h / until 08:00 tomorrow. A snooze hides the row from the
+  // strip and the "(N)" title count only; it never decides anything and never delays an agent.
+  // snooze 'off' = today's strip, unchanged.
+  attention: { snooze: 'off' },
   // public edition drift (src/release-drift.mjs): compares this checkout's publish set with the
   // newest release of your public repo; a card, a digest line and one ledger ask per episode.
   // e.g. { repo: 'you/your-repo', everyHours: 6, amberDays: 3, owner: '<agent>', queued: [] }
   releaseDrift: null,
+  // one-click upgrade (src/upgrade.mjs, docs/UPGRADE.md): checks the public repo's releases every 6h;
+  // a release install (origin = that repo, HEAD on a release tag) gets an UPDATE button on the
+  // `update` card. mode 'observe' = a ticker line only; null = off. channel 'pre' includes prereleases.
+  // repo defaults to the one in repoUrl.
+  upgrade: { mode: 'on', channel: 'stable', everyHours: 6 },
+  // push approvals to your phone (src/relay.mjs, docs/RELAY.md): a self-hosted ntfy server on your
+  // tailnet, or the public ntfy.sh fallback with a 32+ character random topic. Ids and labels only;
+  // the tap opens the board, where you still decide. The token goes in data/secrets.env RELAY_TOKEN.
+  // e.g. { mode: 'observe', url: 'http://<tailscale-ip>:2586', topic: 'zulu-owner',
+  //        boardUrl: 'http://<tailscale-ip>:3210', quiet: { from: '22:00', to: '07:00' } }
+  relay: null,
 };

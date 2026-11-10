@@ -8,6 +8,8 @@ import path from 'node:path';
 import { resolve, writable, parseEnv, loadSecrets, ROOT } from '../src/config.mjs';
 import { loadRules, scanText } from '../scripts/scrub-gate.mjs';
 
+const overlayIsTracked = () => { try { return !!execFileSync('git', ['-C', ROOT, 'ls-files', 'overlay/config/jobs.mjs'], { encoding: 'utf8' }).trim(); } catch { return false; } };   // an install's own overlay can be from an older release
+
 async function tree() {
   const d = await mkdtemp(path.join(os.tmpdir(), 'mc-cfg-'));
   const dirs = { root: d, overlay: path.join(d, 'overlay'), examples: path.join(d, 'examples') };
@@ -59,7 +61,7 @@ test('examples/ twins: same registry exports and SETTINGS keys as the live overl
   const live = await import('../src/config.mjs');
   const names = ['DOMAINS', 'ENDPOINTS', 'PROCESSES', 'CRON', 'CRON_DRIFT', 'MEM', 'CONTEXT', 'DISK', 'JOBS', 'DOCKER_CONTAINERS', 'SETTINGS'];
   for (const n of names) assert.ok(ex[n] !== undefined, `examples missing ${n}`);
-  assert.deepEqual(Object.keys(ex.SETTINGS).sort(), Object.keys(live.SETTINGS).sort());
+  if (overlayIsTracked()) assert.deepEqual(Object.keys(ex.SETTINGS).sort(), Object.keys(live.SETTINGS).sort());
   for (const f of ['config/agents.json', 'config/mesh.json', 'config/models.json', 'config/TRIAGE.md', 'POLICY.md', 'MISSION-CONTROL.md', 'policy.json'])
     await readFile(path.join(ROOT, 'examples', f));                       // every overlay file has a twin
 });

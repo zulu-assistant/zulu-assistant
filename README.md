@@ -8,7 +8,7 @@ it heals what it safely can and escalates the rest to you.
 [![CI](https://github.com/zulu-assistant/zulu-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/zulu-assistant/zulu-assistant/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-00d900.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/zulu-assistant/zulu-assistant?style=flat&color=00d900)](https://github.com/zulu-assistant/zulu-assistant/stargazers)
-![macOS](https://img.shields.io/badge/macOS-14%2B-555.svg) ![Node 22](https://img.shields.io/badge/node-22-555.svg) ![zero dependencies](https://img.shields.io/badge/dependencies-0-555.svg)
+![macOS](https://img.shields.io/badge/macOS-26-555.svg) ![Node 22](https://img.shields.io/badge/node-22-555.svg) ![zero dependencies](https://img.shields.io/badge/dependencies-0-555.svg)
 
 Website: [https://zuluassistant.com](https://zuluassistant.com)
 
@@ -31,8 +31,9 @@ its row rises to the top of ATTENTION, and when it's answered the row drops back
 
 Your agents work on their own, until they reach something that can't be taken back: a merge, a push to
 `main`, a deploy, a script's `--commit` run, a message sent, a store write, a delete outside the
-working tree. Then **the command doesn't run.** It waits for you on the board, your phone or your
-terminal, showing the exact command, folder and agent. One approval lets that exact call run **once**,
+working tree. Then **the command doesn't run.** It waits for you on the board, showing the exact
+command, folder and agent. The phone opens the same board page over your tailnet, and a push can ring
+it; you decide with a click on that page. One approval lets that exact call run **once**,
 and the task keeps a receipt of the attempt, your decision and the release (the agent reports how the
 run went).
 
@@ -86,11 +87,17 @@ curl -fsSL https://zuluassistant.com/install | bash
 
 Prefer GitHub directly? `curl -fsSL https://raw.githubusercontent.com/zulu-assistant/zulu-assistant/main/get.sh | bash` does the same.
 
-That installs the toolchain (it shows the list and asks once), the board, cmux config, the brain
-and the agent workforce, then starts **`zulu setup`**: connect GitHub, choose **Claude Code or
+That installs the toolchain (it shows the list and asks once: Homebrew, Node 22, git, gh, uv, cmux,
+Claude Code, the Codex CLI, Graphify and Obsidian; `ZULU_SKIP="codex obsidian graphify"` leaves items
+out), the board, a scheduled triage job, cmux config, the brain and the agent workforce, then starts
+**`zulu setup`**: connect GitHub, choose **Claude Code or
 Codex** for Mission Control and for workers, pick what to watch from a scan of your Mac, add alert
 channels, create your vault, grant the macOS permissions. Re-run any step later (`zulu setup
 --step engines`); the board shows a setup card until you're done.
+
+**Only want the gate?** `./install.sh --guardrails` from a clone installs the board, the ledger and the
+hook, and nothing else: no cmux, no Homebrew packages, nothing paid. Five steps, about five minutes:
+[docs/QUICKSTART-GUARDRAILS.md](docs/QUICKSTART-GUARDRAILS.md).
 
 Just looking? `./install.sh --demo` from a clone runs a synthetic board on :3210 with Node 22 only;
 `./install.sh --demo --cmux` adds a ZULU DEMO window in cmux with six fake agents, so you can see
@@ -112,13 +119,15 @@ the better choice, are in [docs/WHY-NOT-TMUX.md](docs/WHY-NOT-TMUX.md).
 ## Safety model
 
 - **Read-only by design.** The board never writes to anything it watches. It writes
-  only its own `data/`, cmux notifications, the heartbeat row, and actions you click
-  (KICKSTART, RESTART, START, DISPATCH, ASK MASTER). Demo mode performs no actions at
-  all.
+  only its own `data/`, cmux notifications and chrome, the heartbeat row, and actions you click
+  (KICKSTART, RESTART, START, DISPATCH, ASK MASTER). One exception keeps cmux reachable: when
+  cmux loses its socket password, the board puts its own copy back into `~/.config/cmux/cmux.json`.
+  Demo mode performs no actions at all.
 - **Policy, not vibes.** `POLICY.md` belongs to you. Anything paid, outward-facing or
   destructive escalates to you, every time.
-- **Approvals are yours.** Agents can *request* approval. Only you grant it: on the board,
-  your phone or your own terminal, using a per-install decision token. Irreversible actions
+- **Approvals are yours.** Agents can *request* approval. Only you grant it, with a click on the
+  board (from your phone too, over Tailscale) or from your own terminal, using a per-install
+  decision token. Irreversible actions
   are **gated by the system** (Guardrails): they don't run until you approve that exact call, once.
 - **Escalate, never guess.** Agents never auto-answer a trust dialog. They deliver
   messages only into a ready pane. Anything else is queued and reported.
@@ -133,12 +142,14 @@ the better choice, are in [docs/WHY-NOT-TMUX.md](docs/WHY-NOT-TMUX.md).
 
 | | Version |
 |---|---|
-| macOS | 14 or later (launchd, zsh, BSD userland) |
+| macOS | 26 (tested on 26.6, Apple silicon; older versions are untested) |
 | Node | 22 (`nvm install 22` or `brew install node@22`) |
-| [cmux](https://github.com/manaflow-ai/cmux) | 0.65.x, 0.64.x also works (quirks handled in code, see [docs/CMUX-SETUP.md](docs/CMUX-SETUP.md)) |
-| Claude Code | ≥ 2.1.280 (tested 2.1.296) · Codex CLI 0.162.x optional |
+| [cmux](https://github.com/manaflow-ai/cmux) | 0.65.x, 0.64.x also works (quirks handled in code, see [docs/CMUX-SETUP.md](docs/CMUX-SETUP.md)). Needed for the agent half: session tiles, the mesh, Mission Control. The board's fleet monitoring runs without it. |
+| Claude Code | ≥ 2.1.280 (tested 2.1.296) |
 | gh | logged in (the dead-man's switch setup and the optional star prompt) |
-| Optional | Codex CLI, Docker, Tailscale (phone access), Obsidian + Graphify (the brain) |
+| Optional to run | Codex CLI 0.162.x, Docker, Tailscale (phone access), Obsidian + Graphify (the brain). The one-line installer installs the Codex CLI, Graphify and Obsidian unless you leave them out with `ZULU_SKIP`. |
+
+Which model runs each role, and how to change it: [docs/MODELS.md](docs/MODELS.md). When something does not work: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 cmux is a separate GPL-licensed application. Install it yourself, unmodified. Zulu
 Assistant only calls its CLI and socket and does not bundle or link it.
@@ -161,11 +172,15 @@ Config is resolved `overlay/` → core → `examples/`. Adding coverage takes on
 
 ## Roadmap
 
-- v0.1: the board, demo mode, Mission Control, Agent Mesh, the brain templates, the installer,
-  and (beta.3) Slack team-chat intake.
-- Next: Homebrew tap and an `npx` one-liner, a Linux/systemd collector, a pluggable
-  notifier interface (ntfy, chat alerts), more chat transports (Discord, Teams, a web form), a hosted heartbeat relay so the dead-man's switch
-  needs no database of your own.
+- Latest release: **1.2.0** ([tested versions](docs/VERSIONS.md), [changelog](CHANGELOG.md)).
+  It has the board, demo mode, Mission Control, the Agent Mesh, the brain templates, the installer,
+  Slack team-chat intake and Guardrails; and since 1.2: one-click upgrade, a Guardrails-only install,
+  push notices to your phone (a self-hosted ntfy relay), GitHub intake, the evidence panel and the
+  trust work (approvals only you can give, chained receipts, a gate that protects itself).
+- On `main`, for 1.3.0 (the next release): what is listed under Unreleased in the changelog.
+- Later: Homebrew tap and an `npx` one-liner, a Linux/systemd collector, more chat transports
+  (Discord, Teams, a web form), a hosted heartbeat relay so the dead-man's switch needs no database
+  of your own.
 - Ideas and votes: [Discussions](https://github.com/zulu-assistant/zulu-assistant/discussions).
   Good first issues are [labelled](https://github.com/zulu-assistant/zulu-assistant/labels/good%20first%20issue).
 

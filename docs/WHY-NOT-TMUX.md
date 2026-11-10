@@ -73,7 +73,10 @@ Be aware of these before you commit:
   The fleet monitoring (launchd, docker, cron, endpoints, gauges, escalation,
   dead-man's switch) does not depend on cmux. Without cmux, the agent tiles,
   the mesh delivery and the cmux notification tier are inactive, and email,
-  SMS and the digest still work.
+  SMS and the digest still work. For that, set `ZULU_SKIP=cmux` for the toolchain
+  step and skip the cmux steps of [INSTALL.md](INSTALL.md) §4. If you only want
+  the approval gate, `./install.sh --guardrails` installs it with no cmux at all
+  ([QUICKSTART-GUARDRAILS.md](QUICKSTART-GUARDRAILS.md)).
 - You need a terminal with a very long track record and a large plugin
   ecosystem.
 

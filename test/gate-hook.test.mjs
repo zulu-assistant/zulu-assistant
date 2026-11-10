@@ -12,7 +12,7 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const HOOK = path.join(ROOT, 'scripts', 'gate-hook.sh');
 // a board that is never there: every hit must fail closed
 const env = { ...process.env, GATE_NODE: process.execPath, MESH_BOARD: 'http://127.0.0.1:9', GATE_TIMEOUT_MS: '300', CMUX_WORKSPACE_ID: '' };
-const call = (obj, extra = {}) => spawnSync('sh', [HOOK], { input: JSON.stringify(obj), env: { ...env, ...extra }, encoding: 'utf8' });
+const call = (obj, extra = {}) => spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify(obj), env: { ...env, ...extra }, encoding: 'utf8' });
 const bash = (command, ev = 'PreToolUse') => ({ hook_event_name: ev, tool_name: 'Bash', tool_input: { command }, cwd: ROOT, session_id: 's1' });
 
 test('the shipped default trigger file is exactly the default policy\'s trigger lines', () => {
@@ -40,13 +40,36 @@ test('fast path: a call with no trigger prints nothing, exits 0, well inside the
   const times = [];
   for (let i = 0; i < 60; i++) {
     const t0 = process.hrtime.bigint();
-    const r = spawnSync('sh', [HOOK], { input, env, encoding: 'utf8' });
+    const r = spawnSync('sh', [HOOK, '--env-board'], { input, env, encoding: 'utf8' });
     times.push(Number(process.hrtime.bigint() - t0) / 1e6);
     assert.equal(r.status, 0); assert.equal(r.stdout, '');
   }
   times.sort((a, b) => a - b);
   const median = times[Math.floor(times.length / 2)];
-  assert.ok(median < 35, `median ${median.toFixed(1)} ms`);
+  // Shared CI runners spawn processes 2–3× slower (52–66 ms seen) and noisily. The old CI claim
+  // "beats a bare node spawn" flipped on noise (37.7 vs 36.8 ms, #427), so CI keeps a loose ceiling
+  // and the real property (the fast path never starts Node) is proved without a clock in the next test.
+  // Judged on the third-fastest of the 60 runs, not the median: a busy machine delays most runs
+  // (median 33 ms measured while a full suite started beside it, 36 ms seen at load 13) but not the
+  // fastest few (17 ms in the same run), and this suite also runs on an installer's own machine,
+  // where a failing test rolls an upgrade back. This is a budget check only: a fast path that
+  // started Node would cost about 33 ms at best here (12 + a 21 ms Node start), which neither this
+  // ceiling nor the old median (37 ms against 35) tells apart reliably. The next test does.
+  const best = times[2];
+  assert.ok(best < (process.env.CI ? 150 : 35), `third-fastest of ${times.length} runs ${best.toFixed(1)} ms (median ${median.toFixed(1)} ms)`);
+});
+
+test('fast path never starts Node: GATE_NODE is a marker shim that a no-trigger call never runs (#427)', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'gate-node-'));
+  const marker = path.join(dir, 'ran');
+  const shim = path.join(dir, 'node');
+  writeFileSync(shim, `#!/bin/sh\n: > "${marker}"\nexec "${process.execPath}" "$@"\n`, { mode: 0o755 });
+  const r = call(bash('git status && ls -la src && node --version'), { GATE_NODE: shim });
+  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+  assert.equal(readdirSync(dir).includes('ran'), false, 'the fast path started Node');
+  // the shim itself works: a trigger hit does reach Node through it
+  call(bash('gh pr merge 4'), { GATE_NODE: shim });
+  assert.equal(readdirSync(dir).includes('ran'), true, 'a hit should run the Node half');
 });
 
 test('fail closed: a gated call with the board down is denied; non-gated calls are untouched', () => {
@@ -75,7 +98,7 @@ test('MCP and file tools reach the gate too (store writes, sends, the gate\'s ow
 
 test('hook input: Claude and Codex shapes; output: allow/deny JSON, nothing for pass or PostToolUse', () => {
   const c = hookInput({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, cwd: '/w', session_id: 's' }, { CMUX_WORKSPACE_ID: 'W1', CMUX_AGENT_LAUNCH_KIND: 'claude' });
-  assert.deepEqual(c, { event: 'pre', engine: 'claude', tool: 'Bash', command: 'ls', filePath: null, cwd: '/w', session: 's', workspaceId: 'W1' });
+  assert.deepEqual(c, { event: 'pre', engine: 'claude', tool: 'Bash', command: 'ls', filePath: null, cwd: '/w', session: 's', workspaceId: 'W1', identity: null });
   const x = hookInput({ hook_event_name: 'PreToolUse', tool_name: 'shell', tool_input: { command: ['gh', 'pr', 'merge', '1'] }, turn_id: 't', cwd: '/w' }, {});
   assert.equal(x.engine, 'codex'); assert.deepEqual(x.command, ['gh', 'pr', 'merge', '1']);
   assert.equal(localVerdict({ ...x, cwd: '/w' }).verdict, 'gate');
@@ -101,7 +124,9 @@ test('fix 1: board down, the local verdict honors mode and enforceFor; an unknow
 import { cpSync } from 'node:fs';
 function spacedCopy() {
   const dir = path.join(mkdtempSync(path.join(os.tmpdir(), 'gate space-')), 'Repo With Space');
-  for (const f of ['scripts/gate-hook.sh', 'scripts/gate-hook.mjs', 'scripts/gate-triggers.default', 'scripts/merge-hooks.mjs', 'src/gates.mjs', 'examples/policy.json', 'examples/claude/guardrails-hooks.json.tmpl'])
+  // the hook's whole file set: its shell step, its Node step and the two modules that step imports
+  // (the classifier, and since 1.3 the process walk it uses when the board is down)
+  for (const f of ['scripts/gate-hook.sh', 'scripts/gate-hook.mjs', 'scripts/gate-triggers.default', 'scripts/merge-hooks.mjs', 'src/gates.mjs', 'src/caller.mjs', 'examples/policy.json', 'examples/claude/guardrails-hooks.json.tmpl'])
     cpSync(path.join(ROOT, f), path.join(dir, f));
   return dir;
 }
@@ -109,7 +134,7 @@ function spacedCopy() {
 test('from a path with a space: a hit with the board down is DENIED, a cleared hit and a non-hit stay silent', () => {
   const dir = spacedCopy();
   const hook = path.join(dir, 'scripts', 'gate-hook.sh');
-  const run = (command) => spawnSync('sh', [hook], { input: JSON.stringify(bash(command)), env, encoding: 'utf8' });
+  const run = (command) => spawnSync('sh', [hook, '--env-board'], { input: JSON.stringify(bash(command)), env, encoding: 'utf8' });
   const hit = run('gh pr merge 12 --merge');
   assert.equal(JSON.parse(hit.stdout).hookSpecificOutput.permissionDecision, 'deny');
   assert.match(JSON.parse(hit.stdout).hookSpecificOutput.permissionDecisionReason, /board unreachable/);
@@ -121,7 +146,7 @@ test('silence is never an allow: a Node step that exits 0 with no output is deni
   const dir = spacedCopy();
   const quiet = path.join(dir, 'quiet node');
   writeFileSync(quiet, '#!/bin/sh\ncat >/dev/null\nexit 0\n', { mode: 0o755 });
-  const r = spawnSync('sh', [path.join(dir, 'scripts', 'gate-hook.sh')], { input: JSON.stringify(bash('vercel --prod')), env: { ...env, GATE_NODE: quiet }, encoding: 'utf8' });
+  const r = spawnSync('sh', [path.join(dir, 'scripts', 'gate-hook.sh'), '--env-board'], { input: JSON.stringify(bash('vercel --prod')), env: { ...env, GATE_NODE: quiet }, encoding: 'utf8' });
   assert.equal(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision, 'deny');
 });
 
@@ -133,10 +158,11 @@ test('from a path with a space: merge-hooks.mjs actually runs (dry run reports, 
   mkdirSync(path.dirname(settings), { recursive: true }); writeFileSync(settings, '{}');
   const mh = path.join(dir, 'scripts', 'merge-hooks.mjs');
   const dry = spawnSync(process.execPath, [mh, tpl, settings, '--dry-run'], { encoding: 'utf8' });
-  assert.match(dry.stdout, /would\s+merge 2 hook\(s\)/);
+  assert.match(dry.stdout, /would\s+merge 3 hook\(s\)/);
   const apply = spawnSync(process.execPath, [mh, tpl, settings], { encoding: 'utf8' });
-  assert.match(apply.stdout, /done\s+2 hook\(s\) merged/);
+  assert.match(apply.stdout, /done\s+3 hook\(s\) merged/);
   assert.equal((readFileSync(settings, 'utf8').match(/gate-hook\.sh/g) || []).length, 2);
+  assert.equal((readFileSync(settings, 'utf8').match(/gate-config-hook\.sh/g) || []).length, 1, 'the settings-change hook, installed next to the gate hook');
 });
 
 test('every script main guard compares real paths (spaces and symlinks in the checkout path)', () => {

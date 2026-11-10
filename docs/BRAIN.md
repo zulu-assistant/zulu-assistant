@@ -10,7 +10,9 @@ plus a continuity protocol that ties them to long-lived sessions.
 | **Graphify** | code memory: the structure of each repo | one repo | `<repo>/graphify-out/` (local) |
 | **Claude memory** | agent memory: facts and preferences an agent learned | one project, one machine | `~/.claude/projects/<project>/memory/` |
 
-The brain is optional: the board runs without it. It is what makes a multi-agent setup improve over
+The brain is optional to run: the board works without it. The one-line installer sets it up by default
+all the same, and `zulu setup` marks its vault and brain steps required ([INSTALL.md](INSTALL.md) §3
+says how to leave it out). It is what makes a multi-agent setup improve over
 weeks instead of re-learning the same things every session.
 
 ## 1. Obsidian vault — org memory

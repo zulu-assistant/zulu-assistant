@@ -30,6 +30,14 @@ PROMPTFILE="$(cd "$(dirname "$PROMPTFILE")" && pwd)/$(basename "$PROMPTFILE")"
 
 REPORT="$ROOT/data/handoffs/$(basename "${PROMPTFILE%.*}").report.md"
 
+# worker limit (SETTINGS.workers.max, default 3): a warning on the way in, never a refusal
+CAPLINE=$(node "$MESH" worker-count 2>/dev/null || true)
+if [[ -n "$CAPLINE" ]]; then
+  echo "⚠ $CAPLINE" >&2
+  curl -s -m 5 -X POST localhost:3210/api/event -H 'content-type: application/json' \
+    -d "{\"kind\":\"sys\",\"text\":\"${CAPLINE//\"/}\"}" >/dev/null || true
+fi
+
 # one ledger task per spawn (skipped with a warning if the board is down)
 TASK="${MESH_TASK:-}"
 if [[ -z "$TASK" ]]; then
@@ -39,11 +47,32 @@ fi
 TASKLINE="(no ledger task — board was unreachable at spawn)"
 [[ -n "$TASK" ]] && TASKLINE="Your ledger task is #$TASK. First action: \`$ROOT/scripts/task.sh claim $TASK\`."
 
+# worktree-per-task (SETTINGS.worktrees, src/worktree.mjs; MESH_WORKTREE=0|1 overrides): the worker
+# codes in its own <repo-parent>/wt-<task> on task/<task>-<slug>. The directory keeps the real repo.
+REPO_DIR="$WCWD"
+WTLINE=""
+WTMODE=$(node "$MESH" worktree-mode worker "$SLUG" 2>/dev/null || echo off)
+REPO_ABS="${WCWD/#\~/$HOME}"   # a quoted "~/x" cwd is not expanded by the shell
+if [[ -n "$TASK" && "$WTMODE" != off ]] && git -C "$REPO_ABS" rev-parse --git-dir >/dev/null 2>&1; then
+  if [[ "$WTMODE" == on ]]; then
+    if WT=$(node "$MESH" task worktree "$TASK" --repo "$REPO_ABS" --as mission-control); then
+      WCWD="$WT"
+      WTLINE="You work in the git worktree \"$WT\" (its own branch, from the remote's main). Commit there, push the branch, open a PR — never edit \"$REPO_DIR\"'s own checkout. Ignored files (data/, .env*) are NOT in the worktree and must never be copied in; if you need them, block and say so. After the PR merges: \`$ROOT/scripts/task.sh worktree-clean $TASK\`."
+    else
+      echo "worktree: not created for #$TASK — the worker runs in $WCWD" >&2
+    fi
+  else
+    curl -s -m 5 -X POST localhost:3210/api/event -H 'content-type: application/json' \
+      -d "{\"kind\":\"sys\",\"text\":\"worktree (observe): would create wt-$TASK for $SLUG from ${REPO_DIR//\"/}\"}" >/dev/null || true
+  fi
+fi
+
 cat >> "$PROMPTFILE" <<EOF
 
 ---
 Agent Mesh: you are the worker "$SLUG" (address = slug of your workspace
 name). $TASKLINE
+$WTLINE
 Rules: $ROOT/AGENT-MESH.md — look up owners with \`$ROOT/scripts/mesh-cli.mjs agents\`;
 cross-agent asks are tasks (\`task.sh create ... --owner <agent>\`), never free-form;
 anything paid/outward/destructive → \`task.sh approve-request $TASK --policy "<POLICY.md line>"\` and wait.
@@ -68,7 +97,10 @@ OUT=$(cmux --id-format both new-workspace --name "$NAME" --cwd "$WCWD" --focus f
   --command "export CMUX_SOCKET_PASSWORD=\"\$(cat '$PW_FILE')\" CMUX_QUIET=1; $(node "$ROOT/scripts/engine.mjs" cmd worker --name "$SLUG" ${MODEL:+--model "$MODEL"})")
 REF=$(print -r -- "$OUT" | grep -o 'workspace:[0-9]*' | head -1)
 WSID=$(node "$MESH" workspace-id "$OUT" --title "$NAME")
-node "$MESH" register --workspace "$WSID" --title "$NAME" --kind worker --repo "$WCWD" --vendor "$ENGINE" >/dev/null
+node "$MESH" register --workspace "$WSID" --title "$NAME" --kind worker --repo "$REPO_DIR" --vendor "$ENGINE" ${TASK:+--task "$TASK"} >/dev/null
+# a task Mission Control owns (MESH_TASK) goes to the worker now, so its `task.sh claim` works;
+# quiet: no "assigned" wake is typed into the pane (the brief says it). Anyone else's task is left alone.
+[[ -n "$TASK" ]] && { node "$MESH" task adopt "$TASK" "$SLUG" --as mission-control >&2 || echo "spawn: #$TASK was not reassigned to $SLUG — assign it by hand" >&2; }
 # sidebar pills (Tier 2): the task pill is re-derived from the ledger by the
 # board once the worker claims; the model pill is static for the session
 [[ -n "$TASK" ]] && cmux set-status task "#$TASK OPEN" --icon circle --color "#157A15" --priority 60 --workspace "$WSID" >/dev/null || true

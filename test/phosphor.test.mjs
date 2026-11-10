@@ -85,3 +85,29 @@ test('ALL mode: a context bar follows rows the board measured, width + band colo
   hot.setMode('all');
   assert.equal(hot.entries().find((x) => x.kind === 'bar').color, '#FF4444');
 });
+
+test('ATTENTION: a row whose items are all snoozed ("⏾ n snoozed") leaves; "+n snoozed" and INPUT stay', async () => {
+  const ws = [
+    { id: 'asleep', title: 'A', agents: ag('idle', 1), unread: 0, progress: { value: 0, label: '#7 APPROVAL · 0/4 · ⏾ 2 snoozed' } },
+    { id: 'blocked-asleep', title: 'B', agents: ag('idle', 2), unread: 0, progress: { value: 0, label: '#11 BLOCKED · 0/4 · ⏾ 1 snoozed' } },
+    { id: 'partly', title: 'C', agents: ag('idle', 3), unread: 0, progress: { value: 0, label: '⛨ 1 GATE · #9 APPROVAL · 0/4 · +1 snoozed' } },
+    { id: 'input', title: 'D', agents: ag('idle', 4), unread: 0, progress: { value: 0, label: '▲ INPUT · #8 APPROVAL · 0/4 · ⏾ 1 snoozed' } },
+    { id: 'titled-asleep', title: 'E', agents: ag('idle', 5), unread: 0, progress: { value: 0, label: '#12 APPROVAL · 0/4 · Ship the widget · ⏾ 1 snoozed' } },
+    { id: 'title-says-it', title: 'F', agents: ag('idle', 6), unread: 0, progress: { value: 0, label: '#13 APPROVAL · 0/4 · Why ⏾ 2 snoozed rows hide' } },
+  ];
+  const sb = await load(ws, G);
+  assert.deepEqual(sb.entries().filter((x) => x.attention).map((x) => x.wsId).sort(), ['input', 'partly', 'title-says-it'],
+    'the snooze suffix after a title (#416) still hides the row; the same words inside a title do not');
+});
+
+test('a task title in the label (#416) never fakes an ATTENTION state; the status token decides', async () => {
+  const ws = [
+    { id: 'titled', title: 'A', agents: ag('working', 1), unread: 0, progress: { value: 0, label: '#5 WORKING · 1/4 · Fix BLOCKED orders and APPROVAL emails' } },
+    { id: 'real', title: 'B', agents: ag('idle', 2), unread: 0, progress: { value: 0, label: 'ctx 40% · #6 BLOCKED · 0/4 · Waiting on vendor' } },
+    { id: 'many', title: 'C', agents: ag('idle', 3), unread: 0, progress: { value: 0, label: '3 tasks · #9 APPROVAL' } },
+  ];
+  const sb = await load(ws);
+  assert.equal(sb.attentionOf(ws[0]), null, 'title words are not states');
+  assert.equal(sb.attentionOf(ws[1]).label, 'BLOCKED');
+  assert.equal(sb.attentionOf(ws[2]).label, 'APPROVAL');
+});

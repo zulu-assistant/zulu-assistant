@@ -18,7 +18,7 @@ const shapes = (command) => [
   { session_id: 's', cwd: ROOT, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },           // command last → `"}`
   { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command, timeout: 120000, description: 'y' }, cwd: ROOT },
 ];
-const hook = (obj) => spawnSync('sh', [HOOK], { input: JSON.stringify(obj), env, encoding: 'utf8' });
+const hook = (obj) => spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify(obj), env, encoding: 'utf8' });
 const decision = (obj) => { const r = hook(obj); return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecision : 'pass'; };
 
 const GATED = [
@@ -41,7 +41,17 @@ const GATED = [
   'curl -X POST https://slack.com/api/chat.postMessage -d @msg.json',
   'gh secret set TOKEN',
 ];
-const FREE = ['git status', 'ls -la', 'node --test', 'gh pr view 5', 'npm test', 'python3 scripts/archive.py'];
+// #400: the test-stamp wrapper never hides a gated action — the fast path greps the whole argv
+GATED.push(
+  'scripts/task.sh test 400 -- node rename.mjs --commit',
+  'scripts/task.sh test 400 -- gh pr merge 5 --merge',
+  'scripts/task.sh test 400 -- git push origin main',
+);
+const FREE = ['git status', 'ls -la', 'node --test', 'gh pr view 5', 'npm test', 'python3 scripts/archive.py',
+  'scripts/task.sh test 400 -- node --test test/x.test.mjs',
+  // #401: the worktree verbs are plain git — not gated (MC asked for proof)
+  'git -C "/w/my repo" worktree add --no-track -b task/5-x "/w/wt-5" origin/main', 'git -C "/w/my repo" worktree remove "/w/wt-5"',
+  'scripts/task.sh worktree 5', 'scripts/task.sh worktree-clean 5'];
 
 for (const command of GATED) {
   test(`real hook JSON, board down: denied — ${command}`, () => {

@@ -28,9 +28,12 @@ test('installing and removing the gate hook is idempotent and leaves other hooks
   const tpl = JSON.parse(read('examples/claude/guardrails-hooks.json.tmpl').replace(/__REPO__/g, '/r').replace(/__NODE_BIN_DIR__/g, '/n'));
   const mine = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'other-guard' }] }] } };
   const once = mergeHooks(mine, tpl); const twice = mergeHooks(once.settings, tpl);
-  assert.equal(once.added, 2); assert.equal(twice.added, 0);
-  const gone = removeHooks(once.settings, 'scripts/gate-hook.sh');
-  assert.equal(gone.removed, 2);
+  assert.equal(once.added, 3); assert.equal(twice.added, 0);          // the gate hook twice, and the settings-change hook next to it
+  const half = removeHooks(once.settings, 'scripts/gate-hook.sh');
+  assert.equal(half.removed, 2);
+  // the installer's --remove takes the settings-change hook out as well (scripts/guardrails-install.sh)
+  const gone = removeHooks(half.settings, 'scripts/gate-config-hook.sh');
+  assert.equal(gone.removed, 1);
   assert.deepEqual(gone.settings, mine);
   const codex = JSON.parse(read('examples/codex/guardrails-hooks.json.tmpl'));
   assert.ok(codex.hooks.PreToolUse[0].hooks[0].timeout >= 1000, 'codex timeouts are milliseconds');
@@ -49,6 +52,15 @@ test('guardrails card: amber while waiting or the hook is missing, red only for 
   assert.equal(gateCard({ status: 'ok', detail: 'enforce', at: now }, now).status, 'ok');
   assert.equal(gateCard({ status: 'warn', detail: '1 waiting', at: now }, now).status, 'warn');
   assert.equal(gateCard({ status: 'failed', detail: 'hook: claude MISSING', at: now }, now).status, 'warn');
+  // the integrity check (src/gate-integrity.mjs) decides the colour too: red for a changed gate file or a dropped hook,
+  // amber while the checkout is behind, and what is wrong is said first
+  const integ = (status, detail) => gateCard({ status: 'ok', detail: 'enforce', integrity: { status, detail }, at: now }, now);
+  assert.deepEqual([integ('ok', 'gate files match abc1234 (22 files)').status, integ('ok', 'gate files match abc1234 (22 files)').detail], ['ok', 'enforce · gate files match abc1234 (22 files)']);
+  assert.deepEqual([integ('down', 'gate files differ from abc1234: src/gates.mjs').status, integ('down', 'gate files differ from abc1234: src/gates.mjs').detail], ['failed', 'gate files differ from abc1234: src/gates.mjs · enforce']);
+  assert.equal(integ('warn', 'gate files are behind by 1 commit (4 min)').status, 'warn');
+  assert.equal(integ('unknown', 'gate files not checked: the remote head has not been read').status, 'ok', 'a check that cannot run is said, not coloured');
+  assert.equal(gateCard({ status: 'warn', detail: '1 waiting', integrity: { status: 'ok', detail: 'x' }, at: now }, now).status, 'warn');
+  assert.equal(gateCard({ status: 'ok', detail: 'enforce', integrity: { status: 'down', detail: 'x' }, at: now - 11 * 60e3 }, now).status, 'stale');
   assert.equal(gateCard({ status: 'failed', detail: 'policy invalid (x)', at: now }, now).status, 'failed');
   assert.equal(gateCard({ status: 'ok', detail: '', at: now - 11 * 60e3 }, now).status, 'stale');
 });

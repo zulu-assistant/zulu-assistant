@@ -1,10 +1,11 @@
 {
-  "_doc": "Agent Mesh switches (Zulu Assistant example; copy to overlay/config/mesh.json). autoRename: the board types `/rename <title-slug>` into idle Claude panes whose session name drifted from their workspace title. chrome: keep cmux workspace colors/descriptions + the task/ctx pills in line with the directory and ledger (hand-set values always win). Groups are CLI-only (mesh-cli.mjs sync-groups). domains: the kinds of work your agents own, in sidebar order ({id, label, color, icon}; codex panes share one violet). repoDomains: repo path (~ or glob) \u2192 domain; scripts/cmux-chrome-config.mjs tints matching workspace groups.",
+  "_doc": "Agent Mesh switches (Zulu Assistant example; copy to overlay/config/mesh.json). autoRename: the board types `/rename <title-slug>` into idle Claude panes whose session name drifted from their workspace title. chrome: keep cmux workspace colors/descriptions + the task/ctx pills in line with the directory and ledger (hand-set values always win). titleInLabel (default true): the progress label ends with the task title (cut at 48 chars) so a custom sidebar can show it; false leaves it out. Groups are CLI-only (mesh-cli.mjs sync-groups). domains: the kinds of work your agents own, in sidebar order ({id, label, color, icon}; codex panes share one violet). repoDomains: repo path (~ or glob) → domain; scripts/cmux-chrome-config.mjs tints matching workspace groups.",
   "autoRename": false,
   "renameMaxPerPass": 3,
   "renameCooldownMin": 10,
   "chrome": false,
   "chromeMaxPerPass": 6,
+  "titleInLabel": true,
   "domains": [
     {
       "id": "ops",

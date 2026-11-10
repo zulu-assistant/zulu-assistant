@@ -157,9 +157,13 @@ const git = (dir, args, run = execFile) => new Promise((resolve) => {
 const mtime = async (f) => { try { return (await stat(f)).mtimeMs; } catch { return 0; } };
 
 /** graphify's post-commit hook re-extracts CODE files only, so a commit touching nothing but
- * docs (CLAUDE.md, POLICY.md…) never moves graph.json and must not count as "behind" (#286). */
+ * docs (CLAUDE.md, POLICY.md…) never moves graph.json and must not count as "behind" (#286),
+ * nor one touching only data/binary files graphify never extracts (#426: a repo whose last commit
+ * touched only an .xlsx read as behind forever). Case-insensitive: .XLSX and .PNG are the same files. */
+export const NON_CODE_EXTS = ['md', 'markdown', 'txt', 'rst',
+  'xlsx', 'xls', 'csv', 'tsv', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'pdf', 'zip', 'ics', 'plist', 'lock'];
 export const DOC_EXCLUDES = [':(exclude)graphify-out',
-  ...['md', 'markdown', 'txt', 'rst'].map((ext) => `:(exclude,glob)**/*.${ext}`)];
+  ...NON_CODE_EXTS.map((ext) => `:(exclude,glob,icase)**/*.${ext}`)];
 
 /** Facts about one repo's graph: { dir, graphAt, commitAt, hook, behind }. */
 export async function graphFacts(dir, { now = Date.now(), run } = {}) {

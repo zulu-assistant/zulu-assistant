@@ -94,6 +94,14 @@ Canonical files live in `system/cmux/`:
   runner log;
 - `sidebars/phosphor.js` — a green-on-black custom **right** sidebar with two modes: ATTENTION
   (default: needs input, approvals, blocked, unread; quiet rows folded per group) and ALL.
+- `sidebars/ledger-node.js`: optional. It shows the selected workspace's ledger task: id, title, status, checklist and owner.
+  It is installed next to phosphor but never selected. Pick it with
+  `cmux right-sidebar set custom ledger-node --no-focus`.
+  - It reads the task from the progress label the board writes. The label ends with the task title, cut at 48 characters.
+  - Set `titleInLabel: false` in `overlay/config/mesh.json` to leave titles out of cmux.
+  - When an agent has several tasks, the label still names one **headline** task, for example `22 tasks · #344 BLOCKED · 0/4 · <title>`. The panel shows that task and "and 21 more".
+    - The headline is the agent's guardrails focus. Without a focus, it's the task waiting on you, then the most recently updated, then the oldest.
+    - When the focus isn't the task waiting on you, the waiting one stays in the label ahead of it, so phosphor's ATTENTION still sees it. The panel then adds "also #344 BLOCKED".
 
 ```bash
 node scripts/cmux-tier1-install.mjs            # dry run

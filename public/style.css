@@ -97,6 +97,14 @@ h1 {
 .agent-tile.l-idle .agent-state { color: var(--ink-3); }
 .agent-tile.l-input { border-color: #6b6b00; box-shadow: var(--glow-amber); }
 .agent-tile.l-input .agent-state { color: var(--status-warning); }
+/* status taxonomy (on): the state class wins over the hook lifecycle class; unsure = dimmer, never colour alone */
+.agent-tile.st-working .agent-state { color: #00e5e5; }
+.agent-tile.st-idle .agent-state { color: var(--ink-3); }
+.agent-tile.st-stopped .agent-state { color: var(--ink-3); }
+.agent-tile.st-input { border-color: #6b6b00; box-shadow: var(--glow-amber); }
+.agent-tile.st-input .agent-state, .agent-tile.st-unknown .agent-state { color: var(--status-warning); }
+.agent-tile.st-unsure .agent-state { opacity: .8; }
+.agent-state .st-src { font-weight: 400; letter-spacing: .04em; color: var(--ink-3); }
 .agent-tile.a-closed { opacity: .55; }
 
 /* directory on session tiles: mesh address + owned domains */
@@ -140,29 +148,83 @@ a.tile { text-decoration: none; color: inherit; }
 .task-meta { font-size: 10px; color: var(--ink-2); }
 .task-policy { font-size: 10px; color: var(--status-warning); }
 .task-last { font-size: 10.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task-actions { display: flex; gap: 6px; margin-top: 4px; }
-/* guardrails: a pending gate — the exact command, wrapped, never truncated (it is what the owner approves) */
+.task-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+/* "not what I said" (a row with a recorded pane answer) takes its own line, so the two decisions keep their size in a narrow column */
+.task-actions button.act.act-disown { flex: 1 0 100%; }
+/* guardrails: a pending gate — buttons first, then the command; a long one folds, unfolded = the exact text, wrapped (#444) */
 .gate { border: 1px solid #5c5c00; border-radius: 3px; padding: 6px 8px; margin-top: 4px; display: flex; flex-direction: column; gap: 3px; box-shadow: var(--glow-amber); }
+/* ?item= from the phone relay (#415): the row the push named, outlined in light (never armed) */
+.item-focus { outline: 2px solid var(--ink, #28FE14); outline-offset: 2px; }
 .gate-top { display: flex; gap: 8px; align-items: baseline; }
 .gate-chip { color: var(--status-warning); border-color: #5c5c00; flex: none; }
 .gate-label { color: var(--ink-bright); font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
 .gate-cmd { margin: 0; font: inherit; font-size: 11px; color: var(--ink-bright); background: #001400; border-radius: 2px; padding: 4px 6px;
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; max-height: none; }
+.gate-cmd-toggle { all: unset; cursor: pointer; font-size: 10px; letter-spacing: .06em; color: var(--status-warning); padding: 2px 0; }
+.gate-cmd-toggle:focus-visible { outline: 1px solid var(--accent); }
 .gate-meta { font-size: 10px; color: var(--ink-2); overflow-wrap: anywhere; }
 .gate-meta.gate-again { color: var(--status-warning); }   /* "you approved this before; it expired" */
+/* a pane answer an agent recorded: amber, and marked off, because it is the agent's record and not yet a decision */
+.gate-meta.gate-heard { color: var(--status-warning); border-left: 2px solid var(--status-warning); padding-left: 6px; margin: 2px 0; }
+/* Guardrails-only install (SETTINGS.profile 'guardrails'): what is not running is not drawn */
+body.profile-guardrails #timeline-row, body.profile-guardrails #agents-row,
+body.profile-guardrails #tile-docker, body.profile-guardrails #tile-agents, body.profile-guardrails .spark-wrap { display: none; }
+.gate-meta.gate-nowake { color: var(--ink-3); }
+/* row context (1.3): what kind of call this is, from the class and the policy's lists; then the agent's own words, labelled */
+.gate-top { flex-wrap: wrap; }
+.chip.ctx-chip { color: var(--status-warning); border-color: #5c5c00; flex: none; font-size: 9.5px; }
+.gate-words { color: var(--ink-3); font-style: italic; }
+.gate-words-label { font-style: normal; letter-spacing: .04em; color: var(--ink-2); }
+.gate-receipt { color: inherit; text-decoration: underline dotted; }
 /* the owner's decisions, pinned while anything waits (same rows as WORK; amber under-glow = warn) */
 .decisions { position: sticky; top: 0; z-index: 20; background: var(--surface); border: 1px solid #5c5c00; border-radius: 4px;
   box-shadow: var(--glow-amber); padding: 8px 10px; margin-bottom: 14px; max-height: 60vh; overflow-y: auto; }
 .decisions h2 { font-size: 11px; letter-spacing: .2em; color: var(--status-warning); margin-bottom: 8px; font-weight: 700; }
 .decisions-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; }
 .decisions-list .task { margin-bottom: 0; }
-@media (max-width: 520px) { .decisions-list { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .decisions-list { grid-template-columns: minmax(0, 1fr); } }   /* minmax: a no-wrap title must not widen the column past the buttons (#444) */
+/* everything snoozed: one dim line above the snoozed fold, no amber glow */
+.decisions-empty { display: none; font-size: 11px; letter-spacing: .12em; color: var(--ink-3); }
+.decisions.is-empty { border-color: var(--ink-3); box-shadow: none; padding: 5px 10px; }
+.decisions.is-empty h2, .decisions.is-empty .decisions-list { display: none; }
+.decisions.is-empty .decisions-empty { display: block; }
+/* Dock (#450): this section is only blocks + snoozed, so no glow, never sticky; the decisions sit in NEEDS ATTENTION */
+body.dock .decisions { position: static; max-height: none; overflow: visible; border-color: var(--ink-3); box-shadow: none; margin-bottom: 10px; }
+body.dock .decisions-list { margin-bottom: 8px; }
+/* attention ring (SETTINGS.attention.snooze 'on'): one row per task, expand on click, snooze fold */
+.att-row { border: 1px solid #5c5c00; border-radius: 3px; padding: 5px 7px; background: var(--card); }
+.att-row.is-open { grid-column: 1 / -1; }
+.att-row.is-back { box-shadow: var(--glow-amber); }
+.att-head { all: unset; cursor: pointer; display: flex; gap: 7px; align-items: baseline; width: 100%; font-size: 12px; }
+.att-head:focus-visible { outline: 1px solid var(--accent); }
+.att-head .task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-bright); }
+.att-caret { color: var(--status-warning); width: 10px; }
+.att-items { color: var(--status-warning); font-size: 11px; white-space: nowrap; }
+.chip.att-n { color: var(--status-warning); border-color: #5c5c00; }
+.chip.att-back { color: var(--accent); border-color: var(--accent); }
+.att-snooze { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 4px; }
+.att-snooze .act, .att-snoozed-item .act { font-size: 10px; padding: 1px 6px; }
+.att-note { font-size: 10px; color: var(--ink-3); letter-spacing: .06em; }
+.att-row .task { margin: 6px 0 0; }
+.decisions-fold:empty { display: none; }
+.att-fold { margin-top: 8px; color: var(--ink-3); font-size: 11px; }
+.att-fold summary { cursor: pointer; letter-spacing: .12em; }
+.att-blocks .att-row { margin-top: 6px; }
+.att-none { font-size: 11px; letter-spacing: .12em; color: var(--ink-3); }
+.att-snoozed-item { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; padding: 3px 0 0 12px; color: var(--ink-3); }
+.att-snoozed-item .task-id { color: var(--ink-3); }
+body.dock .att-items { display: none; }   /* the ~360px column: id, title, count, BACK */
 .task.t-approval { border-color: #6b6b00; box-shadow: var(--glow-amber); }
 .task.t-approval .task-chip { color: var(--status-warning); border-color: #5c5c00; }
 .task.t-blocked { border-color: #7a4a1d; }
 .task.t-blocked .task-chip { color: var(--status-serious); border-color: #7a4a1d; }
 .task.t-working .task-chip { color: #00e5e5; border-color: #0d5f5f; }
 .task.t-open .task-chip { color: var(--ink-2); }
+.task.t-done .task-chip { color: var(--status-ok); }
+/* completion packet: one evidence line on a closed task; STALE = amber chip (glyph + label) */
+.task-evidence { font-size: 10.5px; color: var(--ink-2); margin-top: 4px; overflow-wrap: anywhere; }
+.task-evidence .ev-label { color: var(--accent); letter-spacing: .08em; }
+.task-evidence.is-stale .ev-stale { color: var(--status-warning); border-color: #5c5c00; }
 button.act.act-approve { color: var(--status-ok); border-color: #0d5f0d; }
 button.act.act-approve:hover { color: var(--accent); border-color: var(--accent); box-shadow: var(--glow-green); }
 button.act.act-decline { color: var(--status-serious); border-color: #7a4a1d; }

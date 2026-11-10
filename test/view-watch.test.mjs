@@ -82,3 +82,32 @@ test('maybeViewWatch: reads when due, stores rows not keys, logs readable/unread
   assert.equal(calls, 2, 'no secrets = no fetch');
   assert.equal(JSON.parse(await readFile(file, 'utf8'))['queue:ops'].error, 'no HEARTBEAT_URL/KEY in secrets');
 });
+
+test('a count-only review view: several zero limits, numeric show columns, a freshness stamp', () => {
+  const review = { label: 'review:ops', name: 'Items needing review', view: 'review_status', everyMinutes: 5,
+    max: { late_jobs: 0, unassigned: 0, check_unavailable: 0 }, maxAgeMinutes: { checked_at: 10 },
+    show: ['late_items', 'oldest_age'] };
+  const row = { late_jobs: 0, unassigned: 0, check_unavailable: 0, checked_at: new Date(now - 3 * M).toISOString(), late_items: 0, oldest_age: null };
+  const ok = viewCard(review, { at: now, row }, now);
+  assert.equal(ok.status, 'ok');
+  assert.match(ok.detail, /late_items 0 · oldest_age never/);
+  const bad = viewCard(review, { at: now, row: { ...row, unassigned: 2, checked_at: new Date(now - 11 * M).toISOString() } }, now);
+  assert.equal(bad.status, 'warn');
+  assert.match(bad.detail, /^unassigned 2 > 0 · checked_at 11m ago > 10m — /);
+});
+
+test('maxAgeIfSet: an "oldest waiting" stamp ambers only when set and too old; ruled columns are not repeated by show', () => {
+  const e = { label: 'queue:ops', name: 'Queue', view: 'q', max: { unavailable: 0, waiting: 0 }, maxAgeIfSet: { oldest_waiting_at: 60 },
+    show: ['waiting', 'reserved'] };
+  const base = { unavailable: 0, waiting: 0, reserved: 0, oldest_waiting_at: null };
+  const none = viewCard(e, { at: now, row: base }, now);
+  assert.equal(none.status, 'ok', 'nothing waiting = no stamp = fine');
+  assert.match(none.detail, /oldest_waiting_at none/);
+  assert.equal((none.detail.match(/waiting 0/g) || []).length, 1, 'a max column is not listed again by show');
+  e.max = { unavailable: 0 };
+  const fresh = viewCard(e, { at: now, row: { ...base, waiting: 3, oldest_waiting_at: new Date(now - 30 * M).toISOString() } }, now);
+  assert.equal(fresh.status, 'ok');
+  const old = viewCard(e, { at: now, row: { ...base, waiting: 3, oldest_waiting_at: new Date(now - 90 * M).toISOString() } }, now);
+  assert.equal(old.status, 'warn');
+  assert.match(old.detail, /^oldest_waiting_at 2h ago > 60m — /);
+});

@@ -6,11 +6,11 @@
 // Redacted: every value in data/secrets.env, emails, tokens/keys/JWTs, phone
 // numbers, private + Tailscale IPs, your home path, user and host names. Logins
 // are reported as yes/no only.
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ROOT, run, engineStatus, shellEnv, readStateSync, summarize } from '../src/setup.mjs';
-import { parseEnv } from '../src/config.mjs';
+import { parseEnv, writePrivate } from '../src/config.mjs';
 import { pathToFileURL } from 'node:url';
 import { realpathSync } from 'node:fs';
 
@@ -74,7 +74,7 @@ async function main() {
   for (const f of ['server.log', 'server.err.log', 'demo.log']) add(`logs/${f} (last 80 lines)`, await tail(path.join(ROOT, 'logs', f)));
 
   const out = path.join(ROOT, 'data', `doctor-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.txt`);
-  await writeFile(out, R(`# zulu doctor\n\n${sec.join('\n')}`), { mode: 0o600 });
+  await writePrivate(out, R(`# zulu doctor\n\n${sec.join('\n')}`));
   console.log(`wrote ${out.replace(os.homedir(), '~')} (redacted; nothing was uploaded)`);
   console.log('read it before attaching it to an issue — remove anything you would rather not share');
 }

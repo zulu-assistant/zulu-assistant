@@ -1,5 +1,5 @@
 {
-  "_doc": "Guardrails policy (docs/GUARDRAILS.md). Gated tool calls wait for the owner on the ledger and run once on approval. mode: enforce | observe (log only) | off. enforceFor: agent names, or * for all. standing: true = a program go on the task approves this class without a per-action tap (docs/GUARDRAILS.md). lists: owner-specific names the rules refer to with @name.",
+  "_doc": "Guardrails policy (docs/GUARDRAILS.md). Gated tool calls wait for the owner on the ledger and run once on approval. mode: enforce | observe (log only) | off. enforceFor: agent names, or * for all. standing: true = a program go on the task approves this class without a per-action tap (docs/GUARDRAILS.md). lists: owner-specific names the rules refer to with @name. checks: what else the classifier reads, each off | observe | enforce (observe = the call passes and the reading says it would be held; a missing key means observe).",
   "version": 1,
   "mode": "enforce",
   "enforceFor": [
@@ -9,6 +9,11 @@
     "ttlMinutes": 120,
     "approver": "owner",
     "requireDryRun": false
+  },
+  "checks": {
+    "inlineBodies": "observe",
+    "renamedBins": "observe",
+    "selfProtect": "observe"
   },
   "classes": [
     {
@@ -113,6 +118,17 @@
           ],
           "unlessLabels": "@paidOrOutbound"
         }
+      ]
+    },
+    {
+      "id": "upgrade",
+      "label": "Upgrade or roll back this install",
+      "rules": [
+        { "bin": "zulu", "args": ["upgrade"], "unlessFlags": ["--check"] },
+        { "bin": "zulu", "args": ["rollback"] },
+        { "scriptIn": ["**/upgrade.mjs"], "unlessFlags": ["--check"] },
+        { "scriptIn": ["**/install.sh"], "args": ["upgrade"], "unlessFlags": ["--check"] },
+        { "scriptIn": ["**/install.sh"], "args": ["rollback"] }
       ]
     },
     {
@@ -233,7 +249,8 @@
             "repo",
             "delete"
           ]
-        }
+        },
+        { "bin": "git", "args": ["clean"], "flagsAny": ["-x", "-X"], "unlessFlags": ["-n", "--dry-run"], "check": "selfProtect" }
       ]
     },
     {
@@ -285,7 +302,53 @@
             "task",
             "gate"
           ]
-        }
+        },
+        {
+          "scriptIn": [
+            "**/task.sh"
+          ],
+          "flagsAny": [
+            "--signed"
+          ]
+        },
+        {
+          "scriptIn": [
+            "**/agent-send.sh"
+          ],
+          "flagsAny": [
+            "--signed"
+          ]
+        },
+        {
+          "scriptIn": [
+            "**/mesh-cli.mjs"
+          ],
+          "flagsAny": [
+            "--signed"
+          ]
+        },
+        { "scriptIn": ["**/install.sh"], "flagsAny": ["--guardrails"], "unlessFlags": ["--dry-run"] },
+        { "scriptIn": ["**/install.sh"], "args": ["guardrails"], "unlessFlags": ["--dry-run"] },
+        { "bin": "zulu", "flagsAny": ["--guardrails"], "unlessFlags": ["--dry-run"] },
+        { "bin": "zulu", "args": ["guardrails"], "unlessFlags": ["--dry-run"] },
+        { "pathGuard": ["@gateCode", "@guardGate"], "check": "selfProtect" },
+        { "bin": "git", "args": ["config"], "mentions": ["core.", "alias.", "--global", "--system", "--file", "-f", "--edit", "-e", "remote.", "url.", "branch.", "include", "filter.", "diff.", "merge.", "pager.", "credential.", "http.", "protocol.", "submodule.", "gpg.", "sequence.", "interactive.", "uploadpack.", "receive.", "fetch.", "pull.", "init.", "safe.", "extensions."], "when": "gitConfigWrite", "check": "selfProtect" },
+        { "bin": "git", "mentions": ["core.hookspath=", "alias."], "when": "gitDashC", "check": "selfProtect" },
+        { "bin": "git", "argsAny": ["update-ref", "symbolic-ref", "fetch", "push"], "mentions": ["refs/remotes/", "refs/heads/main", "refs/heads/master", "refs/heads/origin/", "refs/tags/origin/", "refs/replace/"], "when": "gitRefWrite", "check": "selfProtect" },
+        { "bin": "git", "args": ["remote"], "argsAny": ["set-url", "add", "rename", "remove", "rm", "set-head", "set-branches"], "check": "selfProtect" },
+        { "bin": "git", "argsAny": ["pull", "merge", "rebase", "cherry-pick", "revert", "apply", "am", "checkout", "switch", "reset", "stash", "restore", "branch", "rm", "mv", "read-tree", "bisect", "fetch", "tag", "update-ref", "symbolic-ref", "update-index", "checkout-index", "clean", "submodule", "replace"], "when": "liveCheckout", "check": "selfProtect" },
+        { "bin": "kill", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "pkill", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "killall", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "xargs", "argsAny": ["kill"], "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "launchctl", "argsAny": ["kill", "stop", "remove", "reboot"], "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "fuser", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "kill-port", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "reboot", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "shutdown", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "halt", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "poweroff", "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "osascript", "mentions": ["restart", "shut down", "shutdown", "log out", "logout"], "when": "boardProcess", "check": "selfProtect" }
       ]
     }
   ],
@@ -310,6 +373,59 @@
       "<repo>/examples/policy.json",
       "~/.claude/settings.json",
       "~/.codex/hooks.json"
+    ],
+    "gateCode": [
+      "<live>/scripts/gate-hook.sh",
+      "<live>/scripts/gate-hook.mjs",
+      "<live>/scripts/gate-triggers.default",
+      "<live>/scripts/guardrails-install.sh",
+      "<live>/scripts/merge-hooks.mjs",
+      "<live>/scripts/env.sh",
+      "<live>/src/gates.mjs",
+      "<live>/src/gate-service.mjs",
+      "<live>/src/gate-ledger.mjs",
+      "<live>/src/request-guard.mjs",
+      "<live>/src/guard.mjs",
+      "<live>/src/caller.mjs",
+      "<live>/src/tasks.mjs",
+      "<live>/src/config.mjs",
+      "<live>/server.mjs",
+      "<live>/public/**",
+      "<live>/src/gate-integrity.mjs",
+      "<live>/scripts/gate-config-hook.sh",
+      "<live>/scripts/gate-config-hook.mjs"
+    ],
+    "guardGate": [
+      "<live>/overlay/config/agents.json",
+      "<live>/config/agents.json",
+      "<live>/data/local.env",
+      "<live>/data/tasks/**",
+      "**/.claude/settings.json",
+      "**/.claude/settings.local.json",
+      "~/.claude.json",
+      "~/.codex/config.toml",
+      "**/.codex/hooks.json",
+      "/Library/Application Support/ClaudeCode/**",
+      "/etc/codex/**",
+      "~/.zshrc",
+      "~/.zshenv",
+      "~/.zprofile",
+      "~/.zlogin",
+      "~/.bashrc",
+      "~/.bash_profile",
+      "~/.profile",
+      "~/.gitconfig",
+      "**/.git/hooks/**",
+      "**/.git/config",
+      "<live>/.git/HEAD",
+      "<live>/.git/index",
+      "<live>/.git/refs/**",
+      "<live>/.git/packed-refs",
+      "<live>/.git/info/**",
+      "<live>/.gitattributes",
+      "~/.config/cmux/**",
+      "~/.cmuxterm/claude-hook-sessions.json",
+      "~/.cmuxterm/codex-hook-sessions.json"
     ]
   }
 }

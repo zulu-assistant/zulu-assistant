@@ -125,6 +125,28 @@ test('focus: claim/start never override a focus the agent set on a live task; th
   assert.deepEqual(focusOf({ x: 9 }, 'x'), { task: 9, explicit: false });          // older entries
 });
 
+test('focus: Mission Control\'s focus counts on a live task it does not own; another agent\'s does not', async () => {
+  for (const [who, lands] of [['mission-control', true], ['builder', false]]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'gate mc focus-'));
+    const ledger = createLedger(path.join(dir, 'tasks'));
+    await writeFile(path.join(dir, 'policy.json'), JSON.stringify(DEFAULT_POLICY));
+    const svc = createGateService({ root: dir, ledger, policyFile: path.join(dir, 'policy.json'), stateDir: path.join(dir, 'guardrails'), ownerId: OWNER.id,
+      identifyWs: async () => who, git: () => null, home: '/home/u', prInfo: async () => null });
+    const other = await ledger.create({ title: 'theirs', requester: who, owner: 'resident' });
+    await ledger.create({ title: 'mine 1', requester: 'helper', owner: who });
+    await ledger.create({ title: 'mine 2', requester: 'helper', owner: who });
+    await svc.setFocus(who, other.id);
+    const r = await svc.check({ event: 'pre', tool: 'Bash', command: 'gh pr merge 9 --merge', cwd: '/work/app', workspaceId: 'W1' });
+    if (lands) assert.equal(r.task, other.id, `${who}: ${JSON.stringify(r)}`);
+    else assert.match(r.reason || '', /live tasks and no focus/, `${who}: ${JSON.stringify(r)}`);
+    if (lands) {                                                   // a closed focus no longer counts
+      await ledger.update(other.id, { op: 'cancel', actor: who });
+      const r2 = await svc.check({ event: 'pre', tool: 'Bash', command: 'gh pr merge 10 --merge', cwd: '/work/app', workspaceId: 'W1' });
+      assert.match(r2.reason || '', /live tasks and no focus/);
+    }
+  }
+});
+
 test('a merge gate names its PR (title, branches, repo)', async () => {
   const s = await service({ prInfo: async () => ({ number: 45, title: 'gate probe', head: 'gate-probe-head', base: 'gate-probe-base', repo: 'acme/app' }) });
   await s.ledger.create({ title: 'x', requester: 'helper', owner: 'builder' });

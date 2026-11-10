@@ -54,8 +54,29 @@ test('ownerPill: resident with several tasks shows the count, colored by the mos
   const p = ownerPill([task(1, 'open'), task(2, 'blocked'), task(3, 'in_progress')]);
   assert.equal(p.pill.value, '3 tasks · #2 BLOCKED');
   assert.equal(p.pill.color, '#FF8C3C');
-  assert.deepEqual(p.progress, { value: 0, label: '3 tasks · #2 BLOCKED' });
+  assert.deepEqual(p.progress, { value: 0, label: '3 tasks · #2 BLOCKED · 0/4' }, 'the urgent task is the headline; its checklist rides along');
   assert.equal(ownerPill([task(1, 'open'), task(3, 'in_progress')]).pill.value, '2 tasks');
+});
+
+test('ownerPill: an N-task label always names a headline task (#416 live reading)', async () => {
+  const { headlineTask } = await import('../src/chrome.mjs');
+  const t = (id, status, extra = {}) => ({ ...task(id, status), title: `task ${id}`, ...extra });
+  // no focus, nothing urgent: the most recently updated task, not "11 tasks" with nothing
+  const quiet = [t(1, 'open', { updated_at: '2026-01-05T10:00:00Z' }), t(2, 'in_progress', { updated_at: '2026-01-05T12:00:00Z', checklist: { a: true, b: false } }), t(3, 'claimed')];
+  assert.equal(headlineTask(quiet).id, 2);
+  assert.equal(ownerPill(quiet).progress.label, '3 tasks · #2 WORKING · 1/2 · task 2');
+  assert.equal(ownerPill(quiet).progress.value, 0.5);
+  assert.equal(ownerPill(quiet).pill.value, '3 tasks', 'the pill itself is unchanged');
+  // urgent and no focus: the urgent task is the headline (one token, no repeat)
+  const busy = [...quiet, t(9, 'blocked', { blocked_on: ['owner'] })];
+  assert.equal(ownerPill(busy).progress.label, '4 tasks · #9 BLOCKED · 0/4 · task 9');
+  // a focus elsewhere wins the headline; the urgent token stays first for phosphor's ATTENTION
+  const f = ownerPill(busy, Date.now(), { focus: 3 }).progress.label;
+  assert.equal(f, '4 tasks · #9 BLOCKED · #3 CLAIMED · 0/4 · task 3');
+  assert.match(f, /#\d+ BLOCKED\b/);
+  // a focus that isn't one of these tasks is ignored; ties go to the oldest
+  assert.equal(headlineTask([t(5, 'open'), t(4, 'open')], 99).id, 4);
+  assert.equal(ownerPill(busy, Date.now(), { titleInLabel: false }).progress.label, '4 tasks · #9 BLOCKED · 0/4');
 });
 
 test('groupPlan: one group per domain with ≥2 members, MC/resident anchors, codex joins its domain', () => {
@@ -166,4 +187,20 @@ test('inputPrompts: Claude from the hook lifecycle, Codex from an on-screen dial
   const classify = (out) => ({ state: out === 'DIALOG' ? 'dialog' : 'ready' });
   const p = await inputPrompts(entries, map, { run, classify });
   assert.deepEqual([...p], [['W1', 'permission'], ['W3', 'approval']]);
+});
+
+test('task title rides last in the progress label (#416): one line, no separators, cut at 48; switchable', async () => {
+  const { labelTitle, TITLE_MAX } = await import('../src/chrome.mjs');
+  const t = { id: 7, status: 'in_progress', checklist: { a: true, b: false }, title: 'Ship the widget · phase 2\nwith notes' };
+  assert.equal(ownerPill([t]).progress.label, '#7 WORKING · 1/2 · Ship the widget - phase 2 with notes');
+  assert.equal(ownerPill([t], Date.now(), { titleInLabel: false }).progress.label, '#7 WORKING · 1/2');
+  assert.equal(ownerPill([t]).pill.value, '#7 WORKING', 'the pill itself never carries the title');
+  const long = labelTitle('x'.repeat(80));
+  assert.equal(long.length, TITLE_MAX); assert.ok(long.endsWith('…'));
+  assert.equal(ownerPill([{ ...t, title: '' }]).progress.label, '#7 WORKING · 1/2', 'no title, no trailing separator');
+  const two = ownerPill([t, { id: 8, status: 'open', title: 'other' }]).progress.label;
+  assert.equal(two, '2 tasks · #7 WORKING · 1/2 · Ship the widget - phase 2 with notes', 'several tasks: the headline task carries its title');
+  // the ledger-node sidebar's parse reads id, status, checklist and title from this exact shape
+  const m = ownerPill([t]).progress.label.match(/#(\d+) ([A-Z]+)(?: · (\d+\/\d+))?(?: · (.+))?/);
+  assert.deepEqual(m.slice(1), ['7', 'WORKING', '1/2', 'Ship the widget - phase 2 with notes']);
 });

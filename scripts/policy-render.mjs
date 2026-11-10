@@ -32,17 +32,28 @@ const ruleText = (r) => {
   if (r.pathAny) bits.push(`reading or writing ${r.pathAny.join(', ')}`);
   if (r.pathWrite) bits.push(`writing ${r.pathWrite}`);
   if (r.textAny) bits.push(`a command containing ${r.textAny.map((t) => `\`${t}\``).join(' / ')}`);
+  if (r.mentions) bits.push(`naming ${items(r.mentions)}`);
+  if (r.pathGuard) bits.push(`writing ${[].concat(r.pathGuard).join(', ')} (an edit, a redirect, or a program that writes its target)`);
+  if (r.when === 'gitConfigWrite') bits.push('(a write; reading is free)');
+  if (r.when === 'gitDashC') bits.push('as a `-c` setting for one call');
+  if (r.when === 'gitRefWrite') bits.push('(moving the local copy of a remote branch)');
+  if (r.when === 'liveCheckout') bits.push('in the live checkout, when it can leave a gate file holding something that has not landed (free: a fast-forward of the default branch from origin, a stash, a restore from the index)');
+  if (r.when === 'boardProcess') bits.push('aimed at the board');
+  if (r.check) bits.push(`· *check \`${r.check}\`*`);
   return bits.join(' ');
 };
 
 export function renderPolicy(p) {
   const d = p.defaults || {};
   const lines = [BEGIN, '', '## ENFORCED GATES (the system holds these, not the model)', '',
-    `Mode: **${p.mode || 'enforce'}**${p.enforceFor && !p.enforceFor.includes('*') ? ` for ${p.enforceFor.join(', ')} (everyone else: observe — logged, not blocked)` : ''}. ` +
+    `Mode: **${p.mode || 'enforce'}**${p.defaultMode === 'enforce' ? ` for every session, registered or not${p.observeFor?.length ? ` (observed only — logged, not blocked: ${p.observeFor.join(', ')})` : ''}` : p.enforceFor && !p.enforceFor.includes('*') ? ` for ${p.enforceFor.join(', ')} (everyone else: observe — logged, not blocked)` : ''}. ` +
     `A gated call does not run: it waits on the owner on the ledger, runs once on approval (within ${d.ttlMinutes ?? 120} min), and leaves a receipt on the task.`, ''];
   for (const c of p.classes || []) {
     lines.push(`- **${c.id}** — ${c.label}${c.requireDryRun ? ' · *dry run first, in the same task*' : ''}${c.standing ? ' · *standing: a program go on the task approves it (receipt kept)*' : ''}`);
     for (const r of c.rules || []) lines.push(`  - ${ruleText(r)}`);
+  }
+  if (p.checks && Object.keys(p.checks).length) {
+    lines.push('', `Checks (off | observe | enforce; a rule marked with a check applies only when that check is \`enforce\`, and \`observe\` only logs what it would hold): ${Object.entries(p.checks).map(([k, v]) => `\`${k}\` ${v}`).join(', ')}`);
   }
   const lists = Object.entries(p.lists || {}).filter(([, v]) => v.length);
   if (lists.length) { lines.push('', 'Lists:'); for (const [k, v] of lists) lines.push(`- @${k}: ${v.map((x) => `\`${x}\``).join(', ')}`); }

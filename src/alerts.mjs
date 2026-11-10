@@ -9,7 +9,7 @@ import { readStatsSync, digestLines } from './repo-stats.mjs';
 import { driftDigestLines, readStateSync as readDriftSync } from './release-drift.mjs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { SETTINGS, OWNER, loadSecrets } from './config.mjs';
+import { SETTINGS, OWNER, loadSecrets, CMUX_PRESENT } from './config.mjs';
 
 const STATE_FILE = fileURLToPath(new URL('../data/alert-state.json', import.meta.url));
 const ALERTING = new Set(['failed', 'overdue', 'down']);
@@ -31,7 +31,13 @@ export async function cmuxPassword() {
   return cmuxPw;
 }
 
+/** The desktop notice (pure): osascript arguments. */
+export const osaNotice = (title, subtitle, body) => ['-e', `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)} subtitle ${JSON.stringify(subtitle)}`];
+
 export async function notify(title, subtitle, body) {
+  if (process.env.ZULU_NO_NOTIFY) return 'off';                       // tests and scripted installs: no desktop notice
+  // no cmux on this Mac (a Guardrails-only install): the macOS notice is the only desk channel
+  if (!CMUX_PRESENT) return new Promise((resolve) => { execFile('osascript', osaNotice(title, subtitle, body), { timeout: 5000, killSignal: 'SIGKILL' }, () => resolve('osascript')); });
   const pw = await cmuxPassword();
   return new Promise((resolve) => {
     execFile(SETTINGS.cmuxBin, ['notify', '--title', title, '--subtitle', subtitle, '--body', body],
@@ -149,7 +155,7 @@ export function workLines(work) {
   return out;
 }
 
-export async function sendDigest(snap, strips, work = null) {
+export async function sendDigest(snap, strips, work = null, extra = []) {
   const lines = [`Fleet: ${snap.counts.ok}/${snap.counts.total} healthy · ` +
     `${snap.counts.agents} active agent session(s)`];
   const reds = snap.jobs.filter((j) => j.status !== 'ok');
@@ -166,6 +172,7 @@ export async function sendDigest(snap, strips, work = null) {
   lines.push(...digestLines(readStatsSync(), SETTINGS.repoStats));
   const drift = driftDigestLines(readDriftSync(), SETTINGS.releaseDrift, readStatsSync());
   if (drift.length) lines.push(...(SETTINGS.repoStats?.repos?.length ? [] : ['', 'GITHUB:']), ...drift);
+  if (extra?.length) lines.push(...extra);
   lines.push('', `Board: http://localhost:3210 · ${new Date().toLocaleString()}`);
   return sendEmail(`[Ops Board] Morning fleet briefing — ${snap.counts.ok}/${snap.counts.total} healthy`, lines.join('\n'));
 }

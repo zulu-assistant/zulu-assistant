@@ -12,7 +12,7 @@ LABEL="$MC_LABEL_PREFIX.chat-intake"          # from config/zulu.env via env.sh
 DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mode="${1:-}"
 if [ "$mode" = "--remove" ]; then
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  [ -n "${ZULU_NO_LAUNCHD:-}" ] || launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$DEST"; echo "removed $LABEL"; exit 0
 fi
 tmp="$(mktemp -d)"
@@ -22,6 +22,7 @@ if [ "$mode" != "--apply" ]; then
   echo "dry run: would place $DEST and bootstrap $LABEL"; cat "$tmp/$LABEL.plist"; exit 0
 fi
 mkdir -p logs
+if [ -n "${ZULU_NO_LAUNCHD:-}" ]; then cp "$tmp/$LABEL.plist" "$DEST"; echo "placed $DEST, not loaded (ZULU_NO_LAUNCHD)"; exit 0; fi
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 cp "$tmp/$LABEL.plist" "$DEST"
 launchctl bootstrap "gui/$(id -u)" "$DEST"

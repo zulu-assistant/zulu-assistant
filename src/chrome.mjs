@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { cmux, writeJsonAtomic } from './mesh.mjs';
 import { acrossWindows } from './cmux-windows.mjs';
 import { isOwner } from './config.mjs';
+import { attentionItems } from './attention.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const CHROME_STATE_FILE = path.join(ROOT, 'data', 'mesh-chrome-state.json');
@@ -121,20 +122,40 @@ export const PILL_STATES = {
  * Several → "3 tasks" (resident view) colored by the most urgent state.
  * None → clear both.
  */
-export const pillStatus = (t) => (t.status === 'blocked' && t.blocked_on?.length
+// A pending gate reads APPROVAL whatever the status says (#421).
+export const pillStatus = (t) => ((t.gates || []).some((g) => g.status === 'pending') ? 'needs_approval'
+  : t.status === 'blocked' && t.blocked_on?.length
   && t.blocked_on.every((x) => typeof x === 'string' && !isOwner(x)) ? 'waiting' : t.status);
 
-export function ownerPill(tasks, now = Date.now()) {
+/** A task title as a label segment: one line, no " · " separators, cut at TITLE_MAX (pure). */
+export const TITLE_MAX = 48;
+export function labelTitle(title) {
+  const t = String(title || '').replace(/\s+/g, ' ').replace(/ · /g, ' - ').trim();
+  return t.length > TITLE_MAX ? `${t.slice(0, TITLE_MAX - 1).trimEnd()}…` : t;
+}
+
+// snoozed (attention ring, src/attention.mjs): task id → Set of snoozed item ids. The pill gains
+// "+n snoozed"; the progress label (the only thing the custom sidebar reads) gains "+n snoozed", or
+// "⏾ n snoozed" when EVERY item this owner's tasks have waiting on the owner is snoozed — the
+// phosphor sidebar then leaves the row out of ATTENTION. The suffix rides last, after the title (#416).
+// Snoozed gates leave the "⛨ N GATES" lead.
+export function ownerPill(tasks, now = Date.now(), { titleInLabel = true, snoozed = null, focus = null } = {}) {
   const live = tasks.filter((t) => PILL_STATES[t.status]).map((t) => ({ ...t, status: pillStatus(t) }));
   if (!live.length) return { pill: null, progress: null };
-  const p = ownerPillBase(live);
+  const p = ownerPillBase(live, { titleInLabel, focus });
   if (!p.progress) return p;
+  const asleep = new Set(tasks.flatMap((t) => [...(snoozed?.get(t.id) || [])]));
+  if (asleep.size) {
+    const all = attentionItems(tasks.filter((t) => PILL_STATES[t.status]), { isOwner }).every((i) => asleep.has(i.id));
+    p.pill = { ...p.pill, value: `${p.pill.value} +${asleep.size} snoozed` };
+    p.progress = { ...p.progress, label: `${p.progress.label} · ${all ? '⏾ ' : '+'}${asleep.size} snoozed` };
+  }
   // guardrails: the custom sidebar has no network and reads only `progress`, so gate state leads the label.
   // An approval the agent hasn't run yet comes first — it has a clock on it (#343 g8 expired unused):
   // "⛨ g8 APPROVED — run it · ⛨ 2 GATES · #343 APPROVAL · 0/4"
   const all = live.flatMap((t) => t.gates || []);
   const ready = all.filter((g) => g.status === 'approved' && (!g.expires_at || Date.parse(g.expires_at) > now));
-  const waiting = all.filter((g) => g.status === 'pending').length;
+  const waiting = live.flatMap((t) => (t.gates || []).filter((g) => g.status === 'pending' && !asleep.has(`gate:${t.id}:${g.id}`))).length;
   const lead = [
     ...(ready.length ? [`⛨ ${ready.map((g) => g.id).join(', ')} APPROVED — run it`] : []),
     ...(waiting ? [`⛨ ${waiting} GATE${waiting > 1 ? 'S' : ''}`] : []),
@@ -143,25 +164,49 @@ export function ownerPill(tasks, now = Date.now()) {
   return p;
 }
 
-function ownerPillBase(live) {
+const URGENT = new Set(['needs_approval', 'blocked']);
+
+/**
+ * The task an N-task label is about (pure): the agent's guardrails focus when it is one of these
+ * tasks, else the most urgent (APPROVAL/BLOCKED, the owner's to-do), else the most recently updated
+ * (claimed, commented), else the oldest. The live reading on #416 showed "22 tasks · #344 BLOCKED"
+ * with no title, and "11 tasks" with no task at all, so the sidebar read "no ledger task".
+ */
+export function headlineTask(live, focus = null) {
+  const f = focus != null && live.find((t) => t.id === focus);
+  if (f) return f;
+  const byRank = (a, b) => PILL_STATES[b.status].rank - PILL_STATES[a.status].rank || a.id - b.id;
+  const urgent = live.filter((t) => URGENT.has(t.status)).sort(byRank);
+  if (urgent.length) return urgent[0];
+  const at = (t) => Date.parse(t.updated_at) || 0;
+  return [...live].sort((a, b) => at(b) - at(a) || a.id - b.id)[0];
+}
+
+function ownerPillBase(live, { titleInLabel = true, focus = null } = {}) {
   const worst = live.reduce((a, b) => (PILL_STATES[b.status].rank > PILL_STATES[a.status].rank ? b : a));
   const st = PILL_STATES[worst.status];
   // The progress bar doubles as the task-state carrier: custom sidebars (Tier 1)
   // can read a workspace's `progress` but NOT its status pills, so the label
-  // repeats the pill text. value = checklist fraction (0 for several tasks).
-  if (live.length === 1) {
-    const t = live[0];
+  // repeats the pill text. value = the (headline) task's checklist fraction.
+  // The title rides last (#416): a sidebar has no network, so the label is the only way it learns it.
+  const line = (t) => {
     const done = Object.values(t.checklist || {}).filter((v) => v === true).length;
     const total = Object.keys(t.checklist || {}).length || 4;
-    const value = `#${t.id} ${st.label}`;
-    return {
-      pill: { key: 'task', value, icon: st.icon, color: st.color },
-      progress: { value: Math.round((done / total) * 100) / 100, label: `${value} · ${done}/${total}` },
-    };
+    const title = titleInLabel ? labelTitle(t.title) : '';
+    return { value: Math.round((done / total) * 100) / 100, text: `#${t.id} ${PILL_STATES[t.status].label} · ${done}/${total}${title ? ` · ${title}` : ''}` };
+  };
+  if (live.length === 1) {
+    const l = line(live[0]);
+    return { pill: { key: 'task', value: `#${live[0].id} ${st.label}`, icon: st.icon, color: st.color }, progress: { value: l.value, label: l.text } };
   }
-  const extra = worst.status === 'needs_approval' || worst.status === 'blocked' ? ` · #${worst.id} ${st.label}` : '';
+  const extra = URGENT.has(worst.status) ? ` · #${worst.id} ${st.label}` : '';
   const value = `${live.length} tasks${extra}`;
-  return { pill: { key: 'task', value, icon: st.icon, color: st.color }, progress: { value: 0, label: value } };
+  // "22 tasks · #344 BLOCKED · 0/4 · <title>", or with a focus elsewhere
+  // "22 tasks · #344 BLOCKED · #421 WORKING · 1/4 · <title>": the urgent token stays for phosphor's ATTENTION.
+  const h = headlineTask(live, focus);
+  const l = line(h);
+  const label = h === worst && extra ? `${value} · ${l.text.replace(/^#\d+ [A-Z]+ · /, '')}` : `${value} · ${l.text}`;
+  return { pill: { key: 'task', value, icon: st.icon, color: st.color }, progress: { value: l.value, label } };
 }
 
 export const pillSignature = (p) => JSON.stringify(p || null);
@@ -202,6 +247,20 @@ export function withContext(want, g) {
     progress: { value: Math.round(g.pct) / 100, label: parts.join(' · ') },
     ctxPill: { key: 'ctx', value: `${g.pct}%${g.estimated ? ' est' : ''}`, icon: 'gauge.medium', color: CTX_COLORS[g.band] || CTX_COLORS.ok },
   };
+}
+
+// Status taxonomy (src/agent-state.mjs, SETTINGS.statusTaxonomy 'on'): a `state` pill (glyph + "?" when
+// low confidence) and — for the custom sidebar, which reads only progress — a one-glyph prefix on the
+// progress label ONLY for unknown ("? · …") and for a low-confidence input that the verified-prompt
+// path did not already show ("▲? · …"). The task pill is unchanged. With no state the pill set is
+// returned untouched (same signature), so turning the taxonomy off or on rewrites nothing else.
+export function withState(want, view, state) {
+  if (!view || !state) return want;
+  const statePill = { key: 'state', value: `${view.glyph} ${view.label.toLowerCase()}`, icon: 'circle.dotted', color: view.color };
+  const label = want.progress?.label || '';
+  const prefix = state.state === 'unknown' ? '?' : state.state === 'input' && state.confidence === 'low' && !label.startsWith(INPUT_PREFIX) ? '▲?' : '';
+  if (!prefix) return { ...want, statePill };
+  return { ...want, statePill, progress: { value: want.progress?.value || 0, label: label ? `${prefix} · ${label}` : prefix } };
 }
 
 /** Workspaces with a verified input prompt → short reason. (claude: hook file; codex: screen) */
@@ -346,14 +405,15 @@ export async function applyChrome(entries, { cfg = {}, apply = true, max = 6, ru
 }
 
 /** Set/clear the task pill + progress on each owner's workspace, only on change. */
-export async function applyPills(entries, tasks, { run = cmux, file = CHROME_STATE_FILE, force = false, prompts = new Map(), ctx = new Map() } = {}) {
+export async function applyPills(entries, tasks, { run = cmux, file = CHROME_STATE_FILE, force = false, prompts = new Map(), ctx = new Map(), states = new Map(), titleInLabel = true, snoozed = new Map(), focusFor = () => null } = {}) {
   const state = await readChromeState(file);
   state.pills ||= {};
   const changed = [];
   for (const a of entries) {
     if (!a.workspaceId || a.status === 'closed' || a.kind === 'headless') continue;
     const mine = tasks.filter((t) => (t.owner_ws ? t.owner_ws === a.workspaceId : t.owner === a.name));
-    const want = withContext(withInput(ownerPill(mine), prompts.get(a.workspaceId)), ctx.get(a.workspaceId));
+    const st = states.get(a.workspaceId);   // { state, view } only for agents with the taxonomy 'on'
+    const want = withState(withContext(withInput(ownerPill(mine, Date.now(), { titleInLabel, snoozed, focus: focusFor(a.name) }), prompts.get(a.workspaceId)), ctx.get(a.workspaceId)), st?.view, st?.state);
     const sig = pillSignature(want);
     const prevSig = state.pills[a.workspaceId];
     if (!force && prevSig === sig) continue;
@@ -370,12 +430,16 @@ export async function applyPills(entries, tasks, { run = cmux, file = CHROME_STA
       if (want.ctxPill) await run(['set-status', 'ctx', want.ctxPill.value, '--icon', want.ctxPill.icon, '--color', want.ctxPill.color, '--priority', '50', ...ws]);
       else if (prev.ctxPill) await run(['clear-status', 'ctx', ...ws]);
     }
+    if (force || !same(want.statePill, prev.statePill)) {
+      if (want.statePill) await run(['set-status', 'state', want.statePill.value, '--icon', want.statePill.icon, '--color', want.statePill.color, '--priority', '55', ...ws]);
+      else if (prev.statePill) await run(['clear-status', 'state', ...ws]);
+    }
     if (force || !same(want.progress, prev.progress)) {
       if (want.progress) await run(['set-progress', String(want.progress.value), '--label', want.progress.label, ...ws]);
       else if (prev.progress) await run(['clear-progress', ...ws]);
     }
     changed.push({ name: a.name, pill: want.pill?.value || '-', progress: want.progress?.label || '(cleared)' });
-    if (want.pill || want.progress || want.ctxPill) state.pills[a.workspaceId] = sig;
+    if (want.pill || want.progress || want.ctxPill || want.statePill) state.pills[a.workspaceId] = sig;
     else delete state.pills[a.workspaceId];
   }
   if (changed.length) await writeJsonAtomic(file, state);

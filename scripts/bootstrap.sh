@@ -206,6 +206,7 @@ do_install() {
     place "$tmp/$a.plist" "$HOME/Library/LaunchAgents/$a.plist" "plist $a"
     if loaded "$a"; then step skip "$a loaded"
     elif ((DRY)); then step would "launchctl bootstrap $a"
+    elif [[ -n "${ZULU_NO_LAUNCHD:-}" ]]; then step skip "launchctl bootstrap $a (ZULU_NO_LAUNCHD)"
     else launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$a.plist" && step done "loaded $a" || step FAIL "launchctl bootstrap $a"; fi
   done
 
@@ -243,6 +244,7 @@ do_install() {
       place "$VAULT/.scripts/$a.plist" "$HOME/Library/LaunchAgents/$a.plist" "plist $a"
       if loaded "$a"; then step skip "$a loaded"
       elif ((DRY)); then step would "launchctl bootstrap $a"
+      elif [[ -n "${ZULU_NO_LAUNCHD:-}" ]]; then step skip "launchctl bootstrap $a (ZULU_NO_LAUNCHD)"
       else launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$a.plist" && step done "loaded $a" || step FAIL "launchctl bootstrap $a"; fi
     done
     # markers are STATE: restore from the git mirror only when the live dir is empty — never fabricate

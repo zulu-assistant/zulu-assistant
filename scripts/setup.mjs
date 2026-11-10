@@ -9,14 +9,14 @@
 // ticked without asking. Nothing here stores a credential — logins go through
 // each tool's own flow (gh, claude, codex); alert keys go to data/secrets.env
 // (600). Answers that shape the board go to overlay/config/local.json.
-import { readFile, writeFile, mkdir, cp, readdir, chmod } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, cp, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 import { STEPS, ROOT, readState, writeState, markStep, summarize, checkStep, engineStatus, shellEnv, readJson, run } from '../src/setup.mjs';
 import { parseSelection, scanLaunchAgents, scanDocker, scanCron, scanRepos } from '../src/setup-scan.mjs';
-import { parseEnv } from '../src/config.mjs';
+import { parseEnv, writePrivate } from '../src/config.mjs';
 
 const HOME = process.env.HOME;
 const OVERLAY = process.env.MC_OVERLAY || path.join(ROOT, 'overlay');
@@ -61,8 +61,7 @@ async function upsertSecrets(pairs) {
     if (i >= 0) lines[i] = line; else lines.push(line);
   }
   await mkdir(path.dirname(SECRETS), { recursive: true });
-  await writeFile(SECRETS, lines.join('\n'), { mode: 0o600 });
-  await chmod(SECRETS, 0o600);
+  await writePrivate(SECRETS, lines.join('\n'));
 }
 
 // ---- steps ----------------------------------------------------------------------------

@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, stat } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createLedger, applyPatch } from '../src/tasks.mjs';
 import { createGateService, policyProblems, normTool } from '../src/gate-service.mjs';
 import { gatesResolved, auditRows } from '../src/gate-ledger.mjs';
-import { DEFAULT_POLICY } from '../src/gates.mjs';
+import { DEFAULT_POLICY, shippedRulesMissing } from '../src/gates.mjs';
 import { OWNER } from '../src/config.mjs';
 
 // neutral fixtures: agents "builder" (ws W1) and "helper" (ws W2), repo /work/app, no git, a manual clock
@@ -204,8 +205,12 @@ test('who may decide (condition H): only the owner\'s board; never intake, an ag
   // the pane fallback (fix 4): only mission control records the owner's in-pane answer — never the gated agent
   assert.throws(() => applyPatch(t, { op: 'gate_record', actor: 'builder', gate: 'g1', decision: 'approve', text: 'owner said yes' }, {}), /only mission-control records/);
   assert.throws(() => applyPatch(t, { op: 'gate_record', actor: 'mission-control', gate: 'g1', decision: 'approve' }, {}), /needs text/);
-  const rec = applyPatch(t, { op: 'gate_record', actor: 'mc-coo', gate: 'g1', decision: 'approve', text: 'owner typed yes in the pane 10:02' }, { mc: true });
-  assert.equal(rec.task.gates[0].via, 'pane'); assert.equal(rec.task.gates[0].recorded_by, 'mc-coo');
+  // SETTINGS.paneAnswers 'direct' (the behaviour before 1.3): the record is the decision
+  const rec = applyPatch(t, { op: 'gate_record', actor: 'coordinator', gate: 'g1', decision: 'approve', text: 'owner typed yes in the pane 10:02' }, { mc: true, paneAnswers: 'direct' });
+  assert.equal(rec.task.gates[0].via, 'pane'); assert.equal(rec.task.gates[0].recorded_by, 'coordinator');
+  // 'confirm' (the default): the same record is only a proposal — the gate is still pending (test/pane-answers.test.mjs)
+  const heard = applyPatch(t, { op: 'gate_record', actor: 'coordinator', gate: 'g1', decision: 'approve', text: 'owner typed yes in the pane 10:02' }, { mc: true, paneAnswers: 'confirm' });
+  assert.equal(heard.task.gates[0].status, 'pending'); assert.equal(heard.task.gates[0].via, null); assert.equal(heard.task.gates[0].proposal.by, 'coordinator');
 });
 
 test('a broken policy keeps the last good one and says so; the card reports it', async () => {
@@ -227,7 +232,8 @@ async function withGo(s, via = 'board') {
   await s.ledger.update(task.id, { op: 'request_approval', actor: 'builder', policy_item: 'program: ship the feature', kind: 'program' });
   const d = via === 'board'
     ? await s.ledger.update(task.id, { op: 'decide', actor: OWNER.id, decision: 'approve' }, { decider: true })
-    : await s.ledger.update(task.id, { op: 'record_decision', actor: 'builder', decision: 'approve', text: 'owner said go in the pane 12:35' });
+    // 'pane' = SETTINGS.paneAnswers 'direct' (before 1.3). Under 'confirm' a recorded answer grants no go: test/pane-answers.test.mjs
+    : await s.ledger.update(task.id, { op: 'record_decision', actor: 'builder', decision: 'approve', text: 'owner said go in the pane 12:35' }, { paneAnswers: 'direct' });
   return d.task;
 }
 
@@ -293,4 +299,249 @@ test('every answer the board gives leaves one line in checks.jsonl (pass, deny, 
   assert.deepEqual(lines.map((l) => [l.agent, l.decision, !!l.observed]), [['builder', 'pass', false], ['builder', 'deny', false], ['helper', 'pass', true], ['builder', 'pass', false]]);
   assert.equal(lines[1].task, 1); assert.equal(lines[1].gate, 'g1'); assert.equal(lines[1].command, 'gh pr merge 3');
   assert.equal(lines[3].command, '[withheld: contains a secret]');
+});
+
+// PR 103 review, finding 1: a landing can name its repo without the repo flag. The standing check must
+// judge THAT repo, never the checkout's own, and ask the owner when it cannot read the name.
+test('a program go judges the repo a landing names by PR URL or GH_REPO, not the checkout\'s origin', async () => {
+  const asked = [];
+  const s = await setup({ policy: { lists: { ...DEFAULT_POLICY.lists, publicRemotes: ['acme-public/*'], deployOnPush: ['acme/site'] } },
+    git: origin('git@github.com:acme/app.git'), isPrivateRepo: async (slug) => { asked.push(slug); return slug === 'acme/app' ? true : null; } });
+  await withGo(s);
+  const why = async (c) => { const r = await s.check(c); const t = (await s.ledger.list({ owner: 'builder', status: 'live' }))[0]; return { decision: r.decision, why: t.gates.find((g) => g.command === c)?.why || '' }; };
+  // the checkout's own repo, by number and by its URL: allowed under the go
+  assert.equal((await s.check('gh pr merge 12 --squash')).decision, 'allow');
+  assert.equal((await s.check('gh pr merge https://github.com/acme/app/pull/13 --squash')).decision, 'allow');
+  assert.equal((await s.check('GH_REPO=acme/app gh pr merge 14')).decision, 'allow');
+  // another repo named by URL
+  let r = await why('gh pr merge https://github.com/acme-public/tool/pull/3 --squash');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /not under the program go: acme-public\/tool is public/);
+  r = await why('gh pr merge https://github.com/acme/site/pull/9');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /acme\/site deploys on push/);
+  r = await why('gh pr merge github.com/other/unknown/pull/1');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /other\/unknown is not confirmed private/);
+  // named by GH_REPO in the command, both forms
+  r = await why('GH_REPO=acme-public/tool gh pr merge 3');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /acme-public\/tool is public/);
+  r = await why('export GH_REPO=acme-public/tool; gh pr merge 4');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /the landing is not the whole command/);   // 13b: two commands in one text
+  r = await why('GH_REPO=github.com/acme/site gh pr merge 5');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /acme\/site deploys on push/);
+  // a name the board cannot read: unknown, so it asks
+  r = await why('GH_REPO="$TARGET" gh pr merge 6');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /the landing is not the whole command/);   // 13b: not a readable assignment
+  r = await why('gh pr merge https://example.test/acme/app/pull/7');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /the target repo is unknown/);
+  // second read of the review: the board does not rank the forms. Every repo the command names must
+  // agree; a disagreement, an unreadable name, another host or GH_HOST is unknown, and the call asks.
+  const unknown = [
+    'gh pr merge https://github.com/acme-public/tool/pull/8 -R acme/app',
+    'gh pr merge -R acme/app https://github.com/acme-public/tool/pull/8',
+    'gh pr merge https://github.com/acme-public/tool/pull/8 --repo=acme/app',
+    'GH_REPO=acme-public/tool gh pr merge 3; echo GH_REPO=acme/app',
+    'GH_REPO=acme-public/tool gh pr merge 3 # GH_REPO=acme/app',
+    'GH_REPO=acme-public/tool gh pr merge 3 && GH_REPO=acme/app true',
+    'export GH_REPO=acme-public/tool\ngh pr merge 3\nGH_REPO=acme/app :',
+    'GH_HOST=ghe.example.test gh pr merge 3',
+    'gh pr merge 3 --repo ghe.example.test/acme/app',
+    'GH_REPO=acme/app gh pr merge https://github.com/acme/app/pull/8 -R acme-public/tool',
+  ];
+  for (const c of unknown) { r = await why(c); assert.equal(r.decision, 'deny', c); assert.match(r.why, /the target repo is unknown|the landing is not the whole command/, c); }
+  // the value attached to the short flag is read
+  r = await why('gh pr merge 3 -Racme-public/tool');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /acme-public\/tool is public/);
+  // forms that agree are one repo: the checkout's own, named three ways at once, still runs under the go
+  assert.equal((await s.check('GH_REPO=acme/app gh pr merge https://github.com/acme/app/pull/15 -R acme/app')).decision, 'allow');
+  assert.equal((await s.check('gh -R acme/app pr merge 16')).decision, 'allow');
+  r = await why('gh --repo acme-public/tool pr merge 17');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /acme-public\/tool is public/);
+  assert.ok(asked.includes('other/unknown') && !asked.includes('acme-public/tool'), 'a listed repo is refused without a lookup; an unlisted one is looked up by ITS name');
+});
+
+test('namedRepos: every repo a landing names; readRepoName: github.com owner/name or nothing', async () => {
+  const { namedRepos, readRepoName } = await import('../src/gate-service.mjs');
+  const n = (cmd) => namedRepos(cmd.replace(/^(?:\w+=\S+ )+/, '').replace(/ #.*$/, '').split(' '), cmd);   // words as the parser gives them: no prefix assignments, no comment
+  assert.deepEqual(n('gh pr merge 12 --squash'), { names: [], unknown: false, any: false, admin: false });
+  assert.deepEqual(n('gh pr merge feature/x'), { names: [], unknown: false, any: false, admin: false }, 'a branch name is not a repo');
+  assert.deepEqual(n('gh pr merge https://github.com/a/b/pull/3 --squash').names, ['a/b']);
+  assert.deepEqual(n('gh pr merge github.com/A/b.c/pull/3/files').names, ['a/b.c']);
+  assert.deepEqual(n('gh pr merge 3 -R a/b').names, ['a/b']);
+  assert.deepEqual(n('gh pr merge 3 -Ra/b').names, ['a/b']);
+  assert.deepEqual(n('gh pr merge 3 --repo=github.com/a/b').names, ['a/b']);
+  assert.deepEqual(n('GH_REPO=a/b gh pr merge https://github.com/a/b/pull/3 -R A/B'), { names: ['a/b'], unknown: false, any: true, admin: false }, 'three forms, one repo');
+  assert.deepEqual(n('GH_REPO=a/b gh pr merge 1 -R c/d').names.sort(), ['a/b', 'c/d']);
+  assert.equal(n('gh pr merge https://ghe.example.test/a/b/pull/3').unknown, true);
+  assert.equal(n('GH_REPO=$X gh pr merge 1').unknown, true);
+  assert.equal(n('GH_REPO= gh pr merge 1').unknown, true);
+  assert.equal(n('GH_HOST=x.test gh pr merge 1').unknown, true);
+  assert.equal(n('gh pr merge 1 # GH_REPO=c/d').names[0], 'c/d', 'a comment counts: the board cannot tell which assignment applies');
+  assert.equal(n('gh pr merge 1 # MY_GH_REPO=a/b').any, false);
+  for (const [v, want] of [['a/b', 'a/b'], ['github.com/a/b', 'a/b'], ['https://github.com/a/b.git', 'a/b'], ['git@github.com:a/b.git', 'a/b'],
+    ['ghe.test/a/b', null], ['https://ghe.test/a/b', null], ['a', null], ['a/b/c/d', null], ['$X', null], ['', null], [undefined, null]]) assert.equal(readRepoName(v), want, String(v));
+});
+
+// Slice 13b (third read of the PR 103 review): what could still auto-run into another repo under a go.
+const gitFor = ({ remotes = { origin: 'git@github.com:acme/app.git' }, resolved = '' } = {}) => (cwd, args) => {
+  if (args[0] === 'remote' && args.length === 1) return Object.keys(remotes).join('\n');
+  if (args[0] === 'remote' && args[1] === 'get-url') return remotes[args[2]] || null;
+  if (args[0] === 'config' && args[1] === '--get-regexp') return resolved || null;
+  return null;
+};
+const goBoard = async (git) => {
+  const s = await setup({ policy: { lists: { ...DEFAULT_POLICY.lists, publicRemotes: ['acme-public/*'] } }, git, isPrivateRepo: async (slug) => (slug === 'acme/app' ? true : null) });
+  await withGo(s);
+  const why = async (c) => { const r = await s.check(c); const t = (await s.ledger.list({ owner: 'builder', status: 'live' }))[0]; return { ...r, why: t.gates.find((g) => g.command === c)?.why || '' }; };
+  return { s, why };
+};
+
+test('13b A: the repo flag inside a group of short flags is read', async () => {
+  const { s, why } = await goBoard(gitFor());
+  for (const c of ['gh pr merge 3 -sR acme-public/tool', 'gh pr merge 3 -sdR acme-public/tool', 'gh pr merge 3 -sRacme-public/tool', 'gh pr merge 3 -sR=acme-public/tool', 'gh pr merge -dsR acme-public/tool 3']) {
+    const r = await why(c);
+    assert.equal(r.decision, 'deny', c); assert.match(r.why, /acme-public\/tool is public/, c);
+  }
+  // the same group naming the checkout's own repo still runs; a group without R is just flags
+  assert.equal((await s.check('gh pr merge 4 -sR acme/app')).decision, 'allow');
+  assert.equal((await s.check('gh pr merge 5 -sd')).decision, 'allow');
+  const { namedRepos } = await import('../src/gate-service.mjs');
+  assert.deepEqual(namedRepos(['gh', 'pr', 'merge', '3', '-sRd'], '').unknown, true, 'a value it cannot read only asks');
+});
+
+test('13b B + C (one text): a landing runs by itself only as the whole command, and the agent is told so', async () => {
+  const { s, why } = await goBoard(gitFor());
+  const held = [
+    ': ${GH_REPO:=acme-public/tool}; export GH_REPO; gh pr merge 3',
+    'export GH_REPO; GH_REPO+=acme-public/tool; gh pr merge 3',
+    'printf -v GH_REPO %s acme-public/tool; export GH_REPO; gh pr merge 3',
+    'read GH_REPO <<< acme-public/tool; export GH_REPO; gh pr merge 3',
+    'git remote add upstream https://github.com/acme-public/tool.git && gh pr merge 3',
+    'git config remote.origin.gh-resolved acme-public/tool; gh pr merge 3',
+    'gh repo set-default acme-public/tool && gh pr merge 3',
+    'gh pr merge 3 && echo done',
+    'gh pr merge 3 | cat',
+    'GH_HOST=ghe.example.test gh pr merge 3',
+    'gh pr merge 3 # GH_REPO=acme/app',
+  ];
+  for (const c of held) {
+    const r = await why(c);
+    assert.equal(r.decision, 'deny', c);
+    assert.match(r.why, /not under the program go: the landing is not the whole command/, c);
+    assert.match(r.reason, /run the gh call as its own command/, c);
+  }
+  // the whole command, with what is allowed around it
+  for (const c of ['gh pr merge 12 --squash --delete-branch', 'cd /work/app && gh pr merge 13 --squash', 'GH_REPO=acme/app gh pr merge 14', 'env GH_REPO=acme/app gh pr merge 15', 'gh pr merge 16 --subject "one; two"'])
+    assert.equal((await s.check(c)).decision, 'allow', c);
+  // another hold reason does not carry the hint
+  const pub = await why('gh pr merge 3 -R acme-public/tool');
+  assert.doesNotMatch(pub.reason, /as its own command/);
+  const { landingAlone } = await import('../src/gate-service.mjs');
+  assert.equal(landingAlone('  gh pr merge 3  '), true);
+  assert.equal(landingAlone('gh pr merge 3\ngh pr merge 4'), false);
+  assert.equal(landingAlone('gh pr merge $(cat n)'), false);
+  assert.equal(landingAlone('gh pr merge 3 > out.txt'), false);
+});
+
+test('13b C (earlier calls): every remote and every gh-resolved key must be the origin\'s repo', async () => {
+  // a plain numbered landing in a one-remote checkout still runs
+  let b = await goBoard(gitFor());
+  assert.equal((await b.s.check('gh pr merge 12 --squash')).decision, 'allow');
+  // two remotes for the same repo (https and ssh), and "base" on the origin: still one repo
+  b = await goBoard(gitFor({ remotes: { origin: 'git@github.com:acme/app.git', mirror: 'https://github.com/Acme/App.git' }, resolved: 'remote.origin.gh-resolved base' }));
+  assert.equal((await b.s.check('gh pr merge 12')).decision, 'allow');
+  // origin private plus a remote named upstream that is public: gh acts on upstream
+  b = await goBoard(gitFor({ remotes: { origin: 'git@github.com:acme/app.git', upstream: 'https://github.com/acme-public/tool.git' } }));
+  let r = await b.why('gh pr merge 3');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /the target repo is unknown/);
+  // one remote, the resolved key names another repo that is not a remote at all
+  b = await goBoard(gitFor({ resolved: 'remote.origin.gh-resolved acme-public/tool' }));
+  r = await b.why('gh pr merge 3');
+  assert.equal(r.decision, 'deny'); assert.match(r.why, /the target repo is unknown/);
+  // the key naming the origin's own repo is fine; a remote whose address cannot be read is not
+  b = await goBoard(gitFor({ resolved: 'remote.origin.gh-resolved acme/app' }));
+  assert.equal((await b.s.check('gh pr merge 3')).decision, 'allow');
+  b = await goBoard(gitFor({ remotes: { origin: 'git@github.com:acme/app.git', odd: null } }));
+  assert.equal((await b.s.check('gh pr merge 3')).decision, 'deny');
+  // naming the repo outright does not need the remotes to agree: the name is what gh uses
+  b = await goBoard(gitFor({ remotes: { origin: 'git@github.com:acme/app.git', upstream: 'https://github.com/acme-public/tool.git' } }));
+  assert.equal((await b.s.check('gh pr merge 3 -R acme/app')).decision, 'allow');
+});
+
+// PR 113 review, finding 1: a flag that takes a value hides the real target. Read-only checks on gh 2.102:
+//   gh pr list --search --repo=<other> --state all --limit 1 --json url   → a pull request of THIS repo (the repo flag was the search text)
+//   gh pr list -L -R<other>    → invalid argument "-R<other>" for "-L, --limit"   (a short value flag takes the next word)
+//   gh pr list -LR<other>      → invalid argument "R<other>" for "-L, --limit"    (in a group, the first value letter takes the rest)
+test('13b: the walk reads the words as gh does: a value flag takes the next word, and ends a short group', async () => {
+  // a PUBLIC checkout: gh acts here; the words after a value flag only LOOK like a private target
+  const pub = () => goBoard(gitFor({ remotes: { origin: 'git@github.com:acme-public/tool.git' } }));
+  const { s, why } = await pub();
+  const rows = [
+    'gh pr merge 3 -t -Racme/app', 'gh pr merge 3 --subject --repo=acme/app', 'gh pr merge 3 --subject "--repo=acme/app"', "gh pr merge 3 --subject '-Racme/app'",
+    'gh pr merge 3 -b --repo=acme/app', 'gh pr merge 3 --body -Racme/app', 'gh pr merge 3 -F -Racme/app', 'gh pr merge 3 -A -Racme/app',
+    'gh pr merge 3 --match-head-commit -Racme/app', 'gh pr merge -t -R acme/app', 'gh pr merge -t https://github.com/acme/app/pull/3',
+    'gh pr merge 3 --body https://github.com/acme/app/pull/3', 'gh pr merge -- -Racme/app', 'gh pr merge 3 -tRacme/app', 'gh pr merge 3 -stRacme/app',
+    'gh pr merge 3 --subject=x --body-file -Racme/app', 'gh pr merge 3 -sdt --repo=acme/app',
+  ];
+  for (const c of rows) {
+    const r = await why(c);
+    assert.equal(r.decision, 'deny', c);
+    assert.match(r.why, /acme-public\/tool is public|the target repo is unknown/, c);
+    assert.doesNotMatch(r.why, /acme\/app/, `${c}: the private name must not be what was judged`);
+  }
+  // from a private checkout, the cd form into the public one
+  const mixed = await goBoard((cwd, args) => gitFor({ remotes: { origin: cwd === '/work/public' ? 'git@github.com:acme-public/tool.git' : 'git@github.com:acme/app.git' } })(cwd, args));
+  const r2 = await mixed.why('cd /work/public && gh pr merge 3 -t -Racme/app');
+  assert.equal(r2.decision, 'deny'); assert.doesNotMatch(r2.why, /acme\/app is/);
+  // a flag the walk does not know, a second positional, a bare dash: unknown
+  for (const c of ['gh pr merge 3 --some-new-flag', 'gh pr merge 3 4', 'gh pr merge 3 -x', 'gh pr merge 3 -']) {
+    const r = await why(c); assert.equal(r.decision, 'deny', c); assert.match(r.why, /the target repo is unknown/, c);
+  }
+  void s;
+  // and nothing over-asks: every plain landing in a private checkout still runs
+  const priv = await goBoard(gitFor());
+  for (const c of ['gh pr merge 3', 'gh pr merge 3 --squash --delete-branch', 'gh pr merge 3 -sd', 'gh pr merge 3 -m -t "the subject" -b "the body"', 'gh pr merge 3 --subject=x --body=y --rebase',
+    'gh pr merge 3 -st "subject here"', 'gh pr merge 3 --match-head-commit 0123abc', 'gh pr merge 3 --auto', 'gh pr merge feature/x', 'gh pr merge', 'gh pr merge 3 -R acme/app -t -Rnot-a-repo',
+    'gh pr merge https://github.com/acme/app/pull/3 -s', 'gh -R acme/app pr merge 3'])
+    assert.equal((await priv.s.check(c)).decision, 'allow', c);
+  const { namedRepos } = await import('../src/gate-service.mjs');
+  assert.deepEqual(namedRepos(['gh', 'pr', 'merge', '3', '-tRacme/app'], ''), { names: [], unknown: false, any: false, admin: false });
+  assert.deepEqual(namedRepos(['gh', 'pr', 'merge', '3', '-sRacme/app'], '').names, ['acme/app']);
+  assert.equal(namedRepos(['gh', 'pr', 'merge', '--body', 'https://github.com/a/b/pull/3'], '').any, false, 'an address counts only as the positional');
+  assert.equal(namedRepos(['gh', 'pr', 'view', '3'], '').unknown, true);
+});
+
+test('13b: the admin flag never runs by itself', async () => {
+  const { s, why } = await goBoard(gitFor());
+  for (const c of ['gh pr merge 3 --admin', 'gh pr merge 3 -s --admin --delete-branch']) {
+    const r = await why(c); assert.equal(r.decision, 'deny', c); assert.match(r.why, /not under the program go: the admin flag is set/, c);
+  }
+  assert.equal((await s.check('gh pr merge 3 -t --admin')).decision, 'allow', 'as a subject it is only text');
+});
+
+// ── rules an older policy file does not have (#398) ──
+test('shippedRulesMissing: an older policy is counted by class and rule; the owner\'s lists and additions never count', () => {
+  assert.deepEqual(shippedRulesMissing(DEFAULT_POLICY), { count: 0, classes: [] });
+  const shipped = JSON.parse(readFileSync(new URL('../examples/policy.json', import.meta.url), 'utf8'));
+  assert.deepEqual(shippedRulesMissing(shipped), { count: 0, classes: [] }, 'the example file carries every shipped rule');
+  const old = structuredClone(DEFAULT_POLICY);
+  const upgrade = old.classes.find((c) => c.id === 'upgrade'); old.classes = old.classes.filter((c) => c.id !== 'upgrade');
+  old.classes.find((c) => c.id === 'self').rules.pop();
+  assert.deepEqual(shippedRulesMissing(old), { count: upgrade.rules.length + 1, classes: ['self', 'upgrade'].sort((a, b) => DEFAULT_POLICY.classes.findIndex((c) => c.id === a) - DEFAULT_POLICY.classes.findIndex((c) => c.id === b)) });
+  const mine = structuredClone(DEFAULT_POLICY);
+  mine.lists.paidOrOutbound = ['com.example.sender']; mine.defaultMode = 'enforce';
+  mine.classes.push({ id: 'mine', label: 'my own', rules: [{ bin: 'mytool' }] }); mine.classes[0].rules.push({ bin: 'another' });
+  mine.classes[0].rules = mine.classes[0].rules.map((r) => Object.fromEntries(Object.entries(r).reverse()));
+  assert.deepEqual(shippedRulesMissing(mine), { count: 0, classes: [] }, 'lists, additions and key order do not count');
+  assert.deepEqual(shippedRulesMissing({}).classes.length, DEFAULT_POLICY.classes.length, 'no classes at all: everything is missing');
+});
+
+test('the guardrails card says how many shipped rules are missing, without changing its colour', async () => {
+  const current = await setup();
+  assert.doesNotMatch((await current.svc.card([])).detail, /shipped rule/);
+  const classes = structuredClone(DEFAULT_POLICY.classes).filter((c) => c.id !== 'upgrade');
+  const s = await setup({ policy: { classes } });
+  const n = DEFAULT_POLICY.classes.find((c) => c.id === 'upgrade').rules.length;
+  const base = await current.svc.card([]);
+  const card = await s.svc.card([]);
+  assert.match(card.detail, new RegExp(`${n} shipped rules are not in yours \\(upgrade; INSTALL 7b\\)`));
+  assert.equal(card.status, base.status);
 });

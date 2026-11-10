@@ -1,0 +1,14 @@
+# ntfy server for the push-approval relay (docs/RELAY.md). Copy to data/relay/server.yml and fill in
+# your Tailscale address. On macOS it runs in Docker (Homebrew's ntfy is client-only), so the paths are
+# the container's: data/relay is mounted at /var/lib/ntfy. The server must be reachable on the tailnet
+# only (publish the port on the tailnet address: -p <tailscale-ip>:2586:2586) and deny everyone by default.
+base-url: "http://<tailscale-ip>:2586"
+listen-http: ":2586"
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"
+cache-file: "/var/lib/ntfy/cache.db"
+cache-duration: "1h"
+# iOS can't hold a socket open to a self-hosted server. With this set, ntfy.sh receives only a poll
+# request (a hash of the topic URL + the message id), never the title, body or link; the phone then
+# fetches the message from this server over the tailnet. Check that at install (docs/RELAY.md).
+upstream-base-url: "https://ntfy.sh"

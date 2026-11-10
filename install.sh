@@ -3,10 +3,13 @@
 #
 #   ./install.sh [--yes]          full install: toolchain → init → scripts/bootstrap.sh install → brain → zulu setup
 #   ./install.sh --dry-run        show what the full install would do, write nothing
+#   ./install.sh --guardrails     Guardrails only: board + ledger + gate hook. No cmux, no casks, nothing paid. Five minutes.
 #   ./install.sh setup            the guided part: your accounts, engine choice, what to watch, alerts, vault …
 #   ./install.sh doctor           write a redacted diagnostic bundle (attach it to a beta-feedback issue)
 #   ./install.sh backup [--out f] [--with-secrets]   data/ + overlay/ in one tarball (secrets left out by default)
 #   ./install.sh restore <f> [--apply]               what a backup would change; --apply restores (safety backup first)
+#   ./install.sh upgrade [--check] [--to <tag>]      move to the newest release: backup, migrate, tests, restart, auto-rollback
+#   ./install.sh rollback                            put back the code + overlay/ of the last upgrade
 #   ./install.sh init             copy examples/ → overlay/ (never overwrites your files)
 #   ./install.sh --demo           board with synthetic data on :3210 — Node 22 only, no launchd/cmux
 #   ./install.sh --demo --cmux    …plus a ZULU DEMO window in cmux: fake agent panes, live sidebar chrome
@@ -216,9 +219,86 @@ do_full() {
   star_prompt ask
 }
 
+# Guardrails only: the board, the ledger, the gate hook and the page with the waiting rows.
+# No Homebrew, no casks, no cmux, no Mission Control, no triage job, no brain. Five steps.
+#   ./install.sh --guardrails [--yes] [--dry-run] [--switch]
+# ZULU_NO_LAUNCHD=1 skips the launchctl call (tests, a second account); ZULU_NO_OPEN=1 does not open the page.
+# On an install that already runs the FULL board it prints what would change and stops, unless --switch
+# is given: switching stops the fleet cards, the mesh and the session heals. --yes alone never switches.
+do_guardrails() {
+  local yes="" dry="" switch="" a full=""
+  for a in "$@"; do case $a in --yes|-y) yes=1 ;; --dry-run) dry=1 ;; --switch) switch=1 ;; *) echo "unknown flag $a (./install.sh --guardrails [--yes] [--dry-run] [--switch])"; exit 2 ;; esac; done
+  HINT_ON_EXIT=1
+  [[ "$(uname -s)" == Darwin ]] || { say FAIL "macOS only (the board runs as a LaunchAgent). Try ./install.sh --demo to look around."; exit 1; }
+  echo "━━ 1/5 Node"
+  need_node; say ok "Node $("$NODE_BIN" -v)"
+  # before anything is written: is this already a full install?
+  full=$("$NODE_BIN" "$ROOT/scripts/guardrails-profile.mjs" --is-full 2>/dev/null || true)
+  if [[ -n "$full" && -z "$switch" && -z "$dry" ]]; then
+    HINT_ON_EXIT=""
+    say stop "this install already runs the full board:"
+    printf '         %s\n' "$full"
+    echo "       Guardrails only would change this:"
+    "$NODE_BIN" "$ROOT/scripts/guardrails-profile.mjs" | sed 's/^/         /'
+    echo "         the board is restarted in that profile: the fleet cards, the mesh and the session heals stop"
+    echo "         the gate hook is added to ~/.claude/settings.json"
+    echo "       Nothing was written. To switch on purpose: ./install.sh --guardrails --switch   (--yes alone never switches)"
+    exit 3
+  fi
+  if [[ -n "$full" && -n "$dry" ]]; then say note "this install already runs the full board: the real run needs --switch"; fi
+  echo "━━ 2/5 your config (overlay/)"
+  do_init "$dry"
+  echo "━━ 3/5 the Guardrails-only profile"
+  if [[ -n "$dry" ]]; then "$NODE_BIN" "$ROOT/scripts/guardrails-profile.mjs"
+  else "$NODE_BIN" "$ROOT/scripts/guardrails-profile.mjs" --apply ${switch:+--switch}; fi
+  echo "━━ 4/5 the board (one LaunchAgent)"
+  local label="$MC_LABEL_PREFIX.master-console" tmp; tmp=$(mktemp -d)
+  local plist="$HOME/Library/LaunchAgents/$label.plist"
+  "$ROOT/scripts/render-tmpl.sh" system/launchd/master-console.plist.tmpl "$tmp/$label.plist"
+  if [[ -n "$dry" ]]; then say would "write $plist and load $label"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents" data logs
+    if [[ -f "$plist" ]] && cmp -s "$tmp/$label.plist" "$plist"; then say skip "plist $label up to date"
+    else
+      if [[ -f "$plist" ]]; then cp -p "$plist" "$plist.bak-$(date +%Y%m%d-%H%M%S)"; fi
+      cp "$tmp/$label.plist" "$plist"; say done "wrote $plist"
+    fi
+    if [[ -n "${ZULU_NO_LAUNCHD:-}" ]]; then say skip "launchctl bootstrap $label (ZULU_NO_LAUNCHD)"
+    elif launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      if launchctl kickstart -k "gui/$(id -u)/$label"; then say done "restarted $label (it reads the new profile)"; else STEP_WARNED=1; say FAIL "launchctl kickstart $label"; fi
+    elif launchctl bootstrap "gui/$(id -u)" "$plist"; then say done "loaded $label"
+    else STEP_WARNED=1; say FAIL "launchctl bootstrap $label"; fi
+  fi
+  rm -rf "$tmp"
+  echo "━━ 5/5 the gate hook (Claude Code)"
+  "$ROOT/scripts/guardrails-install.sh"                       # shows what it would add; writes nothing
+  if [[ -z "$dry" ]]; then
+    local go="$yes" a=""
+    if [[ -z "$go" && -t 0 && -t 1 ]]; then
+      read -r -p "Add the hook to ~/.claude/settings.json now (a backup is taken first)? [Y/n] " a || a=""
+      if [[ -z "$a" || "$a" == y* || "$a" == Y* ]]; then go=1; fi
+    fi
+    if [[ -n "$go" ]]; then "$ROOT/scripts/guardrails-install.sh" --apply; say done "hook installed: restart your Claude Code sessions so they load it"
+    else say next "when you are ready: scripts/guardrails-install.sh --apply   (until then nothing is held)"; fi
+  fi
+  if [[ -n "$dry" ]]; then echo "(dry run: nothing was written)"; return 0; fi
+  mkdir -p "$HOME/.local/bin"
+  if [[ ! -e "$HOME/.local/bin/zulu" ]]; then ln -s "$ROOT/bin/zulu" "$HOME/.local/bin/zulu"; say done "linked ~/.local/bin/zulu"; fi
+  if [[ -z "${ZULU_NO_LAUNCHD:-}" ]]; then for _ in $(seq 1 20); do demo_up && break; sleep 0.5; done; fi
+  echo
+  if demo_up; then
+    say done "board answers on http://localhost:$PORT"
+    if [[ -z "${ZULU_NO_OPEN:-}" ]]; then open "http://localhost:$PORT/" 2>/dev/null || true; fi
+  else say next "board: http://localhost:$PORT (logs/server.err.log says why if it does not answer)"; fi
+  say next "try it: in a Claude Code session, ask the agent to run  git push origin main  in a scratch repo."
+  echo "         The command does not run. A row appears on the board. Click RUN ONCE, and the agent runs the same command again."
+  say next "what this install leaves out (cmux, the mesh, Mission Control, the brain) and how to add it: docs/QUICKSTART-GUARDRAILS.md"
+}
+
 do_doctor() { exec "$NODE_BIN" "$ROOT/scripts/doctor.mjs" "$@"; }
 
 case "${1:-}" in
+  --guardrails|guardrails) shift; do_guardrails "$@" ;;
   init) do_init "${2:-}" ;;
   --demo|demo) do_demo "${2:-}" ;;
   demo-stop) do_demo_stop ;;
@@ -229,7 +309,9 @@ case "${1:-}" in
   setup) shift; need_node; exec "$NODE_BIN" "$ROOT/scripts/setup.mjs" "$@" ;;
   doctor) shift; need_node; do_doctor "$@" ;;
   backup|restore) need_node; exec "$NODE_BIN" "$ROOT/scripts/backup.mjs" "$@" ;;
-  -h|--help|help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
+  upgrade) shift; need_node; exec "$NODE_BIN" "$ROOT/scripts/upgrade.mjs" "$@" ;;
+  rollback) need_node; exec "$NODE_BIN" "$ROOT/scripts/upgrade.mjs" rollback ;;
+  -h|--help|help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' ;;
   ""|--dry-run|--yes|-y|--force|--deadman|--sandbox) do_full "$@" ;;
   *) echo "unknown command: $1 (./install.sh --help)"; exit 2 ;;
 esac

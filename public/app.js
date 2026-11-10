@@ -35,7 +35,7 @@ if (tvMode) document.body.classList.add('tv');
 // ?dock=1 — compact view for the cmux Dock (~360px column): cards collapse to
 // name+status chips, WORK stacks, ticker stays; no boot sequence
 const dockMode = new URLSearchParams(location.search).has('dock');
-if (dockMode) document.body.classList.add('dock');
+if (dockMode) { document.body.classList.add('dock'); BoardDecide.dockLayout(document); }   // #450
 
 function chip(status) {
   const s = STATUS[status] || STATUS.ok;
@@ -50,6 +50,12 @@ function strip(states) {
 function actionButtons(job) {
   // the setup card is finished in a terminal, not by an agent
   if (job.label === 'setup:') return job.status === 'ok' ? '' : '<div class="card-actions"><span class="hint">run in a terminal: <kbd>zulu setup</kbd></span></div>';
+  // the one-click upgrade (#346): only a release install's card carries `upgrade`; the owner's click is the approval
+  if (job.label === 'update') {
+    if (!job.upgrade) return '';
+    const notes = job.upgrade.notesUrl ? `<a class="act" href="${job.upgrade.notesUrl}" target="_blank" rel="noopener">NOTES ↗</a>` : '';
+    return `<div class="card-actions"><button class="act act-dispatch" data-act="upgrade" data-label="update" data-to="${job.upgrade.to}">⇧ UPDATE TO ${job.upgrade.to}</button>${notes}</div>`;
+  }
   const btns = [];
   if (job.status !== 'ok') {
     if (job.label.startsWith('com.')) btns.push(`<button class="act" data-act="kickstart" data-label="${job.label}">⟳ KICKSTART</button>`);
@@ -86,13 +92,22 @@ async function fireAction(act, label, btn) {
     }
   }
   btn.disabled = true; btn.textContent = '…';
-  const r = await fetch('/api/action', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ action: act, label }),
-  }).then((x) => x.json()).catch(() => ({ ok: false, msg: 'request failed: board unreachable' }));
+  const r = act === 'upgrade'
+    ? await fetch('/api/upgrade', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'content-type': 'application/json', 'x-mesh-decision': document.querySelector('meta[name="mesh-decision"]')?.content || '' },
+      body: JSON.stringify({ to: btn.dataset.to }),
+    }).then((x) => (x.status === 403 ? { ok: false, msg: 'REJECTED: page is out of date, reload and click again' } : x.json()))
+      .catch(() => ({ ok: false, msg: 'request failed: board unreachable' }))
+    : await fetch('/api/action', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'content-type': 'application/json', 'x-mesh-decision': document.querySelector('meta[name="mesh-decision"]')?.content || '' },
+      body: JSON.stringify({ action: act, label }),
+    }).then((x) => (x.status === 403 ? x.json().catch(() => ({})).then((j) => ({ ok: false, msg: /token/.test(j.msg || '') ? 'REJECTED: page is out of date, reload and click again' : (j.msg || 'refused') })) : x.json()))
+      .catch(() => ({ ok: false, msg: 'request failed: board unreachable' }));
   btn.disabled = false;
   btn.classList.remove('armed');
-  btn.textContent = r.ok ? '✓ ' + (act === 'dispatch' ? 'DISPATCHED' : 'DONE') : '✕ FAILED';
+  btn.textContent = r.ok ? '✓ ' + (act === 'dispatch' ? 'DISPATCHED' : act === 'upgrade' ? 'UPGRADING' : 'DONE') : '✕ FAILED';
   btn.title = r.msg || '';
   if (!r.ok) showNotice(`${act} ${label}: ${r.msg || 'failed'}`, 'bad');
 }
@@ -237,8 +252,10 @@ function render(data) {
 
   const sessions = data.sessions || [];
   const dir = data.directory || {};
+  // Dock: only when some context is amber/red, or (status taxonomy on) an agent is UNKNOWN or waiting on input
+  const stateOf = (s) => dir[s.workspaceId]?.stateRaw?.state;
   $('agents-row').classList.toggle('hidden', sessions.length === 0
-    || (dockMode && !sessions.some((s) => s.ctx && s.ctx.band !== 'ok')));   // Dock: only when some context is amber/red
+    || (dockMode && !sessions.some((s) => (s.ctx && s.ctx.band !== 'ok') || ['unknown', 'input'].includes(stateOf(s)))));
   $('agents-grid').innerHTML = sessions.map((s) => {
     const lc = LIFECYCLE[s.lifecycle] || LIFECYCLE.unknown;
     const title = s.workspace || s.cwd || '~';
@@ -248,8 +265,14 @@ function render(data) {
     const owns = d?.owns?.length ? d.owns.join(' · ') : (d ? '— needs ownership —' : '');
     const hover = d ? `@${d.name} (${d.kind})${owns ? '\n' + owns : ''}${d.nameOk === false ? `\nsession name "${d.liveName}" ≠ title` : ''}` : '';
     const quiet = !s.ctx || s.ctx.band === 'ok' ? 'ctx-quiet' : '';
-    return `<div class="agent-tile ${lc.cls} ${s.active ? '' : 'a-closed'} ${quiet}" title="${esc(hover)}">
-      <span class="agent-state"><span aria-hidden="true">${lc.glyph}</span>${s.active ? lc.label : 'RESTORABLE'}</span>
+    // status taxonomy (on): state + source mark (◌ / "?" = low confidence, "screen" = inferred), why in the tooltip
+    const sv = s.active && d?.state;
+    const stCls = sv ? ` st-${d.stateRaw.state}${d.stateRaw.confidence !== 'high' ? ' st-unsure' : ''}` : '';
+    const stateSpan = sv
+      ? `<span class="agent-state" title="${esc(sv.tip)}"><span aria-hidden="true">${sv.glyph}</span>${esc(sv.label)}${sv.inferred ? ' <span class="st-src">screen</span>' : ''}</span>`
+      : `<span class="agent-state"><span aria-hidden="true">${lc.glyph}</span>${s.active ? lc.label : 'RESTORABLE'}</span>`;
+    return `<div class="agent-tile ${lc.cls}${stCls} ${s.active ? '' : 'a-closed'} ${quiet}" title="${esc(hover)}">
+      ${stateSpan}
       <span class="agent-name">${esc(title)}</span>
       ${d ? `<span class="agent-addr">@${esc(d.name)}${d.nameOk === false ? ' <span class="drift" title="session name drifted from the workspace title">≠</span>' : ''}</span>` : ''}
       ${sub ? `<span class="agent-cwd">${esc(sub)}</span>` : ''}
@@ -263,10 +286,12 @@ function render(data) {
 
   const attention = jobs.filter((j) => j.status !== 'ok')
     .sort((a, b) => SEVERITY[a.status] - SEVERITY[b.status]);
-  $('attention-row').classList.toggle('hidden', attention.length === 0);
+  $('attention-row').classList.toggle('hidden', attention.length === 0 && !dockMode);   // the Dock's decisions live here (#450)
   $('attention-grid').innerHTML = attention.map((j) => card(j, strips)).join('');
 
   $('demo-badge').classList.toggle('hidden', !data.demo);
+  // Guardrails-only install (SETTINGS.profile): the waiting rows, the ledger and the board's own cards. No fleet, no agents.
+  document.body.classList.toggle('profile-guardrails', data.profile === 'guardrails');
   document.querySelectorAll('.share-sep, #share-btn').forEach((el) => el.classList.toggle('hidden', !data.repoUrl));
   maybeStarToast(data.starToast);
   const domains = data.domains?.length ? data.domains : DOMAINS;
@@ -318,10 +343,19 @@ const TASK_STATE = {
   open:           { glyph: '○', label: 'OPEN',     cls: 't-open' },
   claimed:        { glyph: '◐', label: 'CLAIMED',  cls: 't-open' },
   in_progress:    { glyph: '◉', label: 'WORKING',  cls: 't-working' },
+  done:           { glyph: '✓', label: 'DONE',     cls: 't-done' },
 };
+
+// completion packet (closed tasks): PR + tests line, STALE in amber, the summary labelled generated
+function evidenceRow(ev) {
+  if (!ev) return '';
+  return `<div class="task-evidence${ev.stale ? ' is-stale' : ''}" title="${esc(ev.generated ? 'summary (generated by the agent): ' + ev.generated : '')}">`
+    + `<span class="ev-label">EVIDENCE</span> ${esc(ev.line)}`
+    + `${ev.stale ? ` <span class="chip ev-stale"><span aria-hidden="true">△</span>STALE · ${esc(ev.stale)}</span>` : ''}</div>`;
+}
 const ageLabel = (h) => (h < 1 ? `${Math.round(h * 60)}m` : h < 48 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`);
 
-function taskRow(t) {
+function taskRow(t, opts = {}) {
   const st = TASK_STATE[t.status] || TASK_STATE.open;
   const on = t.blocked_on?.length ? ` · on ${t.blocked_on.map((x) => (typeof x === 'number' ? '#' + x : x)).join(', ')}` : '';
   const dec = t.status === 'needs_approval' ? null : t.approval?.decision;
@@ -331,13 +365,16 @@ function taskRow(t) {
   const btn = (decision, label, cls) => {
     const res = decided.get(`${t.id}`);
     const armed = decideArmed && decideArmed.task === `${t.id}` && decideArmed.decision === decision && Date.now() < decideArmed.until;
-    const text = res?.decision === decision ? res.text : armed ? `CLICK AGAIN TO ${decision.toUpperCase()} #${t.id}` : label;
+    const text = res?.decision === decision ? res.text : armed ? BoardDecide.armedLabel(decision, `#${t.id}`) : label;
     return `<button class="act ${cls}${armed ? ' armed' : ''}" data-task="${t.id}" data-decision="${decision}"${res?.pending ? ' disabled' : ''}>${esc(text)}</button>`;
   };
   // a plain approval request (POLICY.md item) — gates carry their own buttons below
-  const asking = t.status === 'needs_approval' && t.approval && !t.approval.decision;
+  const asking = t.status === 'needs_approval' && t.approval && !t.approval.decision && !opts.hideAsk;   // hideAsk: a snoozed approval (attention strip)
+  // a pane answer an agent recorded: it counts only when the owner confirms it here (or says it is not what was said)
+  const heard = asking ? BoardDecide.proposalHtml(t.approval.proposal, esc) : '';
+  const H = BoardDecide.HEARD_LABELS;
   const btns = asking
-    ? `<div class="task-actions">${btn('approve', '✓ APPROVE', 'act-approve')}${btn('decline', '✕ DECLINE', 'act-decline')}</div>` : '';
+    ? `${heard}<div class="task-actions">${btn('approve', heard ? H.approve : '✓ APPROVE', 'act-approve')}${btn('decline', '✕ DECLINE', 'act-decline')}${heard ? btn('disown', H.disown, 'act-decline act-disown') : ''}</div>` : '';
   const gates = (t.gates || []).map((g) => gateRow(t, g)).join('');
   const go = t.program_go ? goRow(t) : '';
   return `<div class="task ${st.cls}">
@@ -346,6 +383,7 @@ function taskRow(t) {
     <div class="task-meta">${esc(t.owner || 'unowned')} · ${ageLabel(t.ageH)}${esc(on)}${t.priority !== 'normal' ? ' · ' + esc(t.priority) : ''}</div>
     ${policy}
     ${t.last ? `<div class="task-last">${esc(t.last)}</div>` : ''}
+    ${evidenceRow(t.evidence)}
     ${btns}${go}${gates}
   </div>`;
 }
@@ -362,27 +400,34 @@ function goRow(t) {
     <button class="act act-decline${armed ? ' armed' : ''}" data-task="${t.id}" data-revoke="1" data-decision="revoke"${res?.pending ? ' disabled' : ''}>${esc(text)}</button></div>`;
 }
 
-// Guardrails: one row per pending gate. Approval is of the EXACT text, so the whole
-// command, folder and agent are shown — wrapped, never cut (phone included).
+// Guardrails: one row per pending gate. Approval is of the EXACT text: a long command starts
+// folded below the buttons (#444), and one click shows the whole of it, wrapped, never cut.
+const evidenceOn = document.querySelector('meta[name="evidence-panel"]')?.content === 'on';   // row context: receipts link
+const gateCmdOpen = new Set();            // gates ("task:gate") whose command was unfolded; kept while the page lives
 function gateRow(t, g) {
   const key = `${t.id}:${g.id}`;
   const btn = (decision, label, cls) => {
     const res = decided.get(key);
     const armed = decideArmed && decideArmed.task === key && decideArmed.decision === decision && Date.now() < decideArmed.until;
-    const text = res?.decision === decision ? res.text : armed ? `CLICK AGAIN TO ${decision.toUpperCase()} ${g.id}` : label;
+    const text = res?.decision === decision ? res.text : armed ? BoardDecide.armedLabel(decision, g.id, g.proposal) : label;
     return `<button class="act ${cls}${armed ? ' armed' : ''}" data-task="${t.id}" data-gate="${esc(g.id)}" data-decision="${decision}"${res?.pending ? ' disabled' : ''}>${esc(text)}</button>`;
   };
   const age = ageLabel((Date.now() - Date.parse(g.requested_at)) / 36e5);
-  const dry = g.dryRun?.required ? `<div class="gate-meta">dry run: ${g.dryRun.seen_at ? `completed ${esc(String(g.dryRun.seen_at).slice(11, 16))}Z` : 'missing'}</div>` : '';
-  return `<div class="gate">
-    <div class="gate-top"><span class="chip gate-chip"><span aria-hidden="true">⛨</span>GATE ${esc(g.id)}</span><span class="gate-label">${esc(g.label || g.cls)}</span></div>
-    <pre class="gate-cmd">${esc(g.command)}</pre>
-    <div class="gate-meta">${esc(g.agent)} · ${esc(g.cwd)} · ${esc(g.tool)} · ${age} ago${g.commandRedacted ? ' · command withheld (contains a secret)' : ''}</div>
-    ${g.why ? `<div class="gate-meta">${esc(g.why)}</div>` : ''}
-    ${g.previously ? `<div class="gate-meta gate-again">↻ you approved this exact call at ${esc(String(g.previously.at).slice(11, 16))}Z (${esc(g.previously.gate)}); it expired before it ran</div>` : ''}
-    ${dry}
-    <div class="task-actions">${btn('approve', '✓ RUN ONCE', 'act-approve')}${btn('decline', '✕ DECLINE', 'act-decline')}</div>
-  </div>`;
+  // a recorded pane answer (or an approval typed in a terminal) waits on this gate: the approve
+  // button confirms it, and a third button rejects the record
+  const heard = !!BoardDecide.proposalHtml(g.proposal, esc);
+  const H = BoardDecide.heardLabels(g.proposal);
+  const actions = btn('approve', heard ? `${H.approve} · RUN ONCE` : '✓ RUN ONCE', 'act-approve') + btn('decline', '✕ DECLINE', 'act-decline')
+    + (heard ? btn('disown', H.disown, 'act-decline act-disown') : '');
+  const receiptHref = evidenceOn ? `/?evidence=1&task=${t.id}` : null;   // row context: a dry run's time links to the task's receipts
+  return BoardDecide.gateRowHtml(g, { key, esc, age, receiptHref, open: gateCmdOpen.has(key), actions });
+}
+function onCommandToggle(e) {
+  const b = e.target.closest('[data-cmd-toggle]');
+  if (!b) return;
+  const key = b.dataset.cmdToggle;
+  if (!gateCmdOpen.delete(key)) gateCmdOpen.add(key);
+  renderWork(lastWork);
 }
 
 function renderWork(work) {
@@ -397,20 +442,44 @@ function renderWork(work) {
     ${list.length ? list.map(taskRow).join('') : `<div class="work-empty">${empty}</div>`}</div>`;
   $('work-cols').innerHTML = col(`AWAITING ${String(w.owner || 'owner').toUpperCase()}`, w.needsApproval, 'nothing needs your approval')
     + col('BLOCKED', w.blocked, 'nothing blocked')
-    + col('OPEN / IN PROGRESS', w.open, 'no open cross-agent tasks');
+    + col('OPEN / IN PROGRESS', w.open, 'no open cross-agent tasks')
+    // closed in the last 24h — shown only when one carries a completion packet (the evidence is the point)
+    + ((w.closed24h || []).some((t) => t.evidence) ? col('CLOSED 24H · EVIDENCE', w.closed24h.filter((t) => t.evidence), '') : '');
   renderDecisions(w);
 }
 
 // Guardrails: the owner's decisions pinned at the top (same rows and buttons as WORK, oldest first),
 // and a "(N) " title prefix so a background tab shows the count. Hidden when nothing waits.
+// In the Dock the decisions sit in NEEDS ATTENTION and count there; this section is the blocks (#450).
 const BASE_TITLE = document.title;
+const setDockCount = (n) => { if (dockMode) $('attention-title').textContent = `NEEDS ATTENTION · ${n}`; };
 function renderDecisions(w) {
+  if (lastData?.attention) return renderAttention(w, lastData.attention);
+  $('decisions-fold').innerHTML = '';
   const waiting = [...(w.needsApproval || [])].sort((a, b) => b.ageH - a.ageH);
   const n = waiting.reduce((k, t) => k + (t.gates?.length || 0) + (t.approval && !t.approval.decision ? 1 : 0), 0);
   document.title = n ? `(${n}) ${BASE_TITLE}` : BASE_TITLE;
-  $('decisions').classList.toggle('hidden', !waiting.length);
+  const st = BoardDecide.decisionsState(waiting.length, dockMode);
+  $('decisions').classList.toggle('hidden', st.hidden);
+  $('decisions').classList.toggle('is-empty', st.empty);
   $('decisions-title').textContent = `WAITING ON ${String(w.owner || 'you').toUpperCase()} · ${n}`;
-  $('decisions-list').innerHTML = waiting.map(taskRow).join('');
+  $('decisions-list').innerHTML = waiting.length || !dockMode ? waiting.map(taskRow).join('') : BoardAttention.NOTHING;
+  setDockCount(n);
+  focusItem();
+}
+
+// ?item=<task>[:<gate>] (the phone relay's link, #415): highlight that row in the strip and scroll to it
+// once. It NEVER arms or clicks anything: deciding is still the usual two clicks.
+const ITEM = (/^(\d+)(?::(g\d+))?$/.exec(new URLSearchParams(location.search).get('item') || '') || []).slice(1);
+let itemScrolled = false;
+function focusItem() {
+  if (!ITEM[0]) return;
+  const sel = ITEM[1] ? `[data-task="${ITEM[0]}"][data-gate="${ITEM[1]}"]` : `[data-task="${ITEM[0]}"]`;
+  const btn = $('decisions-list').querySelector(sel);
+  const row = btn && (btn.closest('.gate') || btn.closest('.task'));
+  if (!row) return;
+  row.classList.add('item-focus');
+  if (!itemScrolled) { itemScrolled = true; row.scrollIntoView({ block: 'center' }); }
 }
 
 // Approvals: one delegated listener, so a re-render between press and
@@ -433,6 +502,83 @@ function onDecideClick(e) {
 }
 $('work-cols').addEventListener('click', onDecideClick);
 $('decisions-list').addEventListener('click', onDecideClick);   // the pinned strip: same buttons, same two-click arm
+$('work-cols').addEventListener('click', onCommandToggle);
+$('decisions-list').addEventListener('click', onCommandToggle);
+
+// Attention ring (SETTINGS.attention.snooze 'on', public/attention.js): one row per task, expand on
+// click, a snooze control per row (pick a length, then click it again), snoozed items in a dim fold.
+const attExpanded = new Set();            // block-only task ids opened in the strip (this tab only)
+const attCollapsed = new Set();           // decision task ids closed by hand; decisions start open (#437)
+const attPicking = new Set();             // task ids whose snooze choices are showing
+const attResults = new Map();             // 'snooze:<task>' | 'wake:<item>' -> { text, pending }
+let attArmed = null;
+let attFoldOpen = false;
+let attBlocksOpen = false;                // the "blocked on you (n)" fold
+let itemOpened = false;
+function renderAttention(w, view) {
+  const tasks = new Map([...(w.needsApproval || []), ...(w.blocked || [])].map((t) => [t.id, t]));
+  // the relay's ?item= link (#415) opens its task's row once, so focusItem can highlight the gate
+  if (ITEM[0] && !itemOpened && (view.groups || []).some((g) => String(g.task) === ITEM[0])) { itemOpened = true; attExpanded.add(ITEM[0]); attCollapsed.delete(ITEM[0]); }
+  const r = BoardAttention.renderStrip(view, tasks, {
+    esc, taskRow, dock: dockMode, expanded: attExpanded, collapsed: attCollapsed, picking: attPicking, results: attResults,
+    armed: attArmed, now: Date.now(), foldOpen: attFoldOpen, blocksOpen: attBlocksOpen,
+  });
+  const count = dockMode ? r.decisionItems : r.count;   // the Dock's title counts decisions only; its blocks have their own section
+  document.title = count ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
+  const st = BoardDecide.decisionsState(r.count, dockMode, r.snoozedCount, r.blocks);
+  $('decisions').classList.toggle('hidden', st.hidden);
+  $('decisions').classList.toggle('is-empty', st.empty);
+  $('decisions-title').textContent = `WAITING ON ${String(w.owner || 'you').toUpperCase()} · ${dockMode ? r.blocks : r.count}${r.snoozedCount ? ` · ⏾ ${r.snoozedCount}` : ''}`;
+  $('decisions-list').innerHTML = r.html;
+  $('decisions-fold').innerHTML = r.fold;
+  setDockCount(r.decisionItems);
+  focusItem();
+}
+function onAttentionClick(e) {
+  const el = e.target.closest('[data-att-toggle], [data-snooze-open], [data-snooze-close], [data-snooze], [data-unsnooze]');
+  if (!el) return;
+  const d = el.dataset;
+  if (d.attToggle) { const set = d.attDecision ? attCollapsed : attExpanded; set.has(d.attToggle) ? set.delete(d.attToggle) : set.add(d.attToggle); }
+  else if (d.snoozeOpen) { attPicking.add(d.snoozeOpen); attResults.delete(`snooze:${d.snoozeOpen}`); }
+  else if (d.snoozeClose) { attPicking.delete(d.snoozeClose); attArmed = null; }
+  else {
+    const key = d.snooze ? `snooze:${d.snooze}` : `wake:${d.unsnooze}`;
+    const r = BoardDecide.armClick(attArmed, key, d.snooze ? d.for : 'wake', Date.now());
+    attArmed = r.armed;
+    if (r.fire) {
+      const group = (lastData?.attention?.groups || []).find((g) => String(g.task) === d.snooze);
+      sendSnooze(key, d.snooze ? 'snooze' : 'unsnooze', d.snooze ? (group?.items || []).map((i) => i.id) : [d.unsnooze], d.for);
+    } else setTimeout(() => renderWork(lastWork), BoardDecide.ARM_MS + 50);
+  }
+  renderWork(lastWork);
+}
+$('decisions-list').addEventListener('click', onAttentionClick);
+$('decisions-fold').addEventListener('click', onAttentionClick);
+$('decisions-fold').addEventListener('toggle', (e) => { if (e.target.classList.contains('att-blocks')) attBlocksOpen = e.target.open; else attFoldOpen = e.target.open; }, true);
+
+async function sendSnooze(key, op, items, choice) {
+  attResults.set(key, { text: '… SENDING', pending: true });
+  renderWork(lastWork);
+  const token = document.querySelector('meta[name="mesh-decision"]')?.content || '';
+  let status = 0; let body = null;
+  try {
+    const res = await fetch(`/api/attention/${op}`, {
+      method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json', 'x-mesh-decision': token },
+      body: JSON.stringify({ items, for: choice }),
+    });
+    status = res.status;
+    body = await res.json().catch(() => null);
+  } catch { /* status 0 = never reached the board */ }
+  const out = BoardDecide.decisionOutcome(status, body);
+  attResults.set(key, { text: out.ok ? (op === 'snooze' ? '⏾ SNOOZED' : '✓ AWAKE') : out.text, pending: false });
+  if (out.ok) {
+    attPicking.delete(key.replace(/^snooze:/, ''));
+    if (body?.attention && lastData) lastData.attention = body.attention;
+  }
+  renderWork(lastWork);
+  showNotice(`${op === 'snooze' ? 'SNOOZE' : 'WAKE'} ${items.join(', ')}: ${out.ok ? (op === 'snooze' ? `snoozed until ${new Date(body.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — nothing decided` : 'back on the strip') : out.text}`, out.ok ? 'ok' : 'bad', out.reload);
+  setTimeout(() => { attResults.delete(key); renderWork(lastWork); }, 4000);
+}
 
 async function decideTask(task, decision, gate = null, revoke = false, fromStrip = false) {
   const key = revoke ? `${task}:revoke` : gate ? `${task}:${gate}` : task;
@@ -447,7 +593,7 @@ async function decideTask(task, decision, gate = null, revoke = false, fromStrip
       method: 'PATCH', signal: ctl.signal, cache: 'no-store',
       headers: { 'content-type': 'application/json', 'x-mesh-decision': token,
         'x-mesh-surface': [dockMode && 'dock', fromStrip && 'strip'].filter(Boolean).join(',') || 'panel' },
-      body: JSON.stringify(revoke ? { op: 'revoke_go' } : gate ? { op: 'gate_decide', gate, decision } : { op: 'decide', decision }),
+      body: JSON.stringify(BoardDecide.decisionBody(decision, gate, revoke)),
     });
     status = res.status;
     body = await res.json().catch(() => null);
@@ -455,7 +601,7 @@ async function decideTask(task, decision, gate = null, revoke = false, fromStrip
   const out = BoardDecide.decisionOutcome(status, body);
   decided.set(key, { decision, text: out.text, pending: false });
   renderWork(lastWork);
-  showNotice(`#${task}${gate ? ` ${gate}` : ''} ${decision.toUpperCase()}: ${out.text}`, out.ok ? 'ok' : 'bad', out.reload);
+  showNotice(`#${task}${gate ? ` ${gate}` : ''} ${decision === 'disown' ? 'NOT WHAT I SAID' : decision.toUpperCase()}: ${out.text}`, out.ok ? 'ok' : 'bad', out.reload);
   if (out.ok) fetch('/api/status').then((x) => x.json()).then(render).catch(() => {});
 }
 
