@@ -59,6 +59,18 @@ test('fast path: a call with no trigger prints nothing, exits 0, well inside the
   assert.ok(best < (process.env.CI ? 150 : 35), `third-fastest of ${times.length} runs ${best.toFixed(1)} ms (median ${median.toFixed(1)} ms)`);
 });
 
+test('no test judges the MEDIAN of timed runs: a busy machine moves the median, and this suite also runs on an installer\'s machine (#524)', () => {
+  const dir = path.join(ROOT, 'test');
+  const bad = [];
+  for (const f of readdirSync(dir).filter((n) => n.endsWith('.test.mjs'))) {
+    readFileSync(path.join(dir, f), 'utf8').split('\n').forEach((line, i) => {
+      // an assertion whose judged value is the middle of the sorted times: `median < …`, `times[30] < …`, `t[Math.floor(n / 2)] < …`
+      if (/assert\.ok\(\s*(median\b|\w+\[(30|Math\.floor\([^)]*\/ 2\))\])\s*</.test(line)) bad.push(`${f}:${i + 1}`);
+    });
+  }
+  assert.deepEqual(bad, [], `judge the third-fastest run (times[2]) and keep the median for the message — ${bad.join(', ')}`);
+});
+
 test('fast path never starts Node: GATE_NODE is a marker shim that a no-trigger call never runs (#427)', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'gate-node-'));
   const marker = path.join(dir, 'ran');

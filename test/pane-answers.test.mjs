@@ -17,6 +17,7 @@ import { createGateService } from '../src/gate-service.mjs';
 import { auditRows, gatesResolved, openProposal, pendingGates } from '../src/gate-ledger.mjs';
 import { DEFAULT_POLICY } from '../src/gates.mjs';
 import { OWNER } from '../src/config.mjs';
+import { demoEnv } from './demo-board.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const CONFIRM = { paneAnswers: 'confirm' };
@@ -335,7 +336,7 @@ function request(port, method, pathname, body, headers = {}) {
 
 test('a running board: a recorded "go" grants nothing over HTTP; "not what I said" needs the owner\'s token and no agent identity', { timeout: 40000 }, async () => {
   const port = 39700 + Math.floor(Math.random() * 90);
-  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, MC_DEMO: '1', MC_DEMO_POLL: '1', MC_PORT: String(port) }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_PORT: String(port) }), stdio: 'ignore' });
   try {
     let status = null;
     for (let i = 0; i < 100 && !status; i += 1) {

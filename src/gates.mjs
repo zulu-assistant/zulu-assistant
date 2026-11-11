@@ -84,7 +84,7 @@ export function normalizeForTriggers(text) {
 export function triggerLines(policy, opts = {}) { return triggerSpecs(policy, opts).map((t) => t.ere); }
 /** The lines with what the board needs to know about each: `live` lines are also matched against the call's folder. */
 function triggerSpecs(policy, opts = {}) {
-  const lines = new Set(); const liveLines = new Set(); const plain = new Set();
+  const lines = new Set(); const liveLines = new Set(); const plain = new Set(); const routeLines = new Set();   // route lines send the call to the rules and never decide a hold by themselves
   // lines that come from a rule of a 1.3 check are matched against the command on ONE line, as the shell
   // sees it in the hook JSON (a real line break reads as a space). Older lines keep their reading.
   // A line that only a check's rules add belongs to that check: while the check is not enforced it routes
@@ -138,6 +138,9 @@ function triggerSpecs(policy, opts = {}) {
           const base = path.basename(String(g));
           if (!base || base.includes('*')) continue;
           out.add(`${ereEsc(base)}${r.args?.[0] ? `${SP}+${ereEsc(r.args[0])}${E}` : E}`);
+          // …and the script handed over on the input, where the subcommand does not follow the name
+          // (`sh -s -- gate 5 g1 approve < task.sh`, `cat task.sh | sh -s -- gate …`) (#532)
+          if (r.args?.[0]) for (const l of [`<${SP}*[^[:space:]]*${ereEsc(base)}${E}`, `cat${SP}[^|;&]*${ereEsc(base)}[^|;&]*[|]`, `cat${SP}+[^[:space:]]*${ereEsc(base)}${SP}*[)]`]) { out.add(l); routeLines.add(l); }
         }
       }
       if (r.tool) out.add(`tool_name:${SP}*${toolEre(r.tool)}`);
@@ -175,7 +178,8 @@ function triggerSpecs(policy, opts = {}) {
   }
   fromCheck = false;
   return [...lines].map((ere) => ({ ere, live: liveLines.has(ere), flat: liveLines.has(ere) || !plain.has(ere),
-    ...(!plain.has(ere) && checkOf.has(ere) ? { check: checkOf.get(ere) } : {}), ...(pathInfo.has(ere) ? { path: pathInfo.get(ere) } : {}) }));
+    ...(!plain.has(ere) && checkOf.has(ere) ? { check: checkOf.get(ere) } : {}), ...(pathInfo.has(ere) ? { path: pathInfo.get(ere) } : {}),
+    ...(routeLines.has(ere) ? { route: true } : {}) }));
 }
 // long flags exactly (--commit, --commit=x); one-letter flags also inside clusters (-rf).
 // A flag may end the command, so in the hook's JSON it is followed by `",` → after quote-stripping a
@@ -234,7 +238,7 @@ function pathFragments(p, policy) {
 export function ereToJs(ere) {
   const src = ere.replace(/\[\[:space:\]\]/g, '\\s').replace(/\[\^\[:alnum:\]_\.-\]/g, '[^A-Za-z0-9_.-]')
     .replace(/\[\^\[:alnum:\]_-\]/g, '[^A-Za-z0-9_-]').replace(/\[\[:space:\]=\]/g, '[\\s=]')
-    .replace(/\[\[:alnum:\]\]/g, '[A-Za-z0-9]');
+    .replace(/\[\[:alnum:\]\]/g, '[A-Za-z0-9]').replace(/\[\^\[:space:\]\]/g, '\\S');
   return new RegExp(src, 'i');
 }
 export function compileTriggers(policy, opts) { return triggerSpecs(policy, opts).map((t) => ({ ...t, re: ereToJs(t.ere) })); }
@@ -375,7 +379,7 @@ export function parseCommand(src, depth = 0, opts = {}) {
       if (!/[$`]/.test(m[2])) vars[m[1]] = m[2]; else delete vars[m[1]];
     }
     const w = words(c.raw, opts);
-    const cmd = { tokens: w.tokens, bin: w.bin, assignOnly: !w.bin, redirects: c.redirects, reads: c.reads, sepBefore: c.sepBefore, fromSub: !!c.fromSub, dynamicBin: w.dynamic, text: c.raw.join(' '),
+    const cmd = { tokens: w.tokens, bin: w.bin, assignOnly: !w.bin, redirects: c.redirects, reads: c.reads, hereFiles: (c.herestrings || []).map(hereFile).filter(Boolean), sepBefore: c.sepBefore, fromSub: !!c.fromSub, dynamicBin: w.dynamic, text: c.raw.join(' '),
       cdTargets: [...cd.targets], cdUnknown: cd.unknown };
     const inline = inlineBodies(cmd.bin, cmd.tokens);
     if (inline.length) cmd.inlineBodies = inline;
@@ -405,6 +409,8 @@ export function parseCommand(src, depth = 0, opts = {}) {
   }
   return { cmds: out, data, opaque, vars };
 }
+// a here-string that is one file's content (`<<< "$(cat x.sh)"`, `<<< "$(< x.sh)"`): the file
+const hereFile = (h) => (String(h).trim().replace(/^["']|["']$/g, '').match(/^\$\(\s*(?:cat\s+|<\s*)([^\s|;&$`()<>]+)\s*\)$/) || [])[1] || null;
 function newCmd(sep) { return { raw: [], redirects: [], reads: [], heredocs: [], herestrings: [], sepBefore: sep, opens: sep === '(' ? 1 : 0, closes: sep === ')' ? 1 : 0 }; }
 function skipDq(s, j) { while (j < s.length && s[j] !== '"') j += s[j] === '\\' ? 2 : 1; return j + 1; }
 
@@ -539,6 +545,7 @@ function classifyWith(input, policy, ctx, on) {
   };
   const decides = (h, body) => {
     if (h.check && !on.has(h.check)) return false;
+    if (h.route) return false;                       // it only routed the call here; the rules above read the command
     if (!h.re.test(body)) return false;
     if (!h.path) return true;
     return h.path.some((pi) => (pi.old.length >= 6 && body.toLowerCase().includes(normalizeForTriggers(pi.old).toLowerCase())) || inPlace(pi));
@@ -575,7 +582,10 @@ function classifyWith(input, policy, ctx, on) {
       if (hit) return gate(cls, r, `a redirect writes ${hit}`, { cmd: c });
     }
   }
-  for (const c of runnable) {
+  // a script handed to an interpreter or a shell on its input (`bash < install.sh`, `cat x.mjs | node - --commit`)
+  // is a run of that script: the script rules read it as `bash install.sh` / `node x.mjs --commit` (#532)
+  const fromInput = parsed.cmds.flatMap((c, k) => stdinScriptRuns(c, parsed.cmds[k - 1]));
+  for (const c of [...runnable, ...fromInput]) {
     if (!c.bin) continue;
     // judge each command in the folder it actually runs in: `cd X && …`, `git -C X …`
     const where = commandCwd(c, input.cwd, ctx);
@@ -668,15 +678,41 @@ function keywordHit(norm, policy) {
 const jsEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const listOr = (p, policy) => (String(p).startsWith('@') ? policy?.lists?.[String(p).slice(1)] || [] : [p]);
 
+// Flags of the interpreters and shells whose next word is the flag's value, not the script (#530):
+// `node --import ./pre.mjs scripts/x.mjs`, `bash --rcfile ./rc.sh x.sh`. The list only picks which word is
+// called "the script"; a rule that names a script is tried on every script-looking word (scriptWords).
+const NODE_VALUE_FLAGS = ['-r', '--require', '--import', '--loader', '--experimental-loader', '--env-file', '--env-file-if-exists',
+  '--cpu-prof-dir', '--heap-prof-dir', '--diagnostic-dir', '--report-dir', '--report-directory', '--snapshot-blob', '--build-snapshot-config',
+  '--experimental-config-file', '--openssl-config', '--icu-data-dir', '--redirect-warnings', '--watch-path', '-C', '--conditions',
+  '--preload', '--tsconfig', '--project', '-P', '--config', '--cwd'];
+const SHELL_VALUE_FLAGS = ['--rcfile', '--init-file', '-O', '+O', '-o', '+o'];
+const SCRIPT_VALUE_FLAGS = { python: ['-W', '-X', '-Q'], python3: ['-W', '-X'], ruby: ['-I', '-r', '-C', '-E', '-K', '-F', '-T'], perl: ['-I', '-M', '-m', '-C'], php: ['-c', '-d', '-z', '-F'] };
+const scriptValueFlag = (bin, t) => (SHELLS.has(bin) ? SHELL_VALUE_FLAGS : SCRIPT_VALUE_FLAGS[bin] || NODE_VALUE_FLAGS).includes(t);
+const scriptLike = (p) => SCRIPT_EXT.test(p) || p.includes('/');
+/** Every word of an interpreter or shell call that looks like a script, with whether it sits where a flag's value sits. */
+function scriptCands(c) {
+  const out = [];
+  for (let k = 1; k < c.tokens.length; k++) {
+    const t = c.tokens[k];
+    if (t.startsWith('-') || !scriptLike(t)) continue;
+    out.push({ word: t, value: scriptValueFlag(c.bin, c.tokens[k - 1]) });
+  }
+  return out;
+}
+/** The script-looking words of an interpreter or shell call, in order (a flag's value included). */
+export function scriptWords(c) {
+  if (!c?.bin || !(INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) return [];
+  return scriptCands(c).map((x) => x.word);
+}
 export function isScript(c) {
   if (!c.bin) return false;
-  if (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin)) return positionals(c).some((p) => SCRIPT_EXT.test(p) || p.includes('/'));
+  if (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin)) return scriptCands(c).length > 0;
   if (c.bin === 'npx' || c.bin === 'uv' || c.bin === 'pnpm' || c.bin === 'npm') return c.tokens.length > 1;
   return c.tokens[0].includes('/') || SCRIPT_EXT.test(c.tokens[0]);
 }
 /** The script a command runs (its path token), for dry-run bookkeeping. */
 export function scriptPath(c) {
-  if (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin)) return positionals(c).find((p) => SCRIPT_EXT.test(p) || p.includes('/')) || null;
+  if (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin)) { const cs = scriptCands(c); return (cs.find((x) => !x.value) || cs[0])?.word || null; }
   return c.tokens[0];
 }
 
@@ -704,11 +740,48 @@ export function ghWordsMatch(tokens, words) {
   return walk(1, 0);
 }
 
-function ruleMatch(r, c, input, policy, ctx) {
+/**
+ * The runs of a script that reaches an interpreter or a shell on its input, each written as the plain form
+ * (`<program> [its own options] <file> [the script's words]`), for the rules on a script to read. The input is the
+ * program only when the call names no script itself: no word at all (`bash < x.sh`, `node --input-type=module < x.mjs`),
+ * or the words follow `-s`, `-` or `--` (`bash -s -- --yes < install.sh`, `node - --commit < x.mjs`). With a script on
+ * the line (`node x.mjs < data.json`) or a program in a word (`bash -c …`, `node -e …`) the input is data.
+ * The file comes from an input redirect, from `cat <files>` piped in, or from a here-string that is one file's content.
+ */
+function stdinScriptRuns(c, prev) {
+  if (!c?.bin || c.viaStdin || !(INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) return [];
+  const piped = (c.sepBefore === '|' || c.sepBefore === '|&') && prev?.bin === 'cat' ? prev.tokens.slice(1).filter((t) => !t.startsWith('-')) : [];
+  const files = [...(c.reads || []), ...(c.hereFiles || []), ...piped].filter((t) => t && !/[$`*?]/.test(t) && !t.startsWith('/dev/'));
+  if (!files.length) return [];
+  const rest = c.tokens.slice(1);
+  const lead = []; let args = null;
+  for (let k = 0; k < rest.length; k++) {
+    const t = rest[k];
+    if (t === '--' || t === '-' || (SHELLS.has(c.bin) && /^-[a-zA-Z]*s[a-zA-Z]*$/.test(t))) { if (t !== '--' && t !== '-') lead.push(t); args = rest.slice(k + 1).filter((x, j) => !(j === 0 && x === '--')); break; }
+    if (!t.startsWith('-') && !t.startsWith('+')) {
+      if (scriptValueFlag(c.bin, rest[k - 1])) { lead.push(t); continue; }       // a flag's value (`-r ./pre.cjs`), not a script of its own
+      return [];                                                                 // a word of its own: the call names its program, the input is data
+    }
+    if (/^-[a-zA-Z]*[cep]$/.test(t) || ['--eval', '--print', '--command'].includes(t)) return [];   // a program in a word
+    lead.push(t);
+  }
+  return files.map((file) => ({ ...c, tokens: [c.tokens[0], ...lead, file.includes('/') ? file : `./${file}`, ...(args || [])], reads: [], redirects: (c.redirects || []).filter((t) => t !== file), viaStdin: file }));
+}
+
+function ruleMatch(r, c, input, policy, ctx, only) {
+  if (c.viaStdin && !(r.scriptIn || r.script)) return null;       // the rewritten form exists for the script rules only
+  // A rule that names a script is tried on every script-looking word of an interpreter or shell call, not only
+  // the first: the first may be a flag's value (`node --import ./pre.mjs scripts/upgrade.mjs`), and no list of
+  // value flags is ever complete. It can only add a hold (#530).
+  if (r.scriptIn && only == null && (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) {
+    for (const w of new Set(scriptWords(c))) { const hit = ruleMatch(r, c, input, policy, ctx, w); if (hit) return hit; }
+    return null;
+  }
+  const theScript = only ?? scriptPath(c);
   if (r.scriptIn) {
     // a script on a named list (e.g. @guardedScripts): gated on every run, whatever its flags
     if (!isScript(c)) return null;
-    const sp = scriptPath(c);
+    const sp = theScript;
     const abs = sp ? absPath(sp, input.cwd, ctx) : null;
     const nc = nocaseOf(ctx);                          // the script's name in another letter case is the same script there
     if (!abs || !listOr(r.scriptIn, policy).some((g) => globMatch(expandPath(g, ctx), abs, nc) || globMatch(g, path.basename(abs), nc))) return null;
@@ -720,13 +793,13 @@ function ruleMatch(r, c, input, policy, ctx) {
     if (HELP_BINS.has(c.bin) && positionals(c)[0] === 'help') return null;
   } else if (r.sql) {
     const sqlBins = ['psql', 'sqlite3', 'mysql', 'supabase', 'duckdb'];
-    if (!(sqlBins.includes(c.bin) || /sql/i.test(path.basename(scriptPath(c) || '')))) return null;
+    if (!(sqlBins.includes(c.bin) || [scriptPath(c), ...scriptWords(c)].some((w) => /sql/i.test(path.basename(w || ''))))) return null;
     return new RegExp(r.sql, 'i').test(c.tokens.join(' ')) ? `SQL: ${c.tokens.join(' ').match(new RegExp(r.sql, 'i'))[0]}` : null;
   } else if (!r.pathAny && !r.pathWrite && !r.pathGuard && !r.textAny) return null;
 
   // for a script rule, args are the script's own arguments (after `node x.mjs` / `bash x.sh`)
   let pos = positionals(c);
-  if (r.scriptIn && (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) pos = pos.slice(pos.indexOf(scriptPath(c)) + 1);
+  if (r.scriptIn && (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) pos = c.tokens.slice(c.tokens.indexOf(theScript) + 1).filter((t) => !t.startsWith('-'));
   if (r.args && !r.args.every((a, k) => pos[k] === a) && !(c.bin === 'gh' && ghWordsMatch(c.tokens, r.args))) return null;
   if (r.argsAny && !r.argsAny.some((a) => pos.includes(a) || c.tokens.includes(a))) return null;
   if (r.notArgs && r.notArgs.some((pre) => pre.every((a, k) => pos[k] === a))) return null;
@@ -760,7 +833,7 @@ function ruleMatch(r, c, input, policy, ctx) {
   if (r.when === 'liveCheckout') return liveGit(c, input, policy, ctx);
   if (r.when === 'boardProcess') return killsBoard(c, input, ctx);
   if (r.flagsAny) return `${r.flagsAny.find((f) => hasFlag(c, f))} on ${scriptPath(c) || c.bin}`;
-  if (r.scriptIn) return `runs ${scriptPath(c)}${r.args || r.argsAny ? ` ${pos.slice(1, 3).join(' ')}` : ''}`;
+  if (r.scriptIn) return `runs ${theScript}${r.args || r.argsAny ? ` ${pos.slice(1, 3).join(' ')}` : ''}`;
   return `${c.bin} ${pos.slice(0, 2).join(' ')}`.trim();
 }
 

@@ -50,7 +50,7 @@ import { focusOf } from './src/gate-ledger.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   DEMO, DEMO_POLL_SECONDS, DEMO_DOMAINS, demoSnapshot, demoContext, demoDirectory, demoHistory, demoBeats,
-  demoFeed, demoLog, seedDemoLedger, DEMO_GATE,
+  demoFeed, demoLog, seedDemoLedger, demoTasksDir, DEMO_GATE,
 } from './src/demo.mjs';
 import { readStar, successMoment, toastFor, recordToast } from './src/star.mjs';
 import { snoozeMode, attentionItems, buildAttention, settle as settleAttention, snoozedByTask, snoozeRefusal, applySnooze, readAttentionState, writeAttentionState, itemText, SNOOZE_CHOICES } from './src/attention.mjs';
@@ -94,9 +94,10 @@ const PUBLIC = path.join(ROOT, 'public');
 const HISTORY_FILE = path.join(ROOT, 'data', 'history.json');
 
 // ---- Agent Mesh: task ledger + directory + delivery ----
-// demo mode gets its own throwaway ledger, re-seeded on every start
+// demo mode gets its own throwaway ledger, re-seeded on every start (data/demo-tasks, or the folder
+// MC_DEMO_TASKS names: two demo boards must not share one, src/demo.mjs demoTasksDir)
 const ledger = DEMO
-  ? await seedDemoLedger(path.join(ROOT, 'data', 'demo-tasks'), createLedger)
+  ? await seedDemoLedger(demoTasksDir(ROOT).dir, createLedger, { own: demoTasksDir(ROOT).own, root: ROOT })
   : createLedger(path.join(ROOT, 'data', 'tasks'));
 // Guardrails (docs/GUARDRAILS.md): the gate hook asks POST /api/gates/check; the policy is
 // overlay/policy.json → examples/policy.json; state in data/guardrails/ (demo: its own dir)

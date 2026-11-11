@@ -8,6 +8,9 @@
 (^|[^[:alnum:]_.-])zulu([^[:alnum:]_-]|$)(.*[^[:alnum:]_.-])?rollback([^[:alnum:]_-]|$)
 upgrade\.mjs([^[:alnum:]_-]|$)
 install\.sh[[:space:]]+upgrade([^[:alnum:]_-]|$)
+<[[:space:]]*[^[:space:]]*install\.sh([^[:alnum:]_-]|$)
+cat[[:space:]][^|;&]*install\.sh[^|;&]*[|]
+cat[[:space:]]+[^[:space:]]*install\.sh[[:space:]]*[)]
 install\.sh[[:space:]]+rollback([^[:alnum:]_-]|$)
 (^|[^[:alnum:]_.-])gh([^[:alnum:]_-]|$)(.*[^[:alnum:]_.-])?secret([^[:alnum:]_-]|$)(.*[^[:alnum:]_.-])?(set|delete)([^[:alnum:]_-]|$)
 (^|[^[:alnum:]_.-])gh([^[:alnum:]_-]|$)(.*[^[:alnum:]_.-])?variable([^[:alnum:]_-]|$)(.*[^[:alnum:]_.-])?(set|delete)([^[:alnum:]_-]|$)
@@ -30,7 +33,13 @@ data/guardrails
 gate_decide
 x-mesh-decision
 task\.sh[[:space:]]+gate([^[:alnum:]_-]|$)
+<[[:space:]]*[^[:space:]]*task\.sh([^[:alnum:]_-]|$)
+cat[[:space:]][^|;&]*task\.sh[^|;&]*[|]
+cat[[:space:]]+[^[:space:]]*task\.sh[[:space:]]*[)]
 mesh-cli\.mjs[[:space:]]+task([^[:alnum:]_-]|$)
+<[[:space:]]*[^[:space:]]*mesh-cli\.mjs([^[:alnum:]_-]|$)
+cat[[:space:]][^|;&]*mesh-cli\.mjs[^|;&]*[|]
+cat[[:space:]]+[^[:space:]]*mesh-cli\.mjs[[:space:]]*[)]
 (^|[^[:alnum:]_-])((--signed)([^[:alnum:]_-]|$))
 (^|[^[:alnum:]_-])((--guardrails)([^[:alnum:]_-]|$))
 install\.sh[[:space:]]+guardrails([^[:alnum:]_-]|$)

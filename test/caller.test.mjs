@@ -23,6 +23,7 @@ import { decisionSurface } from '../src/gate-ledger.mjs';
 import { DEFAULT_POLICY } from '../src/gates.mjs';
 import { localVerdict, sessionWorkspace } from '../scripts/gate-hook.mjs';
 import { OWNER } from '../src/config.mjs';
+import { demoEnv } from './demo-board.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ip = (...parts) => parts.join('.');               // other tailnet-range addresses, built here so no address literal sits in the file
@@ -601,7 +602,7 @@ test('board down: the hook reads its session from the agent process above it; a 
 // ── the running demo board with the door switched on (MC_DEMO_CALLER=1) ──
 test('a running board: an owner decision made from this test process is refused exactly when an agent runs the suite; other writes are untouched', { skip: !HAS_LSOF && 'lsof is not installed', timeout: 60000 }, async () => {
   const port = 39600 + Math.floor(Math.random() * 90);
-  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, MC_DEMO: '1', MC_DEMO_POLL: '1', MC_DEMO_CALLER: 'observe,agent', MC_PORT: String(port) }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_DEMO_CALLER: 'observe,agent', MC_PORT: String(port) }), stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   const J = { 'content-type': 'application/json' };
   try {
@@ -651,7 +652,7 @@ const leave = (port, pathname, token, body) => new Promise((resolve) => {
 });
 async function demoBoard(switches, portBase) {
   const port = portBase + Math.floor(Math.random() * 40);
-  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, MC_DEMO: '1', MC_DEMO_POLL: '1', MC_DEMO_CALLER: switches, MC_PORT: String(port) }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_DEMO_CALLER: switches, MC_PORT: String(port) }), stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   const J = { 'content-type': 'application/json' };
   let status = null;

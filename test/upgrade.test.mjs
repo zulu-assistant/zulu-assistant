@@ -8,6 +8,7 @@ import { sh } from '../src/worktree.mjs';
 import { parseSemver, cmpSemver, pickRelease, upgradeConfig, repoOfRemote, releaseInstall, upgradeCard, requestAllowed, upgradePlist, maybeUpgradeCheck } from '../src/upgrade.mjs';
 import { preflight, runUpgrade } from '../scripts/upgrade.mjs';
 import { migrate } from '../scripts/migrate.mjs';
+import { demoEnv } from './demo-board.mjs';
 
 // One-click upgrade (#346): real git in temp dirs under a path WITH A SPACE. The "public repo" is a
 // local bare remote reached through a github.com URL (url.<path>.insteadOf), so nothing touches the network.
@@ -177,7 +178,7 @@ test('migrate: idempotent, add-only in overlay/, every touched file backed up, s
 test('the UPDATE route (demo board): token required, agent identity refused, /api/version answers', { timeout: 30000 }, async () => {
   const { spawn } = await import('node:child_process');
   const port = 39000 + Math.floor(Math.random() * 900);
-  const child = spawn(process.execPath, ['server.mjs'], { cwd: process.cwd(), env: { ...process.env, MC_DEMO: '1', MC_DEMO_POLL: '1', MC_PORT: String(port) }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['server.mjs'], { cwd: process.cwd(), env: demoEnv({ MC_PORT: String(port) }), stdio: 'ignore' });
   try {
     const at = (p, o) => fetch(`http://127.0.0.1:${port}${p}`, o);
     let v = null;

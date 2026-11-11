@@ -42,6 +42,11 @@ export function classify(files, manifest) {
   }
   const pubSet = new Set(out.public);
   out.shadowed = out.mapped.filter((m) => pubSet.has(m.to)).map((m) => m.from);
+  // The public edition is this script's own output: the manifest names a publicRoot but no file sits under it, because
+  // the public-only files were published at their stripped paths (README.md, docs/…). Those are the files the manifest
+  // does not list, so there they are the public-only set, not strays. Without this, `--check` failed in every public
+  // checkout, and the one-click upgrade runs it after the tests (it rolled back every upgrade from 1.2.0).
+  if (root && !out.mapped.length && files.length) { out.edition = 'public'; out.publishedOnly = out.unclassified; out.unclassified = []; }
   return out;
 }
 
@@ -65,7 +70,8 @@ async function main() {
   ];
   if (args.includes('--check')) {
     for (const p of problems) console.log(p);
-    console.log(`${c.public.length} public · ${c.mapped.length} public-only · ${c.private.length} private · ${problems.length} problem(s)`);
+    if (c.edition === 'public') console.log(`public edition: ${c.publishedOnly.length} file(s) outside the manifest are the published public-only set`);
+    console.log(`${c.public.length} public · ${c.edition === 'public' ? c.publishedOnly.length : c.mapped.length} public-only · ${c.private.length} private · ${problems.length} problem(s)`);
     process.exit(problems.length ? 1 : 0);
   }
   const target = args.find((a) => !a.startsWith('--'));

@@ -11,7 +11,8 @@
 // A scripted incident loops every CYCLE_S seconds so a recording shows the
 // whole story: a job fails → the self-heal restarts it → it goes green again →
 // a worker needs input → a ledger task closes.
-import { rm, mkdir } from 'node:fs/promises';
+import { rm, mkdir, readdir, unlink, writeFile, realpath } from 'node:fs/promises';
+import path from 'node:path';
 
 export const DEMO = process.env.MC_DEMO === '1';
 export const DEMO_POLL_SECONDS = Number(process.env.MC_DEMO_POLL) || 5;
@@ -209,9 +210,49 @@ export function demoLog(label) {
 }
 
 /** Fresh demo ledger each start: one task per column so the WORK panel is populated. */
-export async function seedDemoLedger(dir, createLedger) {
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dir, { recursive: true });
+/**
+ * Where a demo board keeps its ledger: `data/demo-tasks` in the checkout, or the folder named by
+ * MC_DEMO_TASKS. Two demo boards must never share one: each re-seeds the folder at startup, and
+ * boards started together in one checkout removed each other's files mid-write and died at once
+ * (ENOENT, exit 1). Every test that starts a demo board gives it a folder of its own (test/demo-board.mjs).
+ * → { dir, own: true when the environment named it }
+ */
+export function demoTasksDir(root, env = process.env) {
+  const named = typeof env.MC_DEMO_TASKS === 'string' && env.MC_DEMO_TASKS.trim();
+  return named ? { dir: path.resolve(named), own: true } : { dir: path.join(root, 'data', 'demo-tasks'), own: false };
+}
+/** A ledger's own files: `<id>.json`, and the temporary name an atomic write uses. */
+const LEDGER_FILE = /^\d+\.json(\.\d+\.tmp)?$/;
+/** Written into a folder the environment named, once a demo board has seeded it: only a folder that carries it is ever emptied again. */
+export const DEMO_MARKER = '.demo-ledger';
+const real = async (p) => { try { return await realpath(p); } catch { return path.resolve(p); } };
+const samePath = (a, b) => (process.platform === 'darwin' || process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+
+/**
+ * Empty the demo ledger folder and seed it. The default folder is the demo's own and is removed
+ * whole. A folder the ENVIRONMENT named (`own`) is never removed, and a wrong value must not cost
+ * anyone a file. Its numbered task files are deleted only when a demo board seeded that folder
+ * before (it carries DEMO_MARKER); otherwise it must be empty. Refused, whatever they hold:
+ *   - the checkout's real ledger folder (`<root>/data/tasks`), by its resolved path: a ledger
+ *     folder holds nothing but numbered files, so nothing else would tell it from a demo's
+ *   - a folder that holds files and no marker (another install's ledger, a restored copy, anything)
+ *   - a marked folder that holds something that is not a ledger's own file
+ */
+export async function seedDemoLedger(dir, createLedger, { own = false, root = null } = {}) {
+  if (own) {
+    if (root && samePath(await real(dir), await real(path.join(root, 'data', 'tasks')))) throw new Error('MC_DEMO_TASKS names this checkout\'s real ledger folder (data/tasks): a demo board never writes there');
+    await mkdir(dir, { recursive: true });
+    const names = await readdir(dir);
+    const marked = names.includes(DEMO_MARKER);
+    const strangers = names.filter((n) => n !== DEMO_MARKER && !LEDGER_FILE.test(n));
+    if (names.length && !marked) throw new Error(`MC_DEMO_TASKS names a folder that holds files and was not made by a demo board (${names.slice(0, 3).join(', ')}): give the demo board an empty folder of its own`);
+    if (strangers.length) throw new Error(`MC_DEMO_TASKS names a folder that holds other files (${strangers.slice(0, 3).join(', ')}): give the demo board an empty folder of its own`);
+    for (const n of names) if (n !== DEMO_MARKER) await unlink(path.join(dir, n)).catch(() => {});
+    await writeFile(path.join(dir, DEMO_MARKER), 'A demo board (MC_DEMO=1, MC_DEMO_TASKS) keeps its throwaway ledger here and empties this folder at every start.\n');
+  } else {
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dir, { recursive: true });
+  }
   const L = createLedger(dir);
   const mk = (title, requester, owner, priority = 'normal') => L.create({ title, requester, owner, priority, owner_ws: null });
   const t1 = await mk('Publish the 0.1.0 release notes to the mailing list', 'mission-control', 'docs-worker');

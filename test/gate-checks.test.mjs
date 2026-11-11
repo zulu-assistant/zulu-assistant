@@ -219,7 +219,8 @@ test('fast path timing: a call with no trigger is as fast with the new lines as 
   }
   times.sort((a, b) => a - b);
   const median = times[Math.floor(times.length / 2)];
-  assert.ok(median < (process.env.CI ? 150 : 35), `median ${median.toFixed(1)} ms`);   // the same ceilings as test/gate-hook.test.mjs
+  // third-fastest of the 60 runs, not the median: a busy machine delays most runs but not the fastest few (test/gate-hook.test.mjs, #524)
+  assert.ok(times[2] < (process.env.CI ? 150 : 35), `third-fastest of ${times.length} runs ${times[2].toFixed(1)} ms (median ${median.toFixed(1)} ms)`);   // the same ceilings as test/gate-hook.test.mjs
 });
 
 // ── the board side: observe leaves a reading and nothing else ──

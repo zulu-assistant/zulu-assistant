@@ -25,6 +25,7 @@ import { auditRows, pendingGates, proposalWhat } from '../src/gate-ledger.mjs';
 import { enqueue, drainOutbox, readOutbox, NEVER_SUPERSEDED, HOLD_KIND } from '../src/mesh.mjs';
 import { DEFAULT_POLICY } from '../src/gates.mjs';
 import { OWNER } from '../src/config.mjs';
+import { demoEnv } from './demo-board.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const iso = (ms) => new Date(ms).toISOString();
@@ -412,7 +413,7 @@ async function demoBoard(caller, portBase) {
   // the shipped policy (every registered agent enforced), whatever policy this checkout's overlay holds
   const overlay = await mkdtemp(path.join(os.tmpdir(), 'caller overlay-'));
   await writeFile(path.join(overlay, 'policy.json'), JSON.stringify(DEFAULT_POLICY));
-  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, MC_DEMO: '1', MC_DEMO_POLL: '1', MC_DEMO_CALLER: caller, MC_PORT: String(port), MC_OVERLAY: overlay }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_DEMO_CALLER: caller, MC_PORT: String(port), MC_OVERLAY: overlay }), stdio: 'ignore' });
   const url = `http://127.0.0.1:${port}`;
   let status = null;
   for (let i = 0; i < 100 && !status; i += 1) { await new Promise((r) => setTimeout(r, 150)); status = await fetch(`${url}/api/status`).then((r) => (r.ok ? r.json() : null)).catch(() => null); }

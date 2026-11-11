@@ -180,7 +180,9 @@ test('a Guardrails-only board with no cmux on PATH: no collector, mesh or heal; 
     let errs = ''; child.stderr.on('data', (d) => { errs += d; });
     const base = `http://127.0.0.1:${c.port}`;
     let status = null;
-    for (let i = 0; i < 100 && !status?.poll?.stages?.['guardrails-card']; i += 1) {
+    // wait for a whole poll: 'events' is its last stage here. (Waiting for 'guardrails-card', the FIRST stage,
+    // let the status be read between two stages, and the check below then missed 'board-cards'.)
+    for (let i = 0; i < 100 && !status?.poll?.stages?.events; i += 1) {
       await new Promise((r) => setTimeout(r, 150));
       status = (await getJson(`${base}/api/status`).catch(() => null))?.body;
     }

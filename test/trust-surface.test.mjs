@@ -16,6 +16,7 @@ import { createGateService } from '../src/gate-service.mjs';
 import { hookInput, localVerdict } from '../scripts/gate-hook.mjs';
 import { renderPolicy } from '../scripts/policy-render.mjs';
 import { OWNER, isOwner } from '../src/config.mjs';
+import { demoEnv } from './demo-board.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -281,7 +282,7 @@ function rawRequest(port, { method = 'POST', pathname, headers = {}, body = '' }
 
 test('a running board: card actions need the owner\'s token; cross-site, wrong-host and non-JSON writes are refused; the CLI and the page still work', { timeout: 40000 }, async () => {
   const port = 39900 + Math.floor(Math.random() * 90);
-  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, MC_DEMO: '1', MC_DEMO_POLL: '1', MC_PORT: String(port) }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_PORT: String(port) }), stdio: 'ignore' });
   const J = { 'content-type': 'application/json' };
   const H = `127.0.0.1:${port}`;
   try {
