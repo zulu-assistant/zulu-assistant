@@ -6,7 +6,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { classify, shippedRulesMissing, isEnforced, wouldEnforce, headlessName, isHeadless, compileTriggers, triggerLines, cmdHash, describeToolCall, dryHash, scriptPath, shellQuote, repoSlug, globMatch, positionals, HASH_VERSION, DEFAULT_POLICY, OPAQUE, CHECKS, CHECK_MODES } from './gates.mjs';
+import { classify, parseCommand, commandCwd, shippedRulesMissing, isEnforced, wouldEnforce, headlessName, isHeadless, compileTriggers, triggerLines, cmdHash, describeToolCall, dryHash, scriptPath, shellQuote, repoSlug, globMatch, positionals, pushAddress, pushSlug, isShellTool, UNREAD_MARK, scriptsRun, HASH_VERSION, DEFAULT_POLICY, OPAQUE, CHECKS, CHECK_MODES } from './gates.mjs';
 import { hookIdentity } from './caller.mjs';
 import { createGateStore, auditRows, focusOf } from './gate-ledger.mjs';
 import { containsSecret, LIVE_STATUSES, activeProgramGo } from './tasks.mjs';
@@ -175,6 +175,8 @@ export const denyText = {
   dry: (t, cmd) => `GATE: run the dry form first, in this task (#${t}): ${cmd} — then try the write form again.`,
   focus: (n) => `GATE: you have ${n} live tasks and no focus, so this gate would land on the wrong one. Set it first: task.sh focus <N> — then retry.`,
   down: () => 'GATE: board unreachable — gated command not run (fail closed). Retry when the board is up.',
+  // #548: nothing filed. A row the owner could approve here would be bound to nothing (no commit, no PR head, no script)
+  restate: (why) => `GATE: not run and not filed — ${why}. Codex does not tell the gate which folder a command runs in, so this call cannot be read. Run it again with the folder or repo in the command itself (git -C /abs/path …, cd /abs/path && …, gh … --repo owner/name, an absolute script path); that call is read and, if it needs the owner, asked as usual.`,
 };
 
 export function createGateService({ root, ledger, policyFile, identifyWs, headlessWs = () => null, mcName = async () => 'mission-control', isPrivateRepo = ghIsPrivate, prInfo = ghPrInfo, recordEvent = async () => {}, afterTaskChange = async () => {}, ownerId = 'owner', home = os.homedir(), git = defaultGit, now = () => Date.now(), stateDir, board, receiptChain = 'on' }) {
@@ -250,6 +252,32 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     git,
   });
   const redact = (s) => (containsSecret(s) ? null : s);
+  // #548: cwd null (a Codex call whose folder was not told): gh would read the PR of whatever folder it runs in, so
+  // only a PR whose repo the command names is read
+  const readPr = (cmd, cwd) => (!cwd && !namesPrRepo(cmd) ? Promise.resolve(null) : Promise.resolve(prInfo(cmd, cwd || root)).catch(() => null));
+  // One rule (#551, MC's second read of PR 147): every held Codex shell call whose folder is unread is refused, unless it
+  // is a gh call that names its repository. Then the folder on a Codex row is always where the call runs.
+  async function unreadRefusal(r, input, command, cwd) {
+    if (!input.folderUnread) return null;
+    const marked = String(r.why || '').includes(UNREAD_MARK);
+    let cmds = []; try { cmds = parseCommand(command).cmds; } catch { /* unreadable: judged by the reason */ }
+    const unread = marked || (r.cmd ? !!r.cmd.folderUnread : cmds.some((c) => c.bin && commandCwd(c, cwd, { home, baseUnread: true }).unread))
+      || scriptsRun(command, cwd, { home, baseUnread: true }).some((s) => s.unread);
+    if (!unread) return null;
+    if (r.cmd?.bin === 'gh' && !marked && namesGhRepo(r.cmd)) {
+      // a landing is filed only when its PR was read: the row the owner approves shows the PR it lands (#552)
+      if (r.cls !== 'merge') return null;
+      r.prRead = await readPr(r.cmd, null);              // kept for the row below: one read
+      if (r.prRead?.headOid) return null;
+      return 'gh pr merge whose pull request could not be read (name it: --repo owner/name, or its github.com URL)';
+    }
+    if (marked) return r.why;
+    if (r.cmd?.bin === 'gh') return `${r.label.toLowerCase()} with no repo named (name it: --repo owner/name)`;
+    return `${r.label.toLowerCase()}, in a folder Codex did not name (name it: cd /abs/path && …, git -C /abs/path …, or an absolute script path)`;
+  }
+  /** The folder a held command's repository is read from: none when a Codex call's folder was not told to the hook (#548). */
+  // …and none when a folder change in the call may not have applied (#551): which repository it acts on is not known
+  const folderOf = (r, cwd) => (r.cmd?.folderUnread || r.cmd?.folderUnsure ? null : r.cmd?.repoCwd || r.cmd?.cwd || cwd);
 
   async function liveTasksOf(agent) { return (await ledger.list({ owner: agent, status: 'live' })) || []; }
   async function findByHash(agent, hash) {
@@ -363,7 +391,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     const engine = input.engine === 'codex' ? 'codex' : 'claude';
     const cwd = input.cwd || root;
     const command = Array.isArray(input.command) ? input.command.map(shellQuote).join(' ') : String(input.command ?? '');
-    const call = { tool, command, filePath: input.filePath || null, cwd };
+    const call = { tool, command, filePath: input.filePath || null, cwd, ...(input.folderUnread === true ? { folderUnread: true } : {}) };
     const declared = await whoIs(input, p, cwd);
     // Names enforced (callerEvidence mode 'on'): the identity is the SESSION behind the hook call,
     // worked out from the process that holds the connection (src/caller.mjs hookIdentity) — not the
@@ -431,6 +459,12 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       return { decision: 'pass', observed: true };
     }
 
+    // a Codex call whose repository or script the board cannot read is refused, not filed: the owner sees only rows that are read
+    const unbound = await unreadRefusal(r, input, command, cwd);
+    if (unbound) {
+      recordEvent('sys', `guardrails: ${agent} ${r.cls} refused unfiled (folder not named by Codex): ${String(shown).slice(0, 80)}`).catch(() => {});
+      return { decision: 'deny', reason: denyText.restate(redact(unbound) ?? 'its folder was not named'), unfiled: true };
+    }
     const hash = cmdHash({ engine, cwd, tool, command, filePath: call.filePath || '', toolInput });
     // 1. an approved grant for exactly this call: consume it, let it run once
     const grant = await store.redeem({ cmdHash: hash, agent, now: now() });
@@ -485,9 +519,9 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     if (where.needsFocus) return { decision: 'deny', reason: denyText.focus(where.needsFocus) };
 
     const base = { cls: r.cls, label: r.label, ...(r.check ? { check: r.check } : {}), why: redact(r.why) ?? '[withheld]', command: shown, commandRedacted: shown !== text, bin: r.cmd?.bin || null,
-      cwd, tool, engine, agent, session: input.session || null, cmdHash: hash, hashVersion: HASH_VERSION, ttlMinutes: r.ttlMinutes,
+      cwd, ...(r.cmd?.folderUnread ? { folderUnread: true, ...(r.cmd.bin === 'gh' && (namesGhRepo(r.cmd) || input.ghRepo) ? { repoNamed: true } : {}) } : {}), ...(r.cmd?.folderUnsure ? { folderUnsure: r.cmd.folderUnsure } : {}), tool, engine, agent, session: input.session || null, cmdHash: hash, hashVersion: HASH_VERSION, ttlMinutes: r.ttlMinutes,
       // row context: chips from the class and the policy's lists (never from the agent), and the agent's own words, labelled
-      context: rowContext({ cls: r.cls, slug: r.cmd?.cdUnknown ? null : targetSlug(r, r.cmd?.cwd || cwd, command), lists: p.lists }),
+      context: rowContext({ cls: r.cls, slug: r.cmd?.cdUnknown ? null : targetSlug(r, folderOf(r, cwd), command, p.lists), lists: p.lists }),
       agentReason: agentWords(input.description) };   // a shell call's description only: an MCP tool's `description` is an argument, not a reason
     if (earlier) {
       base.previously = earlier;
@@ -495,7 +529,8 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     }
     // a merge row says which PR: title, branches and repo, looked up when the gate is filed
     if (r.cls === 'merge' && r.cmd) {
-      const s = await prInfo(r.cmd, r.cmd.cwd || cwd).catch(() => null);
+      const s = r.prRead !== undefined ? r.prRead : await readPr(r.cmd, folderOf(r, cwd));
+      if (!s && (r.cmd.folderUnread || r.cmd.folderUnsure)) base.why = `${base.why} · PR not read (${r.cmd.folderUnsure ? 'folder unsure' : 'folder not named'})`;
       if (s) base.why = redact(`${base.why} · PR #${s.number} "${s.title}" (${s.head} → ${s.base})${s.repo ? ` · ${s.repo}` : ''}`) ?? base.why;
     }
 
@@ -522,7 +557,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       const t = await ledger.get(where.id);
       const go = activeProgramGo(t);
       // the repo is the one the command runs in (cd / git -C), not the hook's session folder
-      const why = !go ? 'no program go' : r.cmd?.cdUnknown ? 'the command runs in a folder the gate cannot resolve' : await standingBlocker(r, r.cmd?.cwd || cwd, p, command);
+      const why = !go ? 'no program go' : r.cmd?.cdUnknown ? 'the command runs in a folder the gate cannot resolve' : await standingBlocker(r, folderOf(r, cwd), p, command);
       if (go && !why) {
         const a = await ledger.update(where.id, { op: 'gate_request', actor: 'board', gate: { ...base, auto: { go: go.id, owner: ownerId } } }, { gateSystem: true });
         const g = a.task.gates[a.task.gates.length - 1];
@@ -550,6 +585,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
    * one repo the origin names. Anything else is unknown.
    */
   function checkoutRepo(cwd) {
+    if (!cwd) return null;                                  // a folder nobody told the hook (#548): no checkout to read
     const origin = repoSlug(git(cwd, ['remote', 'get-url', 'origin']));
     if (!origin) return null;
     const same = (s) => !!s && s.toLowerCase() === origin.toLowerCase();
@@ -568,7 +604,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
 
   /** Why a standing-class call still needs a tap ('' = it may run under the go). Fails toward asking. */
   /** owner/name of the repo a merge or push targets (the -R flag, else the remote's URL), or null. */
-  function targetSlug(r, cwd, command = '') {
+  function targetSlug(r, cwd, command = '', lists = null) {
     const toks = r.cmd?.tokens || [];
     if (r.cls === 'merge') {
       // every repo the command names must agree (namedRepos); disagreement or an unreadable name = unknown,
@@ -579,9 +615,9 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       return checkoutRepo(cwd);
     }
     if (r.cls === 'push' && r.cmd) {
-      const flag = toks.find((x) => x.startsWith('--repo='))?.slice(7);
-      const remote = flag || positionals(r.cmd).slice(1)[0] || 'origin';
-      return repoSlug(git(cwd, ['remote', 'get-url', remote]) || remote);
+      // the push address, or the one the call gives the remote (#552); no folder: only an address in the call is known
+      const a = pushAddress(r.cmd, { command, cwd }, { git: cwd ? git : () => null });
+      return pushSlug(a, lists || {});
     }
     return null;
   }
@@ -700,10 +736,25 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
 /** Claude: Bash/Read/Edit/Write/mcp__*; Codex shells arrive as shell/exec_command/local_shell. */
 export function normTool(t) {
   const s = String(t || 'Bash');
-  return /^(shell|exec_command|local_shell|container\.exec|unified_exec)$/i.test(s) ? 'Bash' : s;
+  return isShellTool(s) ? 'Bash' : s;
 }
 
 // Which PR a merge gate is about (gh pr view in the call's folder; -R honored). null when gh can't tell.
+/** Does a `gh pr merge` name its repo itself (-R / --repo, or the PR's URL)? */
+export function namesPrRepo(cmd) {
+  const toks = cmd?.tokens || [];
+  return toks.some((x) => x === '-R' || x === '--repo' || x.startsWith('--repo=') || /github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/.test(x));
+}
+/** Does a gh call name the repository it acts on (-R / --repo, a github.com URL, `gh api repos/<owner>/<name>/…`, `gh repo <verb> <owner>/<name>`)? */
+export function namesGhRepo(cmd) {
+  const toks = cmd?.tokens || [];
+  if (toks.some((x) => x === '-R' || x === '--repo' || x.startsWith('--repo='))) return true;
+  const pos = positionals(cmd);
+  // an address counts only as a positional word (the PR or repo argument), never inside a flag's value such as a body or a title (#552)
+  if (pos.some((x) => /^(https?:\/\/)?(www\.)?github\.com\/[^/\s]+\/[^/\s]+/.test(x))) return true;
+  if (pos[0] === 'api') return /^\/?repos\/[^/\s]+\/[^/\s]+/.test(pos[1] || '');
+  return pos[0] === 'repo' && /^[^/\s-][^/\s]*\/[^/\s]+$/.test(pos[2] || '');
+}
 async function ghPrInfo(cmd, cwd) {
   const toks = cmd.tokens || [];
   const ri = toks.findIndex((x) => x === '-R' || x === '--repo');

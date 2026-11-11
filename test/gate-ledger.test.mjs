@@ -383,7 +383,7 @@ test('namedRepos: every repo a landing names; readRepoName: github.com owner/nam
 // Slice 13b (third read of the PR 103 review): what could still auto-run into another repo under a go.
 const gitFor = ({ remotes = { origin: 'git@github.com:acme/app.git' }, resolved = '' } = {}) => (cwd, args) => {
   if (args[0] === 'remote' && args.length === 1) return Object.keys(remotes).join('\n');
-  if (args[0] === 'remote' && args[1] === 'get-url') return remotes[args[2]] || null;
+  if (args[0] === 'remote' && args[1] === 'get-url') return remotes[args.at(-1)] || null;
   if (args[0] === 'config' && args[1] === '--get-regexp') return resolved || null;
   return null;
 };

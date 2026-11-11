@@ -59,7 +59,7 @@ async function setup(lists = LISTS) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'row ctx-'));
   const ledger = createLedger(path.join(dir, 'tasks'));
   await writeFile(path.join(dir, 'policy.json'), JSON.stringify({ ...DEFAULT_POLICY, lists: { ...DEFAULT_POLICY.lists, ...lists } }));
-  const git = (cwd, args) => (args[0] === 'remote' ? REMOTES[args[2]] || null : args[0] === 'rev-parse' ? 'main' : null);
+  const git = (cwd, args) => (args[0] === 'remote' ? REMOTES[args.at(-1)] || null : args[0] === 'rev-parse' ? 'main' : null);
   const svc = createGateService({ root: dir, ledger, policyFile: path.join(dir, 'policy.json'), stateDir: path.join(dir, 'guardrails'),
     ownerId: OWNER.id, identifyWs: async () => 'builder', git, home: '/home/u', prInfo: async () => null });
   const task = await ledger.create({ title: 'x', requester: 'helper', owner: 'builder' });

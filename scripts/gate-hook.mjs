@@ -11,18 +11,40 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { classify, isEnforced, DEFAULT_POLICY } from '../src/gates.mjs';
+import { classify, isShellTool, isEnforced, DEFAULT_POLICY } from '../src/gates.mjs';
 import { parseProcTable, chainOf, looksLikeAgent, workspaceInEnv } from '../src/caller.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * The folder a shell call runs in. Claude Code's `cwd` is the shell's own folder. Codex's is the SESSION's:
+ * its exec_command takes a `workdir` of its own and gives the hook only `{ command }` (codex-rs 0.162.1,
+ * exec_command.rs pre_tool_use_payload; seen in live use), so a Codex shell call's folder is not known
+ * unless the input carries one (#548). The session folder stays in `cwd` for what is not about a repository.
+ * A `workdir` is believed from Codex only: Claude Code's `cwd` is the shell's folder, and nothing in the tool's
+ * input may move it.
+ */
+export function callFolder(j, engine, shell) {
+  const ti = j.tool_input || {};
+  const base = j.cwd || process.cwd();
+  if (!shell || engine !== 'codex') return { cwd: base };
+  if (typeof ti.workdir === 'string' && ti.workdir.trim()) return { cwd: path.resolve(base, ti.workdir), folderFrom: 'workdir' };
+  return { cwd: base, folderUnread: true };
+}
+
 export function hookInput(j, env = process.env) {
   const ti = j.tool_input || {};
   const raw = ti.command ?? ti.cmd ?? ti.argv ?? null;
+  // Codex: every tool hook input carries `turn_id`, a required field (codex-rs 0.162.1, hooks/src/schema.rs
+  // Pre/PostToolUseCommandInput `turn_id: String`, not an Option); Claude Code's hook input has no such field. Outside cmux
+  // that field is the sign. A Claude input that carried one would only be read more strictly (its folder unread).
+  const engine = env.CMUX_AGENT_LAUNCH_KIND === 'codex' || j.turn_id ? 'codex' : 'claude';
+  const tool = j.tool_name || 'Bash';
+  const shell = raw != null && isShellTool(tool);
   return {
     event: /post/i.test(j.hook_event_name || '') ? 'post' : 'pre',
-    engine: env.CMUX_AGENT_LAUNCH_KIND === 'codex' || j.turn_id ? 'codex' : 'claude',
-    tool: j.tool_name || 'Bash',
+    engine,
+    tool,
     command: raw,
     // the agent's own description of a shell call (shown on the row, labelled as the agent's words; not part of what an approval binds)
     ...(raw != null && typeof ti.description === 'string' && ti.description.trim() ? { description: ti.description.slice(0, 600) } : {}),
@@ -30,7 +52,7 @@ export function hookInput(j, env = process.env) {
     // non-shell tools: the whole input goes to the board, so an approval binds exactly what was asked
     // (an MCP call's arguments, an edit's old/new text) — not just the tool and the file
     ...(raw == null && Object.keys(ti).length ? { toolInput: ti } : {}),
-    cwd: j.cwd || process.cwd(),
+    ...callFolder(j, engine, shell),
     session: j.session_id || null,
     workspaceId: env.CMUX_WORKSPACE_ID || null,
     // a headless run the board itself started (triage, a dispatched fix session): the launcher exports its role.
@@ -111,8 +133,8 @@ export function localVerdict(input, { root = ROOT, home = os.homedir(), sessionW
   if (agent && !isEnforced(policy, agent)) return { verdict: 'clear', why: `${agent} is observed` };
   const git = (cwd, args) => { try { return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; } };
   const command = Array.isArray(input.command) ? input.command.join(' ') : String(input.command ?? '');
-  const tool = /^(shell|exec_command|local_shell|container\.exec|unified_exec)$/i.test(input.tool) ? 'Bash' : input.tool;
-  return classify({ tool, command, filePath: input.filePath, cwd: input.cwd }, policy, { home, boardRoot: root, git, repoRoot: (d) => git(d, ['rev-parse', '--show-toplevel']) });
+  const tool = isShellTool(input.tool) ? 'Bash' : input.tool;
+  return classify({ tool, command, filePath: input.filePath, cwd: input.cwd, ...(input.folderUnread ? { folderUnread: true } : {}) }, policy, { home, boardRoot: root, git, repoRoot: (d) => git(d, ['rev-parse', '--show-toplevel']) });
 }
 
 /** How long this step waits for the board. gate-hook.sh answers "deny" itself at 12 s, and Claude Code lets a call run when a hook answers after its registered limit, so the wait has a ceiling. */

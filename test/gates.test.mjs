@@ -10,7 +10,7 @@ policy.lists.deployOnPush = ['acme/site'];
 const remotes = { origin: 'git@github.com:acme/app.git', pub: 'https://github.com/acme-public/tool.git', site: 'git@github.com:acme/site.git' };
 const ctx = {
   home: '/home/u', boardRoot: '/work/board', repoRoot: () => '/work/app', triggers: compileTriggers(policy),
-  git: (cwd, args) => (args[0] === 'remote' ? remotes[args[2]] || null : args[0] === 'rev-parse' ? ctx.branch : null), branch: 'feature-x',
+  git: (cwd, args) => (args[0] === 'remote' ? remotes[args.at(-1)] || null : args[0] === 'rev-parse' ? ctx.branch : null), branch: 'feature-x',
 };
 const run = (command, extra = {}) => classify({ tool: 'Bash', command, cwd: '/work/app', ...extra }, policy, ctx);
 const gated = (command, cls, extra) => { const r = run(command, extra); assert.equal(r.verdict, 'gate', `${command} → ${r.verdict} (${r.why})`); if (cls) assert.equal(r.cls, cls, `${command} → ${r.cls} (${r.why})`); return r; };

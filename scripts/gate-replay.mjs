@@ -15,12 +15,11 @@ import { readFileSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { classify, compileTriggers, CHECKS, DEFAULT_POLICY } from '../src/gates.mjs';
+import { classify, compileTriggers, isShellTool, CHECKS, DEFAULT_POLICY } from '../src/gates.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** A reading the classifier takes without a switch (a parser fix): shown apart from the checks. */
 export const FIXED = 'parserFixes';
-const SHELL_TOOLS = /^(shell|exec_command|local_shell|container\.exec|unified_exec)$/i;
 
 export function parseSince(v, now = Date.now()) {
   const m = /^(\d+)([dhm])$/.exec(String(v || ''));
@@ -55,7 +54,7 @@ export function replay(entries, policy, { checks = CHECKS, home = os.homedir(), 
     const text = typeof e.full === 'string' ? e.full : e.command;
     const wasCut = typeof e.full !== 'string' && e.command.length >= 160;
     if (wasCut) cut++;
-    const tool = SHELL_TOOLS.test(e.tool || '') ? 'Bash' : e.tool || 'Bash';
+    const tool = isShellTool(e.tool) ? 'Bash' : e.tool || 'Bash';
     const input = tool === 'Bash' ? { tool, command: text, cwd: e.cwd || root } : { tool, command: '', filePath: text, cwd: e.cwd || root };
     let before; let fixed; let after;
     try {

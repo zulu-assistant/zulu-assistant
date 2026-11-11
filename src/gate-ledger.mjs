@@ -27,6 +27,10 @@ export function addGate(t, g, iso) {
     command: String(g.command || '').length > MAX_FULL ? `${String(g.command).slice(0, MAX_FULL)}\n… [cut at ${MAX_FULL} chars]` : String(g.command || ''), commandRedacted: !!g.commandRedacted,
     bin: g.bin ? String(g.bin).slice(0, 60) : null,
     cwd: String(g.cwd || '').slice(0, 400), tool: String(g.tool || 'Bash').slice(0, 120), engine: g.engine === 'codex' ? 'codex' : 'claude',
+    // #548: `cwd` is the session's folder; the call's own folder was not told to the hook (a Codex shell call)
+    ...(g.folderUnread === true ? { folderUnread: true, ...(g.repoNamed === true ? { repoNamed: true } : {}) } : {}),
+    // #551: a folder change in the call may not have applied; every folder it may run in (shown on the row)
+    ...(Array.isArray(g.folderUnsure) ? { folderUnsure: g.folderUnsure.slice(0, 4).map((d) => String(d).slice(0, 400)) } : {}),
     agent: String(g.agent || '').slice(0, 80), session: g.session ? String(g.session).slice(0, 80) : null,
     cmdHash: String(g.cmdHash || ''), hashVersion: g.hashVersion ? String(g.hashVersion).slice(0, 20) : null, requested_at: iso, ttlMinutes: Number(g.ttlMinutes) || 120,
     dryRun: g.dryRun ? { required: !!g.dryRun.required, seen_at: g.dryRun.seen_at || null, dryHash: g.dryRun.dryHash || null, command: g.dryRun.command ? String(g.dryRun.command).slice(0, MAX_CMD) : null } : { required: false, seen_at: null, dryHash: null },
@@ -52,7 +56,7 @@ export function findGate(t, id) {
   return g;
 }
 export const pendingGates = (t) => (t.gates || []).filter((g) => g.status === 'pending')
-  .map((g) => ({ id: g.id, cls: g.cls, label: g.label, why: g.why, command: g.command, commandRedacted: g.commandRedacted, bin: g.bin, cwd: g.cwd, agent: g.agent, tool: g.tool, requested_at: g.requested_at, dryRun: g.dryRun, previously: g.previously || null,
+  .map((g) => ({ id: g.id, cls: g.cls, label: g.label, why: g.why, command: g.command, commandRedacted: g.commandRedacted, bin: g.bin, cwd: g.cwd, ...(g.folderUnread ? { folderUnread: true, ...(g.repoNamed ? { repoNamed: true } : {}) } : {}), ...(g.folderUnsure ? { folderUnsure: g.folderUnsure } : {}), agent: g.agent, tool: g.tool, requested_at: g.requested_at, dryRun: g.dryRun, previously: g.previously || null,
     context: g.context || [], agentReason: g.agentReason || null, ref: g.ref || null,
     ...(openProposal(g) ? { proposal: openProposal(g) } : {}) }));
 

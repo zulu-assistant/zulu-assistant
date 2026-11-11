@@ -9,6 +9,9 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 
 export const OPAQUE = { id: 'opaque', label: 'A command the gate cannot read with certainty' };
+/** The tool names a shell call arrives under (Claude Code's Bash; Codex's shell tools). The one list (#548). */
+export const SHELL_TOOL_NAMES = ['Bash', 'shell', 'exec_command', 'local_shell', 'container.exec', 'unified_exec'];
+export const isShellTool = (t) => SHELL_TOOL_NAMES.some((n) => n.toLowerCase() === String(t || '').toLowerCase());
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish']);
 const INTERPRETERS = new Set(['python', 'python3', 'node', 'ruby', 'perl', 'osascript', 'deno', 'bun', 'php', 'tsx', 'ts-node']);
 const WRAPPERS = new Set(['sudo', 'env', 'command', 'nohup', 'time', 'exec', 'nice', 'timeout', 'caffeinate', 'builtin']);
@@ -54,7 +57,7 @@ export function inlineBodies(bin, tokens) {
   return out;
 }
 // programs that take their arguments as names or text, never as a subcommand: `cd deploy`, `echo push`
-const PLAIN_BINS = new Set(['cd', 'pushd', 'popd', 'echo', 'printf', 'mkdir', 'rmdir', 'touch', 'cp', 'mv', 'rm', 'ln', 'chmod', 'chown', 'open',
+const PLAIN_BINS = new Set(['cd', 'chdir', 'pushd', 'popd', 'echo', 'printf', 'mkdir', 'rmdir', 'touch', 'cp', 'mv', 'rm', 'ln', 'chmod', 'chown', 'open',
   'which', 'type', 'export', 'set', 'unset', 'local', 'declare', 'readonly', 'true', 'false', ':', 'sleep', 'basename', 'dirname', 'realpath',
   'readlink', 'tee', 'date', 'pwd', 'read', 'return', 'exit', 'alias', 'hash', 'trap', 'wait', 'man', 'for', 'case', 'select', 'function', '[[',
   'fi', 'done', 'esac', 'in', 'zip', 'unzip', 'tar', 'gzip', 'gunzip', 'find', 'sed', 'xargs', 'kill', 'pkill', 'killall', 'pgrep', 'ps', 'lsof']);
@@ -368,11 +371,15 @@ export function parseCommand(src, depth = 0, opts = {}) {
   const vars = {};                                   // NAME=literal assigned in this command (no expansion inside)
   // the folder each simple command runs in: literal `cd` targets so far (subshells scoped); unknown after
   // a cd the gate can't resolve — path- and repo-dependent rules then decide conservatively
-  let cd = { targets: [], unknown: false };
+  // `sure`: the folder change certainly applied before this command runs: every link from the cd to here is `&&`
+  // (a failed cd then stops the command), and the cd itself was not the right side of `||`, part of a pipeline or
+  // negated. A `;`, `||`, `|`, `&`, a condition, or a `popd` after it leaves the change unsure (#548, MC's review).
+  let cd = { targets: [], unknown: false, sure: true };
   const cdStack = [];
   for (const c of cmds) {
     for (let k = 0; k < (c.closes || 0); k++) if (cdStack.length) cd = cdStack.pop();
-    for (let k = 0; k < (c.opens || 0); k++) cdStack.push({ targets: [...cd.targets], unknown: cd.unknown });
+    if (c.sepBefore !== '&&' && cd.targets.length) cd = { ...cd, sure: false };
+    for (let k = 0; k < (c.opens || 0); k++) cdStack.push({ targets: [...cd.targets], unknown: cd.unknown, sure: cd.sure });
     for (const t of c.raw) {
       const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(t);
       if (!m) break;
@@ -380,17 +387,27 @@ export function parseCommand(src, depth = 0, opts = {}) {
     }
     const w = words(c.raw, opts);
     const cmd = { tokens: w.tokens, bin: w.bin, assignOnly: !w.bin, redirects: c.redirects, reads: c.reads, hereFiles: (c.herestrings || []).map(hereFile).filter(Boolean), sepBefore: c.sepBefore, fromSub: !!c.fromSub, dynamicBin: w.dynamic, text: c.raw.join(' '),
-      cdTargets: [...cd.targets], cdUnknown: cd.unknown };
+      cdTargets: [...cd.targets], cdUnknown: cd.unknown, ...(cd.targets.length && !cd.sure ? { cdUnsure: true } : {}) };
     const inline = inlineBodies(cmd.bin, cmd.tokens);
     if (inline.length) cmd.inlineBodies = inline;
     out.push(cmd);
-    if (cmd.bin === 'cd' || cmd.bin === 'pushd') {
-      let t = cmd.tokens.slice(1).find((x) => !/^-[LPe@]+$/.test(x)) ?? '~';
-      const v = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(t);
+    if (cmd.bin === 'cd' || cmd.bin === 'pushd' || cmd.bin === 'chdir') {     // chdir: zsh's other name for cd (#551)
+      const args = cmd.tokens.slice(1); let k = 0;
+      while (k < args.length && /^-[LPe@n]+$/.test(args[k])) k++;
+      if (args[k] === '--') k++;                     // `cd -- /x`: the folder is the word after it (#551)
+      const pos = args.slice(k);
+      let t = pos[0] ?? (cmd.bin === 'pushd' ? null : '~');
+      const v = t != null && /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(t);
       if (v && vars[v[1]] != null) t = vars[v[1]];
-      if (t === '-' || /[$`*?]/.test(t)) cd = { targets: cd.targets, unknown: true };
-      else cd = { targets: [...cd.targets, t], unknown: cd.unknown };
-    }
+      const sure = !['||', '|', '|&'].includes(c.sepBefore) && c.raw[0] !== '!';
+      // an absolute target stands alone; a relative one also needs every change before it
+      const fixedT = t != null && /^(\/|~(\/|$))/.test(t);
+      if (cmd.bin === 'pushd' && args.slice(0, k).some((f) => f.includes('n'))) { /* pushd -n: onto the stack only, the folder stays */ }
+      // unknown: `cd -`, an expansion, a stack rotation or swap (pushd +N, bare pushd), and extra words
+      // (bash refuses `cd a b`, zsh reads it as a substitution: either way not the folder named)
+      else if (t == null || t === '-' || /^[+-]\d+$/.test(t) || /[$`*?]/.test(t) || pos.length > 1) cd = { targets: cd.targets, unknown: true, sure: false };
+      else cd = { targets: [...cd.targets, t], unknown: cd.unknown, sure: sure && (fixedT || cd.sure) };
+    } else if (cmd.bin === 'popd') cd = { ...cd, sure: false };     // back to a folder the parser does not track
     for (const body of c.heredocs) {
       if (SHELLS.has(cmd.bin)) { const p = parseCommand(body, depth + 1, opts); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); }
       else if (INTERPRETERS.has(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: body, by: cmd.bin, text: body });
@@ -494,6 +511,10 @@ export function classify(input, policy, ctx = {}) {
 
 function classifyWith(input, policy, ctx, on) {
   const tool = input.tool || 'Bash';
+  // a Codex shell call: the folder it runs in was not told to the hook (#548); commandCwd reads only what the command names
+  if (input.folderUnread && !ctx.baseUnread) ctx = { ...ctx, baseUnread: true };
+  // the whole call, for what an earlier command of it sets (`export GIT_DIR=…; git push`)
+  if (ctx.line == null) ctx = { ...ctx, line: String(Array.isArray(input.command) ? input.command.join(' ') : input.command ?? '') };
   const triggers = ctx.triggers || compileTriggers(policy, { boardRoot: ctx.boardRoot, home: ctx.home });
   // the shell greps the whole hook JSON, folder included; here the folder counts only for the lines about
   // the live checkout, so a folder that happens to be called "deploy" never reads as a gated word
@@ -578,7 +599,7 @@ function classifyWith(input, policy, ctx, on) {
     const where = commandCwd(c, input.cwd, ctx);
     for (const cls of classes) for (const r of cls.rules || []) {
       if (!r.pathGuard || !active(r)) continue;
-      const hit = guardedWrite(r, { ...c, bin: 'a redirect', tokens: ['>'] }, { ...input, cwd: where.cwd, cwdUnknown: where.unknown }, policy, rctx);
+      const hit = guardedWrite(r, { ...c, bin: 'a redirect', tokens: ['>'] }, { ...input, cwd: where.cwd, cwdUnknown: where.unknown, cwdUnread: !!where.unread }, policy, rctx);
       if (hit) return gate(cls, r, `a redirect writes ${hit}`, { cmd: c });
     }
   }
@@ -590,10 +611,20 @@ function classifyWith(input, policy, ctx, on) {
     // judge each command in the folder it actually runs in: `cd X && …`, `git -C X …`
     const where = commandCwd(c, input.cwd, ctx);
     c.cwd = where.cwd;
-    const cin = { ...input, cwd: where.cwd, cwdUnknown: where.unknown, baseCwd: input.cwd };
+    if (where.unread) c.folderUnread = true;           // the board then reads no repository for it (row, binding, program go)
+    // a folder change that may not have applied (#551): the board reads no repository for it either, and the row names every folder
+    if (where.alts) c.folderUnsure = [...new Set([where.cwd, ...where.alts.map((a) => a.cwd)])];
+    if (where.repo) c.repoCwd = where.repo;            // git told its repository: remotes and branches are read there
+    const cin = { ...input, cwd: where.cwd, ...(where.repo ? { repoCwd: where.repo } : {}), cwdUnknown: where.unknown, cwdUnread: !!where.unread, baseCwd: input.cwd };
     for (const cls of classes) for (const r of cls.rules || []) {
       if (!active(r)) continue;
-      const why = ruleMatch(r, c, cin, policy, rctx);
+      let why = ruleMatch(r, c, cin, policy, rctx);
+      // …and in each folder the command may run in instead: held when any of them holds it
+      for (const alt of why ? [] : where.alts || []) {
+        const { repoCwd: _r, ...rest } = cin;
+        const aw = ruleMatch(r, c, { ...rest, cwd: alt.cwd, ...(alt.repo ? { repoCwd: alt.repo } : {}) }, policy, rctx);
+        if (aw) { why = `${aw} (if a folder change in the call did not apply, it runs in ${alt.cwd})`; break; }
+      }
       if (why) return gate(cls, r, why, { cmd: c, dryTokens: cls.requireDryRun || r.requireDryRun ? dryTokens(c, r) : null });
     }
   }
@@ -655,20 +686,49 @@ function renamedProgram(cmds, policy, nocase = false) {
   return null;
 }
 
-/** The folder a simple command runs in: the hook's cwd, then each literal `cd`, then `git -C`. */
+/**
+ * The folder a simple command runs in: the hook's cwd, then each literal `cd`, then `git -C`, then the repository
+ * git is told to use (`--git-dir`, `GIT_DIR`). `alts` (#551): when a folder change may not have applied to the
+ * command (c.cdUnsure), the other folders it may run in, one per change it may have stopped before; the rules
+ * read the command in each of them.
+ */
 export function commandCwd(c, base, ctx = {}) {
-  let cwd = base || '/';
-  for (const t of c.cdTargets || []) cwd = absPath(t, cwd, ctx);
-  if (c.bin === 'git') {
-    const toks = c.tokens;
-    for (let k = 1; k < toks.length; k++) {
-      if (toks[k] === '-C' && toks[k + 1] != null) {
-        if (/[$`*?]/.test(toks[k + 1])) return { cwd, unknown: true };
-        cwd = absPath(toks[k + 1], cwd, ctx); k++;
-      } else if (!toks[k].startsWith('-')) break;      // global options end at the subcommand
+  const fixed = (t) => /^(\/|~(\/|$))/.test(String(t));
+  const targets = c.cdTargets || [];
+  const after = (n) => {
+    let cwd = base || '/';
+    // ctx.baseUnread (#548): the call's own folder was never told to the hook (a Codex shell call). Only a folder the
+    // command names from the root (`cd /x`, `cd ~/x`, `git -C /x`) is known then; a relative one hangs off the unknown.
+    let anchored = !ctx.baseUnread;
+    // a cd anchors only when it certainly applied to this command (c.cdUnsure: a `;`, `||`, `|`, `&` or popd since)
+    for (const t of targets.slice(0, n)) { cwd = absPath(t, cwd, ctx); if (fixed(t) && !c.cdUnsure) anchored = true; }
+    if (c.bin === 'git') {
+      const toks = c.tokens;
+      for (let k = 1; k < toks.length; k++) {
+        if (toks[k] === '-C' && toks[k + 1] != null) {
+          if (/[$`*?]/.test(toks[k + 1])) return { cwd, unknown: true };
+          if (fixed(toks[k + 1])) anchored = true;
+          cwd = absPath(toks[k + 1], cwd, ctx); k++;
+        } else if (!toks[k].startsWith('-')) break;      // global options end at the subcommand
+      }
+      // git told its repository (#551): its remotes, branches and HEAD are that repository's (`repo`), while its work
+      // tree stays the folder the shell stands in (`cwd`, what the live-checkout rules read). Set on the command, or
+      // exported earlier in the call (ctx.line). It never anchors an unread folder.
+      const gd = flagValues(c.tokens, '--git-dir')[0] ?? envValue('GIT_DIR', `${c.text || ''} ${ctx.line || ''}`, ctx);
+      if (gd != null) {
+        if (!gd || /[$`*?]/.test(gd)) return { cwd, unknown: true };
+        return { cwd, repo: absPath(gd, cwd, ctx), unknown: !!c.cdUnknown || !anchored, ...(anchored ? {} : { unread: true }) };
+      }
     }
+    return { cwd, unknown: !!c.cdUnknown || !anchored, ...(anchored ? {} : { unread: true }) };
+  };
+  const main = after(targets.length);
+  if (c.cdUnsure && !ctx.baseUnread && !main.unknown) {
+    const seen = new Set([`${main.cwd}\0${main.repo || ''}`]);
+    const alts = Array.from({ length: targets.length }, (_, n) => after(n)).filter((w) => !w.unknown && !seen.has(`${w.cwd}\0${w.repo || ''}`) && seen.add(`${w.cwd}\0${w.repo || ''}`));
+    if (alts.length) main.alts = alts;
   }
-  return { cwd, unknown: !!c.cdUnknown };
+  return main;
 }
 
 function keywordHit(norm, policy) {
@@ -840,7 +900,7 @@ function ruleMatch(r, c, input, policy, ctx, only) {
 // ── gate self-protection (1.3, check `selfProtect`) ─────────────────────────
 const WRITE_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit)$/;
 // going into a folder, and the shell's own words (`for f in *.plist`), write nothing
-const NO_TOUCH = new Set(['cd', 'pushd', 'popd', 'for', 'case', 'select', 'in', 'do', 'done', 'esac', 'fi', '[[']);
+const NO_TOUCH = new Set(['cd', 'chdir', 'pushd', 'popd', 'for', 'case', 'select', 'in', 'do', 'done', 'esac', 'fi', '[[']);
 const guardGlobs = (r, policy) => [].concat(r.pathGuard || []).flatMap((p) => listOr(p, policy));
 const flagValues = (args, ...names) => {
   const out = [];
@@ -1042,10 +1102,11 @@ function gitConfigWrite(c, input = {}, policy = {}, ctx = {}) {
   // in the live checkout: where the remote is, what a pull brings, what git runs
   // in the board's repo (the live checkout and its worktrees share one settings file): everything but who the committer is.
   // Where the remote is, what a pull brings, and every key that names a program git runs (filter, diff, pager, editor, credential …).
-  const here = input.cwdUnknown ? input.baseCwd : input.cwd;
+  const here = input.cwdUnread ? null : input.cwdUnknown ? input.baseCwd : input.cwd;
   const where = gitTarget(c, here, ctx, input.command) || here;
   const key = rest[0];
   if (key && /^user\./i.test(key)) return null;
+  if (!where) return `git config ${key ? `sets ${key}` : 'write'} ${unreadWhere()}`;
   if (!inBoardRepo(where, ctx)) return null;
   return `git config ${key ? `sets ${key}` : 'write'} in the board's repo`;
 }
@@ -1079,9 +1140,9 @@ function liveGit(c, input, policy, ctx) {
   const pos = positionals(c); const sub = pos[0]; const rest = pos.slice(1);
   if (!GIT_READS.has(sub)) { const split = splitTree(c, input, ctx); if (split) return split; }
   const said = gitTarget(c, input.cwd, ctx, input.command);          // --work-tree / --git-dir / GIT_WORK_TREE / GIT_DIR
-  const here = said || (input.cwdUnknown ? input.baseCwd : input.cwd);
-  if (!inLive(here, ctx)) return null;
-  const cwd = said || input.cwd;
+  const here = said || (input.cwdUnread ? null : input.cwdUnknown ? input.baseCwd : input.cwd);
+  if (here && !inLive(here, ctx)) return null;
+  const cwd = said || (input.cwdUnread ? null : input.cwd);
   const valueFlags = [...VALUE_FLAGS.git, '--source', '-s'];
   // a setting for this one call (-c, --config-env, any GIT_* variable) can change where a pull comes from or what git runs
   const front = c.tokens.slice(1, Math.max(1, c.tokens.indexOf(sub)));
@@ -1280,23 +1341,27 @@ function isPost(c) {
 
 function pushProtected(r, c, input, policy, ctx) {
   // which repo is being pushed is unknowable after an unresolvable cd: ask
+  if (input.cwdUnread) return `git push ${unreadWhere('git -C /abs/path push …')}`;
   if (input.cwdUnknown) return 'git push from a folder the gate cannot resolve';
   const pos = positionals(c).slice(1);               // after "push"
   const flags = flagSet(c);
   const forced = ['--force', '-f', '--force-with-lease', '--force-if-includes', '--mirror', '--delete', '-d', '--tags', '--all', '--prune'].find((f) => flags.has(f))
     || c.tokens.find((t) => /^--force-with-lease=/.test(t) || /^-[a-zA-Z]*f[a-zA-Z]*$/.test(t) && !t.startsWith('--'));
-  const remote = pos[0] || 'origin';
-  const url = ctx.git?.(input.cwd, ['remote', 'get-url', remote]) || remote;
-  const slug = repoSlug(url);
+  const repoAt = input.repoCwd || input.cwd;            // --git-dir / GIT_DIR (#551): that repository's remotes and branches
+  const addr = pushAddress(c, input, ctx);
+  if (addr.ask) return addr.ask;
   const lists = (n) => listOr(`@${n}`, policy);
-  if (slug && lists('publicRemotes').some((g) => globMatch(g.toLowerCase(), slug.toLowerCase()))) return `push to public remote ${slug}`;
-  if (slug && lists('deployOnPush').some((g) => globMatch(g.toLowerCase(), slug.toLowerCase()))) return `push to ${slug}, which deploys on push`;
+  // every address the push goes to (a remote can have several push addresses; git sends to each)
+  for (const slug of addr.urls.map(repoSlug).filter(Boolean)) {
+    if (lists('publicRemotes').some((g) => globMatch(g.toLowerCase(), slug.toLowerCase()))) return `push to public remote ${slug}`;
+    if (lists('deployOnPush').some((g) => globMatch(g.toLowerCase(), slug.toLowerCase()))) return `push to ${slug}, which deploys on push`;
+  }
   if (forced) return `git push ${forced}`;
   const allow = r.allowRefs || [];
   const prot = r.protectedRefs || ['main', 'master'];
   let specs = pos.slice(1);
   if (!specs.length || specs.includes('HEAD')) {
-    const head = ctx.git?.(input.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const head = ctx.git?.(repoAt, ['rev-parse', '--abbrev-ref', 'HEAD']);
     if (!head) return 'git push with an unknown current branch';
     specs = specs.length ? specs.map((s) => (s === 'HEAD' ? head : s)) : [head];
   }
@@ -1309,6 +1374,87 @@ function pushProtected(r, c, input, policy, ctx) {
     if (prot.includes(dst)) return `push to protected branch ${dst}`;
   }
   return null;
+}
+/** #548: what a deny says when a Codex call's folder was not told to the hook, with the form that names it. */
+export const UNREAD_MARK = 'in a folder Codex did not name';
+export function unreadWhere(form = 'cd /abs/path && …') {
+  return `${UNREAD_MARK}: repository not read (name it: ${form})`;
+}
+/**
+ * Where a git push sends (#552): the remote's PUSH address (`remote get-url --push`, which also applies the
+ * repository's rewrite rules), or the address the call itself gives the remote. A call can tell the remote
+ * another way: a setting for this one call (`-c remote.<r>.url|pushurl=…`, `-c url.…`), GIT_CONFIG_* variables,
+ * `--config-env`, an earlier `git remote add|set-url|rename|remove` or `git config remote.…|url.…` in the same
+ * call, or `--repo=…`. A literal address there is used; anything else is asked.
+ * → { url, remote } | { ask }
+ */
+export function pushAddress(c, input = {}, ctx = {}) {
+  const pos = positionals(c).slice(1);
+  const urlLike = (s) => /[:/]/.test(String(s));
+  const dynamic = (s) => /[$`*?]/.test(String(s));          // a variable, a substitution or a glob: not readable
+  const at = input.repoCwd || input.cwd;
+  const repoFlag = flagValues(c.tokens, '--repo')[0];   // `--repo=X` (a spaced value parses as the positional)
+  if ((pos[0] != null && dynamic(pos[0])) || (repoFlag != null && dynamic(repoFlag))) return { ask: 'git push to a repository the gate cannot read (a variable or a substitution)' };
+  // git takes a repository word over --repo (builtin/push.c: `repo = argv[0]`); both, and different: asked, and the
+  // row's chips follow the --repo address, the one an agent meant
+  if (repoFlag && pos[0] && pos[0] !== repoFlag) {
+    const named = urlLike(repoFlag) ? repoFlag : ctx.git?.(at, ['remote', 'get-url', '--push', repoFlag]) || repoFlag;
+    return { ask: `git push with both --repo=${repoFlag} and the repository ${pos[0]}`, url: named, urls: [named] };
+  }
+  const word = pos[0] || repoFlag || null;
+  const line = String(Array.isArray(input.command) ? input.command.join(' ') : input.command ?? ctx.line ?? '');
+  // settings for this one call that change where a push goes
+  const oneCall = flagValues(c.tokens, '-c');
+  const remoteOf = (r) => oneCall.map((v) => /^remote\.(.+)\.(url|pushurl)=(.*)$/i.exec(v)).filter((m) => m && m[1] === r);
+  for (const v of oneCall) {
+    if (/^remote\.(.+)\.(url|pushurl)=/i.test(v)) continue;          // read below, for the remote it names
+    if (/^(url|remote|push)\./i.test(v) || /^branch\..+\.(pushremote|remote)=/i.test(v)) return { ask: `git push with ${v.split('=')[0]} set for the call (it can change where the push goes)` };
+  }
+  if (c.tokens.some((t) => t === '--config-env' || t.startsWith('--config-env='))) return { ask: 'git push with --config-env (a setting for the call the gate cannot read)' };
+  if (/(^|[^A-Za-z0-9_])GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)=/.test(line)) return { ask: 'git push with git settings in GIT_CONFIG_* variables (they can change where the push goes)' };
+  // which remote: the word, else the one git picks for the current branch (branch.<b>.pushRemote, remote.pushDefault,
+  // branch.<b>.remote, origin: remote.c pushremote_for_branch)
+  let remote = word;
+  if (!remote) {
+    const branch = ctx.git?.(at, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const conf = (k) => ctx.git?.(at, ['config', '--get', k]) || null;
+    remote = (branch && branch !== 'HEAD' && conf(`branch.${branch}.pushRemote`)) || conf('remote.pushDefault') || (branch && branch !== 'HEAD' && conf(`branch.${branch}.remote`)) || 'origin';
+    if (dynamic(remote)) return { ask: 'git push to a remote the gate cannot read' };
+  }
+  // other commands of the same call that change a remote, the branch's remote or which branch is current
+  let literal = null; let literalKeepsPush = false;
+  for (const m of remoteOf(remote)) if (m[2].toLowerCase() === 'pushurl' || literal == null) literal = m[3];
+  let others = []; try { others = parseCommand(line).cmds; } catch { /* the push's own words still decide */ }
+  for (const o of others) {
+    if (o.bin !== 'git') continue;
+    const p = positionals(o);
+    if (p[0] === 'remote' && ['add', 'set-url', 'rename', 'remove', 'rm'].includes(p[1])) {
+      const args = p.slice(2);
+      const plain = (p[1] === 'add' || p[1] === 'set-url') && args.length === 2 && args[0] === remote && !o.tokens.some((t) => ['--add', '--delete', '-t', '-m', '--mirror'].includes(t) || t.startsWith('--mirror='));
+      if (plain && !dynamic(args[1])) { literal = args[1]; literalKeepsPush = p[1] === 'set-url' && !o.tokens.includes('--push'); continue; }
+      if (args.includes(remote) || p[1] === 'rename') return { ask: `git push to a remote the same call changes (git remote ${p[1]})` };
+    }
+    if (p[0] === 'config' && p.slice(1).some((t) => /^(remote|url|push)\./i.test(t) || /^branch\..+\.(pushremote|remote)$/i.test(t))) return { ask: 'git push in a call whose git config changes a remote, a rewrite rule or where a branch pushes' };
+    if (!word && ((p[0] === 'branch' && o.tokens.some((t) => t === '-u' || t.startsWith('--set-upstream-to'))) || p[0] === 'checkout' || p[0] === 'switch'))
+      return { ask: `git push with no repository named, after git ${p[0]} in the same call (the remote it uses may change)` };
+  }
+  // every push address of the remote: git sends to each of them
+  const pushUrls = (r) => String(ctx.git?.(at, ['remote', 'get-url', '--push', '--all', r]) || '').split('\n').map((x) => x.trim()).filter(Boolean);
+  if (literal != null) {
+    if (!literal || dynamic(literal)) return { ask: 'git push to an address the gate cannot read' };
+    // `git remote set-url <r> <addr>` changes the fetch address; a push address already set still receives the push
+    const urls = [literal, ...(literalKeepsPush ? pushUrls(remote).filter((u) => u !== literal) : [])];
+    return { url: literal, urls, remote };
+  }
+  if (urlLike(remote)) return { url: remote, urls: [remote], remote };
+  const urls = pushUrls(remote);
+  return { url: urls[0] || remote, urls: urls.length ? urls : [remote], remote };
+}
+/** The slug a push address list is about for the row: the first one on a list, else the first. */
+export function pushSlug(addr, lists = {}) {
+  const slugs = (addr?.urls || (addr?.url ? [addr.url] : [])).map(repoSlug).filter(Boolean);
+  const listed = (sl) => ['publicRemotes', 'deployOnPush'].some((n) => (lists[n] || []).some((g) => globMatch(String(g).toLowerCase(), sl.toLowerCase())));
+  return slugs.find(listed) ?? slugs[0] ?? null;
 }
 export function repoSlug(url) {
   const m = /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(String(url || '').trim());
@@ -1327,6 +1473,7 @@ function rmOutside(c, input, ctx) {
     const v = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(raw);
     const t = v && ctx.vars && ctx.vars[v[1]] != null ? ctx.vars[v[1]] : raw;
     if (/[$`*?]/.test(t) || t.startsWith('~')) return `${what} on ${raw} (not a fixed path inside the repo)`;
+    if (input.cwdUnread && !t.startsWith('/')) return `${what} on ${raw} ${unreadWhere()}`;
     if (input.cwdUnknown && !t.startsWith('/')) return `${what} on ${raw} after a cd the gate cannot resolve`;
     const abs = absPath(t, input.cwd, ctx);
     if (isScratch(abs, ctx)) continue;                       // the caller's own temp/scratch tree
@@ -1471,6 +1618,25 @@ export function canonicalJson(v) {
 export function cmdHash({ engine = 'claude', cwd = '', tool = 'Bash', command = '', filePath = '', toolInput = null }) {
   const what = tool === 'Bash' || toolInput == null ? String(command).trim() : canonicalJson(toolInput);
   return sha([HASH_VERSION, engine, cwd, tool, what, filePath].join('\u0000'));
+}
+
+/**
+ * The script files a shell command runs, each with the folder it runs in: [{ path, cwd }] (path as written).
+ * `unread: true` (ctx.baseUnread, #548): a relative path in a folder nobody told the hook; which file it is is not known.
+ */
+export function scriptsRun(command, cwd, ctx = {}) {
+  let parsed; try { parsed = parseCommand(command); } catch { return []; }
+  const out = [];
+  const entry = (p, c) => { const w = commandCwd(c, cwd, ctx); return { path: p, cwd: w.cwd, ...(w.unread && !/^(\/|~(\/|$))/.test(p) ? { unread: true } : {}) }; };
+  parsed.cmds.forEach((c, k) => {
+    for (const v of stdinScriptRuns(c, parsed.cmds[k - 1])) if (!/[$`*?]/.test(v.viaStdin)) out.push(entry(v.viaStdin, c));
+  });
+  for (const c of parsed.cmds) {
+    if (!c.bin || !isScript(c) || ['npx', 'uv', 'pnpm', 'npm'].includes(c.bin)) continue;
+    const sp = scriptPath(c);
+    if (sp && !/[$`*?]/.test(sp)) out.push(entry(sp, c));
+  }
+  return out;
 }
 
 /** What the owner sees for a non-shell call: the tool and its input, readable. */

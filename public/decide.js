@@ -127,7 +127,7 @@
     <div class="gate-top"><span class="chip gate-chip"><span aria-hidden="true">⛨</span>GATE ${esc(g.id)}</span><span class="gate-label">${esc(g.label || g.cls)}</span>${contextChips(g.context)}</div>
     ${g.why ? `<div class="gate-meta">${esc(g.why)}${head}</div>` : head ? `<div class="gate-meta">${head.slice(3)}</div>` : ''}
     ${words}
-    <div class="gate-meta">${esc(g.agent)} · ${esc(g.cwd)} · ${esc(g.tool)} · ${o.age} ago${g.commandRedacted ? ' · command withheld (contains a secret)' : ''}</div>
+    <div class="gate-meta">${esc(g.agent)} · ${g.folderUnread ? `folder not told by Codex (session in ${esc(g.cwd)}): ${g.repoNamed ? 'the repository is named in the command' : 'repository not read'}` : g.folderUnsure ? `runs in ${g.folderUnsure.map(esc).join(' or ')} (a folder change may not apply): repository not read` : esc(g.cwd)} · ${esc(g.tool)} · ${o.age} ago${g.commandRedacted ? ' · command withheld (contains a secret)' : ''}</div>
     ${/^(unregistered|headless):/.test(String(g.agent || '')) ? '<div class="gate-meta gate-nowake">this session is not woken after you decide: it runs the same command again itself</div>' : ''}
     ${g.previously ? `<div class="gate-meta gate-again">↻ you approved this exact call at ${esc(String(g.previously.at).slice(11, 16))}Z (${esc(g.previously.gate)}); it expired before it ran</div>` : ''}
     ${dry}
