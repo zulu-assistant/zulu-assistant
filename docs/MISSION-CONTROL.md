@@ -127,7 +127,7 @@ Each role runs on the engine you pick in `zulu setup --step engines`, stored in
 |---|---|---|
 | Mission Control | contract via `--append-system-prompt-file`, a fixed tool allowlist | contract as its first instruction (plus `~/.codex/AGENTS.md`), workspace-write sandbox, on-request approvals |
 | Workers / residents | `--permission-mode auto` / `acceptEdits`, `--name` = mesh address | workspace-write sandbox, on-request approvals; the address comes from the workspace title |
-| Scheduled triage | `claude -p` bounded by `--allowedTools` | `codex exec` in the workspace-write sandbox (writes only inside the repo), no approvals |
+| Scheduled triage | `claude -p` with four tools (`--tools`), no MCP servers or skills, and `--allowedTools` for its shell commands | `codex exec` in the workspace-write sandbox (writes only inside the repo), no approvals |
 | Models | `master` / `worker` / `workerFallback` (probed daily) | `codex.model` / `codex.workerModel`, or Codex's own default |
 
 **The bounds are not identical.** Claude enforces a per-tool allowlist. Codex has no per-tool
@@ -161,8 +161,17 @@ panel (APPROVE / DECLINE). Mission Control never calls the decide operation.
 A LaunchAgent runs `scripts/triage.sh` four times a day (the template schedule
 is 08:30, 12:30, 16:30 and 20:30). Triage is a headless `claude -p` pass that
 follows `config/TRIAGE.md`
-([example](../examples/config/TRIAGE.md)). It is **hard-bounded by
-`--allowedTools`**: the model cannot run anything outside that list.
+([example](../examples/config/TRIAGE.md)). It is **bounded by its start
+line**: `--tools "Bash,Read,Write,Edit"` gives it those four tools and no
+others, `--strict-mcp-config` loads no MCP server, `--disable-slash-commands`
+loads no skills, and `--allowedTools` names the shell commands it may run.
+An allow list alone is not a bound: it answers permission asks, and tools that
+need no permission (a helper agent, messages, schedules, web reads) would stay
+available. Nor does the list cover everything in the shell: Claude Code runs
+read-only commands (such as `cat` or `jq` on a file in the checkout) without
+asking, and the pass may write files inside the checkout. A Claude Code that
+does not list all three flags in `claude --help` starts the pass with the allow
+list alone, and the job's log says so.
 
 Each pass:
 

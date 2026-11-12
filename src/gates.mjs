@@ -376,6 +376,13 @@ export function parseCommand(src, depth = 0, opts = {}) {
   // negated. A `;`, `||`, `|`, `&`, a condition, or a `popd` after it leaves the change unsure (#548, MC's review).
   let cd = { targets: [], unknown: false, sure: true };
   const cdStack = [];
+  // #584: the branch changes before each command (`git switch`, `git checkout <branch>`, `git branch -u` …), also
+  // those read inside a command string or a script body the call hands to a shell. They only ever add to what a push
+  // through the current branch is judged by. A body handed to a shell starts with the switches that stand before that
+  // shell command (`git switch main && bash -c "git push origin"`): `opts.switchesIn`.
+  let sw = [...(opts.switchesIn || [])];
+  const innerSwitches = (inner) => { for (const ic of inner) { const t = branchSwitch(ic); if (t) sw = [...sw, t]; } };
+  const bodyOpts = () => ({ ...opts, switchesIn: sw });
   for (const c of cmds) {
     for (let k = 0; k < (c.closes || 0); k++) if (cdStack.length) cd = cdStack.pop();
     if (c.sepBefore !== '&&' && cd.targets.length) cd = { ...cd, sure: false };
@@ -390,6 +397,9 @@ export function parseCommand(src, depth = 0, opts = {}) {
       cdTargets: [...cd.targets], cdUnknown: cd.unknown, ...(cd.targets.length && !cd.sure ? { cdUnsure: true } : {}) };
     const inline = inlineBodies(cmd.bin, cmd.tokens);
     if (inline.length) cmd.inlineBodies = inline;
+    if (sw.length && cmd.bin === 'git') cmd.switchesBefore = sw;
+    const turn = branchSwitch(cmd);
+    if (turn) sw = [...sw, turn];
     out.push(cmd);
     if (cmd.bin === 'cd' || cmd.bin === 'pushd' || cmd.bin === 'chdir') {     // chdir: zsh's other name for cd (#551)
       const args = cmd.tokens.slice(1); let k = 0;
@@ -409,20 +419,29 @@ export function parseCommand(src, depth = 0, opts = {}) {
       else cd = { targets: [...cd.targets, t], unknown: cd.unknown, sure: sure && (fixedT || cd.sure) };
     } else if (cmd.bin === 'popd') cd = { ...cd, sure: false };     // back to a folder the parser does not track
     for (const body of c.heredocs) {
-      if (SHELLS.has(cmd.bin)) { const p = parseCommand(body, depth + 1, opts); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); }
+      if (SHELLS.has(cmd.bin)) { const p = parseCommand(body, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
       else if (INTERPRETERS.has(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: body, by: cmd.bin, text: body });
       else data.push(body);
     }
     for (const h of c.herestrings) {
-      if (SHELLS.has(cmd.bin)) { const p = parseCommand(h, depth + 1, opts); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); }
+      if (SHELLS.has(cmd.bin)) { const p = parseCommand(h, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
       else if (INTERPRETERS.has(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: h, by: cmd.bin, text: h });
       else data.push(h);
     }
     if (SHELLS.has(cmd.bin)) {
       const ci = cmd.tokens.findIndex((t) => /^-[a-z]*c[a-z]*$/.test(t));
-      if (ci > 0 && cmd.tokens[ci + 1] != null) { const p = parseCommand(cmd.tokens[ci + 1], depth + 1, opts); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); cmd.inlinedC = true; }
+      if (ci > 0 && cmd.tokens[ci + 1] != null) { const p = parseCommand(cmd.tokens[ci + 1], depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); cmd.inlinedC = true; innerSwitches(p.cmds); }
       else if (cmd.tokens.length === 1 || (cmd.tokens[1] || '').startsWith('-')) cmd.readsStdin = c.sepBefore === '|' || c.sepBefore === '|&';
     }
+  }
+  // a substitution (`$(…)`, backticks) is parsed on its own, out of order with the list above: adds only,
+  // a switch inside one counts for every git and gh command of the call, and a command inside one gets every switch
+  const subSw = subCmds.map(branchSwitch).filter(Boolean);
+  const all = [...sw, ...subSw];
+  if (all.length) for (const c of out) {
+    if (c.bin !== 'git' && c.bin !== 'gh') continue;
+    const add = c.fromSub ? all : subSw;
+    if (add.length) c.switchesBefore = [...(c.switchesBefore || []), ...add];
   }
   return { cmds: out, data, opaque, vars };
 }
@@ -1360,10 +1379,21 @@ function pushProtected(r, c, input, policy, ctx) {
   const allow = r.allowRefs || [];
   const prot = r.protectedRefs || ['main', 'master'];
   let specs = pos.slice(1);
-  if (!specs.length || specs.includes('HEAD')) {
-    const head = ctx.git?.(repoAt, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (!head) return 'git push with an unknown current branch';
-    specs = specs.length ? specs.map((s) => (s === 'HEAD' ? head : s)) : [head];
+  const viaHead = (s) => s === 'HEAD' || s === '@';
+  if (!specs.length || specs.some(viaHead)) {
+    const cur = currentBranches(c, ctx.git?.(repoAt, ['rev-parse', '--abbrev-ref', 'HEAD']), ctx, repoAt);
+    if (cur.ask) return cur.ask;
+    // a bare push under push.default upstream (or its old name tracking) sends the branch to its upstream's name;
+    // under matching, or with a push refspec configured for the remote, it sends more than the current branch: asked
+    const pushDefault = specs.length ? '' : String(ctx.git?.(repoAt, ['config', '--get', 'push.default']) || '').trim().toLowerCase();
+    if (pushDefault === 'matching') return 'git push with push.default matching (it sends every branch that has a match on the remote)';
+    if (!specs.length && addr.remote && ctx.git?.(repoAt, ['config', '--get-all', `remote.${addr.remote}.push`])) return `git push with remote.${addr.remote}.push set (it sends the refs configured there)`;
+    const upstream = /^(upstream|tracking)$/.test(pushDefault);
+    // …and the upstream is read before the call: a switch, a branch made (branch.autoSetupMerge) or `branch -u` in the
+    // call may set another one
+    if (upstream && c.switchesBefore?.length) return `git push under push.default ${pushDefault} after a branch change in the same call (the upstream it sends to may be set by the call)`;
+    const dests = (b) => [b, ...(upstream ? [String(ctx.git?.(repoAt, ['config', '--get', `branch.${b}.merge`]) || '').trim().replace(/^refs\/heads\//, '')].filter(Boolean) : [])];
+    specs = specs.length ? specs.flatMap((s) => (viaHead(s) ? cur.names : [s])) : cur.names.flatMap(dests);
   }
   for (const spec of specs) {
     if (spec.startsWith(':')) return `deletes remote ref ${spec.slice(1)}`;
@@ -1374,6 +1404,135 @@ function pushProtected(r, c, input, policy, ctx) {
     if (prot.includes(dst)) return `push to protected branch ${dst}`;
   }
   return null;
+}
+// #584: a branch name the gate reads as written: no expansion, glob or brace, not `-`, `@`/`@{…}`, a revision
+// expression or a commit id
+const literalBranch = (s) => typeof s === 'string' && /^[A-Za-z0-9._/-]+$/.test(s) && !s.startsWith('-') && !s.includes('..') && !/^[0-9a-f]{7,40}$/i.test(s) && s !== 'HEAD';
+/**
+ * What one command does to the current branch of its repository (#584). → null (no change) | { branch, made } (a
+ * literal branch; made = the call creates or resets it) | { upstream: '<what>' } (the branch's upstream is set) |
+ * { unknown: '<what>' } (a change the gate cannot read). "No change" only for a form read to the end as one (a
+ * wrong "no change" is the gap, a wrong "unknown" is one row).
+ */
+export function branchSwitch(c) {
+  if (c.bin === 'gh') {
+    if (ghWordsMatch(c.tokens, ['pr', 'checkout']) || ghWordsMatch(c.tokens, ['pr', 'co']) || ghWordsMatch(c.tokens, ['co'])) return { unknown: 'gh pr checkout' };
+    const first = positionals(c)[0];
+    return first && !GH_COMMANDS.has(first) ? { unknown: `gh ${first} (a command the gate does not know: an alias may switch the branch)` } : null;
+  }
+  if (c.bin !== 'git') return null;
+  const { sub, args } = gitWords(c);
+  if (!sub) return null;
+  const named = (b, made, what) => (literalBranch(b) ? { branch: b, made } : { unknown: what });
+  const words = (valueFlags) => { const out = []; for (let j = 0; j < args.length; j++) { if (args[j] === '--') break; if (valueFlags.includes(args[j])) { j++; continue; } if (!args[j].startsWith('-') || args[j] === '-') out.push(args[j]); } return out; };
+  if (sub === 'switch') {
+    const r = readOpts(args, SWITCH_OPTS);
+    if (r.odd) return { unknown: `git switch ${r.odd}` };
+    if (r.has('-d', '--detach') || r.vals['--orphan'] != null) return { unknown: 'git switch --detach/--orphan' };
+    const made = r.vals['-c'] ?? r.vals['-C'] ?? r.vals['--create'] ?? r.vals['--force-create'];
+    if (r.paths) return { unknown: 'git switch with --' };
+    if (made != null) return r.words.length <= 1 ? named(made, true, 'git switch -c with a name the gate cannot read') : { unknown: 'git switch -c' };
+    if (r.has('-t', '--track')) return { unknown: 'git switch --track' };   // the local name comes from the remote one
+    return r.words.length === 1 ? named(r.words[0], false, `git switch ${r.words[0]}`) : { unknown: 'git switch' };
+  }
+  if (sub === 'checkout') {
+    const r = readOpts(args, CHECKOUT_OPTS);
+    if (r.odd) return { unknown: `git checkout ${r.odd}` };
+    if (r.has('-p', '--patch', '--ours', '--theirs') || r.vals['--pathspec-from-file'] != null) return null;      // files
+    if (r.has('--detach') || r.vals['--orphan'] != null) return { unknown: 'git checkout --detach/--orphan' };
+    const made = r.vals['-b'] ?? r.vals['-B'];
+    if (made != null) return !r.paths?.length && r.words.length <= 1 ? named(made, true, 'git checkout -b with a name the gate cannot read') : { unknown: 'git checkout -b' };
+    if (r.has('-t', '--track')) return { unknown: 'git checkout --track' };
+    if (r.paths?.length) return null;                                         // `checkout [<tree-ish>] -- <files>`
+    if (r.words.length === 0) return null;                                    // a bare `git checkout` (or `git checkout --`)
+    if (r.words.length === 1) return named(r.words[0], false, `git checkout ${r.words[0]}`);   // `<branch>` or `<branch> --`
+    return r.paths ? { unknown: 'git checkout' } : null;                      // a tree-ish and files
+  }
+  if (sub === 'branch') {
+    // a listing, a creation, a copy, a deletion: no change; a move, or an option not read to the end (git takes any
+    // unambiguous shortening, `--mov`): asked; an upstream set: read by a push under push.default upstream
+    const r = readOpts(args, BRANCH_OPTS);
+    if (r.odd) return { unknown: `git branch ${r.odd}` };
+    if (r.has('-m', '-M', '--move')) return { unknown: 'git branch -m' };
+    return r.vals['-u'] != null || r.has('--set-upstream-to', '-t', '--track') ? { upstream: 'git branch -u' } : null;
+  }
+  // pull and fetch set the current branch's upstream with --set-upstream (or a shortening git accepts, `--set-up`)
+  if ((sub === 'pull' || sub === 'fetch') && args.some((a) => { const f = a.split('=')[0]; return f.length >= 5 && '--set-upstream'.startsWith(f); })) return { upstream: `git ${sub} --set-upstream` };
+  if (sub === 'symbolic-ref') return words(['-m']).length >= 2 && !args.some((a) => a === '-d' || a === '--delete') ? { unknown: 'git symbolic-ref' } : null;
+  if (sub === 'bisect') return ['log', 'view', 'visualize', 'terms', undefined].includes(args[0]) ? null : { unknown: 'git bisect' };
+  if (sub === 'stash' && args[0] === 'branch') return named(args[1], true, 'git stash branch');
+  if (sub === 'rebase') { const w = words(['--onto', '-s', '--strategy', '-X', '--strategy-option', '-x', '--exec']); return w.length >= 2 ? named(w[1], false, 'git rebase <upstream> <branch>') : null; }
+  if (!GIT_COMMANDS.has(sub)) return { unknown: `git ${sub} (a command the gate does not know: an alias may switch the branch)` };
+  return null;
+}
+/** A git command's subcommand and its words, after git's own options. */
+function gitWords(c) {
+  const t = c.tokens; let k = 1;
+  while (k < t.length && t[k].startsWith('-')) { if (VALUE_FLAGS.git.includes(t[k])) k++; k++; }
+  return { sub: t[k], args: t.slice(k + 1) };
+}
+// the subcommands git and gh know; another word may be an alias (`git co`, `gh co`) or an extension
+const GIT_COMMANDS = new Set(('add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore check-mailmap check-ref-format checkout '
+  + 'checkout-index cherry cherry-pick clean clone commit commit-graph commit-tree config count-objects credential describe diff diff-files diff-index diff-tree '
+  + 'difftool fetch fetch-pack for-each-ref for-each-repo format-patch fsck gc grep hash-object help init interpret-trailers lfs log ls-files ls-remote ls-tree '
+  + 'maintenance merge merge-base merge-file merge-tree mergetool mktag mktree mv name-rev notes prune pull push range-diff read-tree rebase reflog remote repack '
+  + 'replace request-pull rerere reset restore rev-list rev-parse revert rm shortlog show show-branch show-ref sparse-checkout stash status submodule switch '
+  + 'symbolic-ref tag update-index update-ref var verify-commit verify-pack verify-tag version whatchanged worktree write-tree '
+  + 'stage pack-refs hook replay refs diagnose bugreport column stripspace send-email fast-export fast-import filter-branch').split(' '));
+const BRANCH_OPTS = { flags: ['--list', '--all', '--remotes', '--verbose', '--quiet', '--ignore-case', '--omit-empty', '--show-current', '--format', '--sort', '--contains',
+  '--no-contains', '--merged', '--no-merged', '--points-at', '--column', '--no-column', '--color', '--no-color', '--abbrev', '--no-abbrev', '--force', '--track', '--no-track',
+  '--create-reflog', '--recurse-submodules', '--copy', '--delete', '--unset-upstream', '--edit-description', '--move', '--set-upstream-to'],
+values: [], letters: 'larviqftcCdDmM', valueLetters: 'u' };
+const GH_COMMANDS = new Set(('alias api attestation auth browse cache codespace completion config extension gist gpg-key help issue label org pr project release '
+  + 'repo ruleset run search secret ssh-key status variable workflow').split(' '));
+const SWITCH_OPTS = { flags: ['--quiet', '--force', '--discard-changes', '--merge', '--progress', '--no-progress', '--guess', '--no-guess', '--ignore-other-worktrees',
+  '--recurse-submodules', '--no-recurse-submodules', '--detach', '--track', '--no-track'], values: ['--create', '--force-create', '--orphan', '--conflict'], letters: 'qfmdt', valueLetters: 'cC' };
+const CHECKOUT_OPTS = { flags: ['--quiet', '--force', '--merge', '--progress', '--no-progress', '--guess', '--no-guess', '--ignore-skip-worktree-bits', '--ignore-other-worktrees',
+  '--overwrite-ignore', '--no-overwrite-ignore', '--recurse-submodules', '--no-recurse-submodules', '--overlay', '--no-overlay', '--patch', '--ours', '--theirs',
+  '--detach', '--track', '--no-track', '--pathspec-file-nul'], values: ['--orphan', '--conflict', '--pathspec-from-file'], letters: 'qfmplt', valueLetters: 'bB' };
+/**
+ * One reading of a subcommand's options to the end: long options (a value after `=` or as the next word), clusters of
+ * one-letter options (a value letter takes the rest of the word, `-Bmain`, or the next one), the words, and what
+ * follows `--` (`paths`: null without `--`). `odd`: the first option the table does not know.
+ */
+function readOpts(args, { flags, values, letters, valueLetters }) {
+  const r = { opts: new Set(), vals: {}, words: [], paths: null, odd: null };
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j];
+    if (r.paths) { r.paths.push(a); continue; }
+    if (a === '--') { r.paths = []; continue; }
+    if (a === '-' || !a.startsWith('-')) { r.words.push(a); continue; }
+    if (a.startsWith('--')) {
+      const [f, v] = a.split(/=(.*)/s);
+      if (values.includes(f)) r.vals[f] = v ?? args[++j] ?? '';
+      else if (flags.includes(f)) r.opts.add(f);
+      else r.odd ??= f;
+      continue;
+    }
+    for (let i = 1; i < a.length; i++) {
+      if (valueLetters.includes(a[i])) { r.vals[`-${a[i]}`] = a.slice(i + 1) || args[++j] || ''; break; }
+      if (letters.includes(a[i])) { r.opts.add(`-${a[i]}`); continue; }
+      r.odd ??= a; break;
+    }
+  }
+  r.has = (...names) => names.some((n) => r.opts.has(n));
+  return r;
+}
+/**
+ * The branches a push that goes through the current branch may send (#584): the folder's branch AND every branch a
+ * switch in the same call names. Nothing is ever removed from that set. → { names } | { ask }
+ */
+function currentBranches(c, head, ctx, at) {
+  const sw = c.switchesBefore || [];
+  const unknown = sw.find((s) => s.unknown);
+  if (unknown) return { ask: `git push of the current branch after ${unknown.unknown} in the same call (which branch it sends cannot be read)` };
+  for (const s of sw.filter((x) => x.branch && !x.made)) {
+    // a tag or a commit by that name (not a local branch): the switch detaches HEAD, which the gate does not read
+    if (!ctx.git?.(at, ['rev-parse', '--verify', '--quiet', `refs/heads/${s.branch}`]) && ctx.git?.(at, ['rev-parse', '--verify', '--quiet', `${s.branch}^{commit}`]))
+      return { ask: `git push of the current branch after a checkout of ${s.branch}, which is not a local branch` };
+  }
+  if (!head) return { ask: 'git push with an unknown current branch' };
+  return { names: [...new Set([head, ...sw.map((s) => s.branch).filter(Boolean)])] };
 }
 /** #548: what a deny says when a Codex call's folder was not told to the hook, with the form that names it. */
 export const UNREAD_MARK = 'in a folder Codex did not name';
