@@ -15,6 +15,29 @@ export const isShellTool = (t) => SHELL_TOOL_NAMES.some((n) => n.toLowerCase() =
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish']);
 const INTERPRETERS = new Set(['python', 'python3', 'node', 'ruby', 'perl', 'osascript', 'deno', 'bun', 'php', 'tsx', 'ts-node']);
 const WRAPPERS = new Set(['sudo', 'env', 'command', 'nohup', 'time', 'exec', 'nice', 'timeout', 'caffeinate', 'builtin']);
+// shells read as shells that are not on SHELLS: csh and tcsh ship with macOS. Reading their text with the sh
+// grammar only adds holds.
+const FURTHER_SHELLS = new Set(['csh', 'tcsh', 'ash', 'mksh', 'rbash']);
+/**
+ * The plain name of an interpreter or a shell named with its version or a packager's name (#612): `python3.13`,
+ * `python3.13t`, `python3-intel64`, `pythonw`, `pypy3`, `ipython3` → python3; `python2.7` → python; `node22`, `nodejs`
+ * → node; `ruby3.3`, `perl5.36`, `php8.3`, `bash5`, `bash-5.2`, `zsh-5.9`, `ksh93` → the name without the number. Any
+ * other name comes back as it is (`python3-config`, `node-gyp`, `php-fpm`). Every place that asks whether a program is
+ * an interpreter or a shell, or looks one up in a table, reads it through this.
+ */
+export function progName(bin) {
+  if (bin == null) return bin;
+  const b = String(bin);
+  if (SHELLS.has(b) || INTERPRETERS.has(b) || FURTHER_SHELLS.has(b)) return b;
+  if (b === 'nodejs') return 'node';
+  // version (with or without a dash), build letters (t, d, m, u) and macOS's -intel64 build
+  const py = /^(python|pythonw|pypy|ipython)(?:-?([0-9][0-9.]*)[dmtu]*)?(?:-intel64)?$/.exec(b);
+  if (py) return py[2]?.startsWith('2') || (!py[2] && b === 'pypy') ? 'python' : 'python3';
+  const m = /^(node|ruby|perl|php|bash|zsh|ksh|fish)-?[0-9][0-9.]*$/.exec(b);
+  return m ? m[1] : b;
+}
+const isShell = (bin) => SHELLS.has(progName(bin)) || FURTHER_SHELLS.has(bin);
+const isInterpreter = (bin) => INTERPRETERS.has(progName(bin));
 const INDIRECT = new Set(['eval', 'source', '.', 'xargs', 'ssh', 'parallel', 'watch']);
 const VALUE_FLAGS = { git: ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path', '--super-prefix'], gh: ['-R', '--repo'], sudo: ['-u', '-g'], nice: ['-n'], env: ['-u', '-S', '-C'] };
 const SCRIPT_EXT = /\.(py|mjs|cjs|js|ts|sh|bash|zsh|rb|pl|php)$/;
@@ -32,8 +55,8 @@ export function checkMode(policy, name) {
 }
 // code passed on the command line: `node -e`, `python3 -c`, `perl -ne`, `osascript -e`, `deno eval` …
 const INLINE = [
-  { bin: /^(node|nodejs|bun|tsx|ts-node)$/, flag: /^(-[a-z]*[ep]|--eval|--print)$/, eq: /^--(eval|print)=/ },
-  { bin: /^python[0-9.]*$/, flag: /^-[A-Za-z]*c$/ },
+  { bin: /^(node[0-9.]*|nodejs|bun|tsx|ts-node)$/, flag: /^(-[a-z]*[ep]|--eval|--print)$/, eq: /^--(eval|print)=/ },
+  { bin: /^(python|pypy)[0-9.]*$/, flag: /^-[A-Za-z]*c$/ },
   { bin: /^perl[0-9.]*$/, flag: /^-[A-Za-z0-9]*[eE]$/ },
   { bin: /^ruby[0-9.]*$/, flag: /^-[A-Za-z]*e$/ },
   { bin: /^php[0-9.]*$/, flag: /^-r$/ },
@@ -42,7 +65,7 @@ const INLINE = [
 ];
 /** The code bodies an interpreter was handed as arguments ([] for anything else). */
 export function inlineBodies(bin, tokens) {
-  const spec = bin && INLINE.find((x) => x.bin.test(bin));
+  const spec = bin && INLINE.find((x) => x.bin.test(bin) || x.bin.test(progName(bin)));   // `pythonw -c`, `python3.13t -c` (#612)
   if (!spec) return [];
   const out = [];
   if (spec.sub) {
@@ -419,16 +442,16 @@ export function parseCommand(src, depth = 0, opts = {}) {
       else cd = { targets: [...cd.targets, t], unknown: cd.unknown, sure: sure && (fixedT || cd.sure) };
     } else if (cmd.bin === 'popd') cd = { ...cd, sure: false };     // back to a folder the parser does not track
     for (const body of c.heredocs) {
-      if (SHELLS.has(cmd.bin)) { const p = parseCommand(body, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
-      else if (INTERPRETERS.has(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: body, by: cmd.bin, text: body });
+      if (isShell(cmd.bin)) { const p = parseCommand(body, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
+      else if (isInterpreter(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: body, by: cmd.bin, text: body });
       else data.push(body);
     }
     for (const h of c.herestrings) {
-      if (SHELLS.has(cmd.bin)) { const p = parseCommand(h, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
-      else if (INTERPRETERS.has(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: h, by: cmd.bin, text: h });
+      if (isShell(cmd.bin)) { const p = parseCommand(h, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
+      else if (isInterpreter(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: h, by: cmd.bin, text: h });
       else data.push(h);
     }
-    if (SHELLS.has(cmd.bin)) {
+    if (isShell(cmd.bin)) {
       const ci = cmd.tokens.findIndex((t) => /^-[a-z]*c[a-z]*$/.test(t));
       if (ci > 0 && cmd.tokens[ci + 1] != null) { const p = parseCommand(cmd.tokens[ci + 1], depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); cmd.inlinedC = true; innerSwitches(p.cmds); }
       else if (cmd.tokens.length === 1 || (cmd.tokens[1] || '').startsWith('-')) cmd.readsStdin = c.sepBefore === '|' || c.sepBefore === '|&';
@@ -454,7 +477,7 @@ function skipDq(s, j) { while (j < s.length && s[j] !== '"') j += s[j] === '\\' 
 function testWrapperEnd(t, k, opts = {}) {
   const base = (i) => { const b = path.basename(t[i] || ''); return opts.nocaseBin ? b.toLowerCase() : b; };
   let j = k;
-  if (['sh', 'bash', 'zsh', 'node'].includes(base(j))) j++;
+  if (['sh', 'bash', 'zsh', 'node'].includes(progName(base(j)))) j++;
   if (base(j) === 'task.sh') j += 1;
   else if (base(j) === 'mesh-cli.mjs' && t[j + 1] === 'task') j += 2;
   else return -1;
@@ -625,7 +648,10 @@ function classifyWith(input, policy, ctx, on) {
   // a script handed to an interpreter or a shell on its input (`bash < install.sh`, `cat x.mjs | node - --commit`)
   // is a run of that script: the script rules read it as `bash install.sh` / `node x.mjs --commit` (#532)
   const fromInput = parsed.cmds.flatMap((c, k) => stdinScriptRuns(c, parsed.cmds[k - 1]));
-  for (const c of [...runnable, ...fromInput]) {
+  // a ruled program that is itself a script, handed to an interpreter or a shell by its file (`node /opt/homebrew/bin/vercel
+  // deploy --prod`, `bash bin/zulu upgrade`, `. bin/zulu upgrade`) is also read as that program, by the `bin` rules (#612, adds holds)
+  const byFile = programsByFile([...runnable, ...fromInput], classes, nocaseOf(ctx).nocase);
+  for (const c of [...runnable, ...fromInput, ...byFile]) {
     if (!c.bin) continue;
     // judge each command in the folder it actually runs in: `cd X && …`, `git -C X …`
     const where = commandCwd(c, input.cwd, ctx);
@@ -689,7 +715,7 @@ function renamedProgram(cmds, policy, nocase = false) {
   const ruled = new Set((policy?.classes || []).flatMap((c) => (c.rules || []).map((r) => r.bin).filter(Boolean).map(low)));
   const globals = new Set([...VALUE_FLAGS.git, ...VALUE_FLAGS.gh]);
   for (const c of cmds) {
-    if (!c.bin || INTERPRETERS.has(c.bin) || SHELLS.has(c.bin) || INDIRECT.has(c.bin)) continue;
+    if (!c.bin || SHELLS.has(c.bin) || INTERPRETERS.has(c.bin) || INDIRECT.has(c.bin)) continue;    // only names literally on the lists skip this: a versioned name keeps it
     // a path into a usual PATH folder runs the same file the bare name would: judged like the bare name
     const byPath = c.tokens[0].includes('/') && !USUAL_BIN_DIR.test(c.tokens[0]);
     if ((PLAIN_BINS.has(c.bin) || READERS.has(c.bin)) && !byPath) continue;
@@ -757,6 +783,8 @@ function keywordHit(norm, policy) {
 const jsEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const listOr = (p, policy) => (String(p).startsWith('@') ? policy?.lists?.[String(p).slice(1)] || [] : [p]);
 
+// a script handed to an interpreter or a shell
+const runsAScript = (bin) => isInterpreter(bin) || isShell(bin);
 // Flags of the interpreters and shells whose next word is the flag's value, not the script (#530):
 // `node --import ./pre.mjs scripts/x.mjs`, `bash --rcfile ./rc.sh x.sh`. The list only picks which word is
 // called "the script"; a rule that names a script is tried on every script-looking word (scriptWords).
@@ -766,7 +794,7 @@ const NODE_VALUE_FLAGS = ['-r', '--require', '--import', '--loader', '--experime
   '--preload', '--tsconfig', '--project', '-P', '--config', '--cwd'];
 const SHELL_VALUE_FLAGS = ['--rcfile', '--init-file', '-O', '+O', '-o', '+o'];
 const SCRIPT_VALUE_FLAGS = { python: ['-W', '-X', '-Q'], python3: ['-W', '-X'], ruby: ['-I', '-r', '-C', '-E', '-K', '-F', '-T'], perl: ['-I', '-M', '-m', '-C'], php: ['-c', '-d', '-z', '-F'] };
-const scriptValueFlag = (bin, t) => (SHELLS.has(bin) ? SHELL_VALUE_FLAGS : SCRIPT_VALUE_FLAGS[bin] || NODE_VALUE_FLAGS).includes(t);
+const scriptValueFlag = (bin, t) => (isShell(bin) ? SHELL_VALUE_FLAGS : SCRIPT_VALUE_FLAGS[progName(bin)] || NODE_VALUE_FLAGS).includes(t);
 const scriptLike = (p) => SCRIPT_EXT.test(p) || p.includes('/');
 /** Every word of an interpreter or shell call that looks like a script, with whether it sits where a flag's value sits. */
 function scriptCands(c) {
@@ -780,18 +808,18 @@ function scriptCands(c) {
 }
 /** The script-looking words of an interpreter or shell call, in order (a flag's value included). */
 export function scriptWords(c) {
-  if (!c?.bin || !(INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) return [];
+  if (!c?.bin || !runsAScript(c.bin)) return [];
   return scriptCands(c).map((x) => x.word);
 }
 export function isScript(c) {
   if (!c.bin) return false;
-  if (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin)) return scriptCands(c).length > 0;
+  if (runsAScript(c.bin)) return scriptCands(c).length > 0;
   if (c.bin === 'npx' || c.bin === 'uv' || c.bin === 'pnpm' || c.bin === 'npm') return c.tokens.length > 1;
   return c.tokens[0].includes('/') || SCRIPT_EXT.test(c.tokens[0]);
 }
 /** The script a command runs (its path token), for dry-run bookkeeping. */
 export function scriptPath(c) {
-  if (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin)) { const cs = scriptCands(c); return (cs.find((x) => !x.value) || cs[0])?.word || null; }
+  if (runsAScript(c.bin)) { const cs = scriptCands(c); return (cs.find((x) => !x.value) || cs[0])?.word || null; }
   return c.tokens[0];
 }
 
@@ -828,7 +856,7 @@ export function ghWordsMatch(tokens, words) {
  * The file comes from an input redirect, from `cat <files>` piped in, or from a here-string that is one file's content.
  */
 function stdinScriptRuns(c, prev) {
-  if (!c?.bin || c.viaStdin || !(INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) return [];
+  if (!c?.bin || c.viaStdin || !(isInterpreter(c.bin) || isShell(c.bin))) return [];
   const piped = (c.sepBefore === '|' || c.sepBefore === '|&') && prev?.bin === 'cat' ? prev.tokens.slice(1).filter((t) => !t.startsWith('-')) : [];
   const files = [...(c.reads || []), ...(c.hereFiles || []), ...piped].filter((t) => t && !/[$`*?]/.test(t) && !t.startsWith('/dev/'));
   if (!files.length) return [];
@@ -836,7 +864,7 @@ function stdinScriptRuns(c, prev) {
   const lead = []; let args = null;
   for (let k = 0; k < rest.length; k++) {
     const t = rest[k];
-    if (t === '--' || t === '-' || (SHELLS.has(c.bin) && /^-[a-zA-Z]*s[a-zA-Z]*$/.test(t))) { if (t !== '--' && t !== '-') lead.push(t); args = rest.slice(k + 1).filter((x, j) => !(j === 0 && x === '--')); break; }
+    if (t === '--' || t === '-' || (isShell(c.bin) && /^-[a-zA-Z]*s[a-zA-Z]*$/.test(t))) { if (t !== '--' && t !== '-') lead.push(t); args = rest.slice(k + 1).filter((x, j) => !(j === 0 && x === '--')); break; }
     if (!t.startsWith('-') && !t.startsWith('+')) {
       if (scriptValueFlag(c.bin, rest[k - 1])) { lead.push(t); continue; }       // a flag's value (`-r ./pre.cjs`), not a script of its own
       return [];                                                                 // a word of its own: the call names its program, the input is data
@@ -847,12 +875,51 @@ function stdinScriptRuns(c, prev) {
   return files.map((file) => ({ ...c, tokens: [c.tokens[0], ...lead, file.includes('/') ? file : `./${file}`, ...(args || [])], reads: [], redirects: (c.redirects || []).filter((t) => t !== file), viaStdin: file }));
 }
 
+/**
+ * The commands an interpreter or shell call also is when one of its script words names a ruled program (#612):
+ * `bash [flags] <path>/zulu upgrade` → `zulu upgrade`, with the words after the script. Read by the `bin` rules only.
+ */
+/** The first word an interpreter or shell takes as its script, past its flags (`bash -x zulu upgrade`, `bash -- zulu`: a shell
+ * looks a name without a slash up on PATH too). None after a command string, python's `-m`, or code on the command line. */
+function firstOperand(c) {
+  if (inlineBodies(c.bin, c.tokens).length) return null;
+  for (let k = 1; k < c.tokens.length; k++) {
+    const t = c.tokens[k];
+    if (t === '--') return c.tokens[k + 1] ?? null;
+    if (!/^[-+]./.test(t)) return t;
+    if (isShell(c.bin) && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(t)) return null;
+    if (t === '-m' || t === '-') return null;
+    if (scriptValueFlag(c.bin, t)) k++;
+  }
+  return null;
+}
+function programsByFile(cmds, classes, nocase) {
+  const low = (b) => (nocase ? String(b).toLowerCase() : String(b));
+  const ruled = new Set(classes.flatMap((cl) => (cl.rules || []).map((r) => r.bin).filter(Boolean).map(low)));
+  const out = [];
+  for (const c of cmds) {
+    // `.` and `source` run the file in the calling shell: read here too (`. bin/zulu upgrade`), for the `bin` rules only
+    const sourced = c?.bin === '.' || c?.bin === 'source';
+    if (!c?.bin || c.byFile || !(runsAScript(c.bin) || sourced)) continue;
+    for (const w of new Set([...scriptWords(c), sourced ? c.tokens[1] : firstOperand(c)].filter(Boolean))) {
+      const name = low(path.basename(w));
+      const k = c.tokens.indexOf(w);
+      // (no exemption for a shell's syntax check, `bash -n bin/zulu`: a flag's value and `-n +n` defeated every reading of
+      // it; a held syntax check is the cheaper error)
+      if (!ruled.has(name) || k < 0) continue;
+      out.push({ ...c, tokens: [name, ...c.tokens.slice(k + 1)], bin: name, byFile: w, viaStdin: undefined });
+    }
+  }
+  return out;
+}
+
 function ruleMatch(r, c, input, policy, ctx, only) {
   if (c.viaStdin && !(r.scriptIn || r.script)) return null;       // the rewritten form exists for the script rules only
+  if (c.byFile && !r.bin) return null;                             // a script read as the ruled program it is: its `bin` rules only
   // A rule that names a script is tried on every script-looking word of an interpreter or shell call, not only
   // the first: the first may be a flag's value (`node --import ./pre.mjs scripts/upgrade.mjs`), and no list of
   // value flags is ever complete. It can only add a hold (#530).
-  if (r.scriptIn && only == null && (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) {
+  if (r.scriptIn && only == null && runsAScript(c.bin)) {
     for (const w of new Set(scriptWords(c))) { const hit = ruleMatch(r, c, input, policy, ctx, w); if (hit) return hit; }
     return null;
   }
@@ -878,7 +945,7 @@ function ruleMatch(r, c, input, policy, ctx, only) {
 
   // for a script rule, args are the script's own arguments (after `node x.mjs` / `bash x.sh`)
   let pos = positionals(c);
-  if (r.scriptIn && (INTERPRETERS.has(c.bin) || SHELLS.has(c.bin))) pos = c.tokens.slice(c.tokens.indexOf(theScript) + 1).filter((t) => !t.startsWith('-'));
+  if (r.scriptIn && runsAScript(c.bin)) pos = c.tokens.slice(c.tokens.indexOf(theScript) + 1).filter((t) => !t.startsWith('-'));
   if (r.args && !r.args.every((a, k) => pos[k] === a) && !(c.bin === 'gh' && ghWordsMatch(c.tokens, r.args))) return null;
   if (r.argsAny && !r.argsAny.some((a) => pos.includes(a) || c.tokens.includes(a))) return null;
   if (r.notArgs && r.notArgs.some((pre) => pre.every((a, k) => pos[k] === a))) return null;
@@ -892,7 +959,7 @@ function ruleMatch(r, c, input, policy, ctx, only) {
   if (r.pathGuard) { const hit = guardedWrite(r, c, input, policy, ctx); return hit ? `${c.bin} writes ${hit}` : null; }
   // textAny (e.g. gate_decide): only commands that can send it somewhere — never readers such as grep/cat/sed
   // (without regard to case: a header name such as the decision header is the same in any case)
-  if (r.textAny && (!TEXT_SENDERS.has(c.bin) || !r.textAny.some((t) => c.tokens.join(' ').toLowerCase().includes(String(t).toLowerCase())))) return null;
+  if (r.textAny && (!TEXT_SENDERS.has(progName(c.bin)) || !r.textAny.some((t) => c.tokens.join(' ').toLowerCase().includes(String(t).toLowerCase())))) return null;
   if (r.pathAny || r.pathWrite) {
     const globs = [...(r.pathAny || []).flatMap((p) => listOr(p, policy)), ...(r.pathWrite ? listOr(r.pathWrite, policy) : [])];
     // pathAny: any mention (read or write). pathWrite: a redirect target, or an argument of a non-reader.
@@ -934,7 +1001,7 @@ export function writeTargets(c) {
   const args = c.tokens.slice(1);
   const pos = args.filter((t) => !t.startsWith('-'));
   const intoDir = (dest, srcs) => [dest, ...srcs.map((s) => path.join(dest, path.basename(s)))];
-  switch (c.bin) {
+  switch (progName(c.bin)) {
     case 'cp': case 'ln': case 'install': case 'rsync': case 'scp': case 'ditto': {
       if (pos.length < 2) return flagValues(args, '-t', '--target-directory');
       return intoDir(pos[pos.length - 1], pos.slice(0, -1));
