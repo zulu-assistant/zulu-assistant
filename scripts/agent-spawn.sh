@@ -76,6 +76,12 @@ $WTLINE
 Rules: $ROOT/AGENT-MESH.md — look up owners with \`$ROOT/scripts/mesh-cli.mjs agents\`;
 cross-agent asks are tasks (\`task.sh create ... --owner <agent>\`), never free-form;
 anything paid/outward/destructive → \`task.sh approve-request $TASK --policy "<POLICY.md line>"\` and wait.
+Guardrails: a gated command (a merge, a push to main or a public remote, a deploy, a delete outside the
+repo, a send, a script's --commit/--apply form) may be held for the owner. Before one, run
+\`$ROOT/scripts/task.sh focus $TASK\` as its own command. A call that answers "GATE: … not run" waits for
+the owner: do not retry or reword it; on the "[mesh] GATE gK … APPROVED" wake run that exact command
+once, within the approval's time (120 minutes by default). Write notes with your edit tool, not with heredocs or inline scripts that name
+gated words (those cannot be read and are held).
 
 Report-back protocol (required): when the task is done or you are blocked,
 (1) write a concise report to "$REPORT" (outcome first, then what changed,

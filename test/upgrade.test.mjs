@@ -6,9 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { sh } from '../src/worktree.mjs';
 import { parseSemver, cmpSemver, pickRelease, upgradeConfig, repoOfRemote, releaseInstall, upgradeCard, requestAllowed, upgradePlist, maybeUpgradeCheck } from '../src/upgrade.mjs';
-import { preflight, runUpgrade } from '../scripts/upgrade.mjs';
+import { preflight, runUpgrade, installKind, boardPlistOnly } from '../scripts/upgrade.mjs';
 import { migrate } from '../scripts/migrate.mjs';
-import { demoEnv } from './demo-board.mjs';
+import { demoEnv, freePort } from './demo-board.mjs';
 
 // One-click upgrade (#346): real git in temp dirs under a path WITH A SPACE. The "public repo" is a
 // local bare remote reached through a github.com URL (url.<path>.insteadOf), so nothing touches the network.
@@ -177,7 +177,7 @@ test('migrate: idempotent, add-only in overlay/, every touched file backed up, s
 
 test('the UPDATE route (demo board): token required, agent identity refused, /api/version answers', { timeout: 30000 }, async () => {
   const { spawn } = await import('node:child_process');
-  const port = 39000 + Math.floor(Math.random() * 900);
+  const port = await freePort();
   const child = spawn(process.execPath, ['server.mjs'], { cwd: process.cwd(), env: demoEnv({ MC_PORT: String(port) }), stdio: 'ignore' });
   try {
     const at = (p, o) => fetch(`http://127.0.0.1:${port}${p}`, o);
@@ -225,4 +225,48 @@ test('card, request rule, plist, observe check', async () => {
   const down = await maybeUpgradeCheck({ cfg: CFG, root: f.inst, file, now, force: true, fetchImpl: async () => ({ ok: false, status: 403 }) });
   assert.match(down.lastError, /HTTP 403/);
   assert.equal(lines.length, 1, 'no repeat line for the same release');
+});
+
+// Found in the 1.3.0 rehearsal: the upgrade of a light install ran the full bootstrap as its install step, which
+// wrote cmux config, a secrets file and a socket password into an install that had promised none of them.
+test('the install step: a light or a Guardrails-only install gets the board\'s plist only; a full install the bootstrap', async () => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'zulu kind-')));
+  const mk = async (name, { state, local, agents } = {}) => {
+    const root = path.join(base, name); const overlay = path.join(root, 'overlay');
+    await mkdir(path.join(root, 'data'), { recursive: true }); await mkdir(path.join(overlay, 'config'), { recursive: true });
+    if (state) await writeFile(path.join(root, 'data/setup-state.json'), JSON.stringify(state));
+    if (local) await writeFile(path.join(overlay, 'config/local.json'), JSON.stringify(local));
+    if (agents) await writeFile(path.join(overlay, 'config/agents.json'), JSON.stringify(agents));
+    return [root, overlay];
+  };
+  const LIGHT = { installedAt: 1, mode: 'light', steps: {}, answers: {} };
+  assert.equal(await installKind(...await mk('light', { state: LIGHT, local: { dropExamples: true } })), 'light');
+  assert.equal(await installKind(...await mk('guard', { local: { settings: { profile: 'guardrails' } } })), 'guardrails');
+  assert.equal(await installKind(...await mk('guard-on-light', { state: LIGHT, local: { settings: { profile: 'guardrails' } } })), 'guardrails');
+  assert.equal(await installKind(...await mk('full', { state: { installedAt: 1, steps: {}, answers: {} } })), 'full');
+  assert.equal(await installKind(...await mk('hand-built')), 'full', 'no state file');
+  // the plist step: rendered by the checkout's own renderer (replaced here), written when it differs, the old one kept
+  const [root] = await mk('plist', { state: LIGHT });
+  await mkdir(path.join(root, 'config'), { recursive: true });
+  await writeFile(path.join(root, 'config/zulu.env'), 'MC_LABEL_PREFIX=com.acme\n');
+  const home = path.join(base, 'home'); const la = path.join(home, 'Library/LaunchAgents');
+  const calls = [];
+  const run = (text) => async (cmd, args) => { calls.push([cmd, ...args.map((a) => path.basename(a))]); await writeFile(args[2], text); return { ok: true, out: '', err: '' }; };
+  const first = await boardPlistOnly(root, 'light', { home, run: run('<plist>one</plist>\n') });
+  assert.deepEqual([first.ok, /written again/.test(first.detail)], [true, true], first.detail);
+  const name = (await import('node:fs/promises')).readdir;
+  const files = await name(la);
+  assert.equal(files.length, 1); assert.match(files[0], /\.master-console\.plist$/);
+  assert.equal(await readFile(path.join(la, files[0]), 'utf8'), '<plist>one</plist>\n');
+  const same = await boardPlistOnly(root, 'light', { home, run: run('<plist>one</plist>\n') });
+  assert.match(same.detail, /up to date/); assert.equal((await name(la)).length, 1);
+  const changed = await boardPlistOnly(root, 'guardrails', { home, run: run('<plist>two</plist>\n') });
+  assert.match(changed.detail, /guardrails install: the board's plist written again/);
+  const after = await name(la);
+  assert.equal(after.length, 2, 'the old plist is kept beside the new one'); assert.ok(after.some((f) => /\.plist\.bak-/.test(f)));
+  assert.deepEqual(calls[0].slice(0, 3), ['/bin/bash', 'render-tmpl.sh', 'master-console.plist.tmpl'], 'only the renderer is run: no bootstrap, no launchctl');
+  assert.ok(calls.every((c) => c[1] === 'render-tmpl.sh'));
+  assert.equal(existsSync(path.join(root, 'data', files[0] ? `upgrade-${files[0]}.tmp` : 'x')), false, 'the scratch file is removed');
+  const bad = await boardPlistOnly(root, 'light', { home, run: async () => ({ ok: false, out: '', err: 'unrendered token' }) });
+  assert.deepEqual([bad.ok, /could not be rendered: unrendered token/.test(bad.detail)], [false, true]);
 });

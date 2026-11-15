@@ -12,11 +12,28 @@ export const OPAQUE = { id: 'opaque', label: 'A command the gate cannot read wit
 /** The tool names a shell call arrives under (Claude Code's Bash; Codex's shell tools). The one list (#548). */
 export const SHELL_TOOL_NAMES = ['Bash', 'shell', 'exec_command', 'local_shell', 'container.exec', 'unified_exec'];
 export const isShellTool = (t) => SHELL_TOOL_NAMES.some((n) => n.toLowerCase() === String(t || '').toLowerCase());
+export const MCP_UNLISTED = { id: 'mcp-unlisted', label: 'An MCP tool nobody has classified' };
+// the start of a tool's own name that reads as a read, when the policy sets no pattern of its own
+export const MCP_READ_PATTERN = '^(get|list|search|read|fetch|query|view|describe|find|lookup|check|status|info|count)([-_A-Z].*)?$';
+/** mcp__<server>__<tool> → { server, name }, or null for any other tool. */
+export function mcpParts(tool) {
+  const m = /^mcp__(.+?)__(.+)$/.exec(String(tool || ''));
+  return m ? { server: m[1], name: m[2] } : null;
+}
+/** The key the hook's allow file holds for a tool that may pass without a check: its name and where its server came from. */
+export const mcpAllowKey = (tool, source) => `${tool} ${source || '-'}`;
+/** Is this tool on the policy's read list (exact names or globs in lists.mcpRead, else the read pattern on the tool's own name)? */
+export function mcpIsRead(tool, policy) {
+  const parts = mcpParts(tool);
+  if (!parts) return false;
+  if ((policy?.lists?.mcpRead || []).some((g) => globMatch(String(g), tool))) return true;
+  const pat = policy?.mcpReadPattern === undefined ? MCP_READ_PATTERN : policy.mcpReadPattern;
+  try { return !!pat && new RegExp(pat).test(parts.name); } catch { return false; }
+}
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish']);
 const INTERPRETERS = new Set(['python', 'python3', 'node', 'ruby', 'perl', 'osascript', 'deno', 'bun', 'php', 'tsx', 'ts-node']);
-const WRAPPERS = new Set(['sudo', 'env', 'command', 'nohup', 'time', 'exec', 'nice', 'timeout', 'caffeinate', 'builtin']);
-// shells read as shells that are not on SHELLS: csh and tcsh ship with macOS. Reading their text with the sh
-// grammar only adds holds.
+// shells read as shells that are not on SHELLS (#612): csh and tcsh ship with macOS. Reading their text with the sh
+// grammar only adds holds. Kept apart so that, like a versioned name, they keep the unknown program's readings.
 const FURTHER_SHELLS = new Set(['csh', 'tcsh', 'ash', 'mksh', 'rbash']);
 /**
  * The plain name of an interpreter or a shell named with its version or a packager's name (#612): `python3.13`,
@@ -38,8 +55,22 @@ export function progName(bin) {
 }
 const isShell = (bin) => SHELLS.has(progName(bin)) || FURTHER_SHELLS.has(bin);
 const isInterpreter = (bin) => INTERPRETERS.has(progName(bin));
+/** Literally on one of the two lists: only these skip the readings of an unknown program (#612, adds holds only). */
+const onTheLists = (bin) => SHELLS.has(bin) || INTERPRETERS.has(bin);
+const OLD_WRAPPERS = new Set(['sudo', 'env', 'command', 'nohup', 'time', 'exec', 'nice', 'timeout', 'caffeinate', 'builtin']);
+// words that only run the words after them. The second group joined in 1.3 (they were read as the program,
+// which hid the call behind them): zsh's noglob / nocorrect / `-`, and plain launchers.
+const WRAPPERS = new Set([...OLD_WRAPPERS, 'noglob', 'nocorrect', '-', 'repeat', 'arch', 'stdbuf', 'setsid', 'doas', 'chronic', 'unbuffer', 'rlwrap', 'ionice', 'taskpolicy',
+  'gtimeout', 'gnice', 'genv', 'gstdbuf']);
 const INDIRECT = new Set(['eval', 'source', '.', 'xargs', 'ssh', 'parallel', 'watch']);
-const VALUE_FLAGS = { git: ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path', '--super-prefix'], gh: ['-R', '--repo'], sudo: ['-u', '-g'], nice: ['-n'], env: ['-u', '-S', '-C'] };
+// builtins that give a name its value as one of their words (`export Z=zulu`)
+const NAMING_BINS = new Set(['export', 'declare', 'local', 'readonly', 'typeset']);
+const OLD_VALUE_FLAGS = { git: ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path', '--super-prefix'], gh: ['-R', '--repo'], sudo: ['-u', '-g'], nice: ['-n'], env: ['-u', '-S', '-C'] };
+// flags of a wrapper that take a value (the value is not the program)
+const VALUE_FLAGS = { ...OLD_VALUE_FLAGS, sudo: ['-u', '-g', '-D', '-h', '-C', '-T', '-p', '-R', '-r', '-t', '-U', '--user', '--group', '--chdir', '--host', '--prompt', '--close-from', '--command-timeout', '--role', '--type', '--other-user', '--chroot', '--login-class'],
+  env: ['-u', '-S', '-C', '-P', '--unset', '--chdir', '--split-string'], time: ['-o', '-f', '--output', '--format'], nice: ['-n', '--adjustment'], gnice: ['-n', '--adjustment'],
+  timeout: ['-s', '--signal', '-k', '--kill-after'], gtimeout: ['-s', '--signal', '-k', '--kill-after'], caffeinate: ['-t', '-w'], exec: ['-a'], doas: ['-u', '-C'],
+  stdbuf: ['-i', '-o', '-e'], gstdbuf: ['-i', '-o', '-e'], ionice: ['-c', '-n', '-p'], taskpolicy: ['-c', '-d', '-g', '-t', '-l', '-p'], arch: ['-e', '-d', '-arch'], genv: ['-u', '-S', '-C', '--unset', '--chdir', '--split-string'] };
 const SCRIPT_EXT = /\.(py|mjs|cjs|js|ts|sh|bash|zsh|rb|pl|php)$/;
 const MAX_DEPTH = 6;
 // shell words that only introduce the command after them (`if x; then y`, `while x; do y`, `! x`): the
@@ -47,7 +78,7 @@ const MAX_DEPTH = 6;
 const SHELL_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', 'coproc']);
 // 1.3 checks: each has a switch in policy.checks (off | observe | enforce; absent = observe). In off and
 // observe the verdict is exactly what it was without the check; observe adds `wouldHold` to a clear verdict.
-export const CHECKS = ['inlineBodies', 'renamedBins', 'selfProtect'];
+export const CHECKS = ['inlineBodies', 'renamedBins', 'selfProtect', 'mcpDefault', 'remoteWrite', 'desktop', 'paneReach', 'runners', 'engineStart'];
 export const CHECK_MODES = ['off', 'observe', 'enforce'];
 export function checkMode(policy, name) {
   const m = policy?.checks?.[name];
@@ -82,9 +113,17 @@ export function inlineBodies(bin, tokens) {
 // programs that take their arguments as names or text, never as a subcommand: `cd deploy`, `echo push`
 const PLAIN_BINS = new Set(['cd', 'chdir', 'pushd', 'popd', 'echo', 'printf', 'mkdir', 'rmdir', 'touch', 'cp', 'mv', 'rm', 'ln', 'chmod', 'chown', 'open',
   'which', 'type', 'export', 'set', 'unset', 'local', 'declare', 'readonly', 'true', 'false', ':', 'sleep', 'basename', 'dirname', 'realpath',
-  'readlink', 'tee', 'date', 'pwd', 'read', 'return', 'exit', 'alias', 'hash', 'trap', 'wait', 'man', 'for', 'case', 'select', 'function', '[[',
+  'readlink', 'tee', 'date', 'pwd', 'read', 'return', 'exit', 'alias', 'hash', 'wait', 'man', 'for', 'case', 'select', 'function', '[[',
   'fi', 'done', 'esac', 'in', 'zip', 'unzip', 'tar', 'gzip', 'gunzip', 'find', 'sed', 'xargs', 'kill', 'pkill', 'killall', 'pgrep', 'ps', 'lsof']);
 const USUAL_BIN_DIR = /^(\/opt\/homebrew\/bin|\/usr\/local\/bin|\/usr\/bin|\/bin|\/usr\/sbin|\/sbin)\/[^/]+$/;
+const COMMAND_FLAGS = new Set(['-c', '--run', '--command', '--exec', '-x', '--cmd']);
+const COMMAND_STRING_BINS = new Set(['trap', 'tmux', 'screen', 'at', 'batch', 'expect', 'su', 'script', 'nix-shell', 'osascript', 'hyperfine', 'entr', 'watchexec', 'eval', 'watch', 'ssh', 'parallel', 'xargs']);
+const FIND_EXEC = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+// runners whose first word IS the program they run (for ssh it is a host, for docker a subcommand, for an unknown tool nobody knows)
+const RUNS_FIRST_WORD = new Set(['xargs', 'watch', 'parallel', 'eval', 'npx', 'bunx', 'uvx', 'pnpx']);
+// programs whose words are text or file names: once a runner's words reach one, what follows is its arguments, not a call
+const TEXT_BINS = new Set(['echo', 'printf', 'cat', 'grep', 'rg', 'ls', 'wc', 'head', 'tail', 'sed', 'awk', 'jq']);
+const PACKAGE_VERBS = new Set(['install', 'i', 'add', 'remove', 'rm', 'uninstall', 'update', 'upgrade', 'info', 'show', 'view', 'search', 'outdated', 'list', 'ls', 'why', 'link', 'unlink', 'reinstall', 'tap']);
 // programs that can write a file without naming it (a folder, a pattern, an archive, a download): in the live checkout they go to the board
 const LIVE_WRITERS = ['rm', 'mv', 'rmdir', 'cp', 'rsync', 'ditto', 'tar', 'unzip', 'patch', 'exec', 'install', 'ln', 'tee', 'sed', 'dd', 'truncate', 'touch', 'curl', 'wget',
   'gunzip', 'gzip', 'bunzip2', 'bzip2', 'unxz', 'xz', 'zstd', 'unzstd', 'uncompress', 'cpio', 'pax', '7z', '7za', '7zz', '7zr', 'bsdtar', 'gtar', 'unrar', 'unar', 'ex', 'ed', 'vi', 'vim', 'nvim'];
@@ -117,17 +156,24 @@ function triggerSpecs(policy, opts = {}) {
   // the call to the rules and never decides a hold by itself.
   let fromCheck = false;
   const checkOf = new Map(); const pathInfo = new Map();
-  const out = { add: (l) => { lines.add(l); if (!fromCheck) plain.add(l); else if (!checkOf.has(l)) checkOf.set(l, fromCheck); } };
+  // a line is a route line only when every rule that makes it says so: a second rule with the same line decides as before
+  const deciding = new Set(); const programOf = new Map();
+  const out = { add: (l, route = false) => { lines.add(l); if (route) routeLines.add(l); else deciding.add(l); if (!fromCheck) plain.add(l); else if (!checkOf.has(l)) checkOf.set(l, fromCheck); } };
   // a guarded path's line: a single file's is its bare name at a path boundary, a folder's its path. `old` is
   // folder and name side by side, the only text that by itself says the guarded place is meant.
   const pathLine = (g) => {
     const f = pathFragments(g, policy)[0];
     if (!f) return;
     const single = !String(g).replace(/^<repo>\/|^<live>\/|^~\//, '').includes('*');
-    const ere = single ? `${B}${ereEsc(f)}${E}` : ereEsc(String(g).startsWith('**/') ? f.replace(/^\//, '') : f);
+    const frag = String(g).startsWith('**/') ? f.replace(/^\//, '') : f;
+    const ere = single ? `${B}${ereEsc(f)}${E}` : frag.includes('/') ? ereEsc(frag) : segment(frag);
     out.add(ere);
     pathInfo.set(ere, [...(pathInfo.get(ere) || []), { glob: String(g), old: sideBySide(g) }]);
   };
+  // a folder whose guarded path is one name (`<live>/public/**`): the name as a whole path segment, never a
+  // part of a longer word. The bare word sent every call whose text or folder merely contained it to the Node
+  // step (a checkout in `…/zulu-public`, #541). A one-letter flag may stand right in front (`tar -Cpublic`).
+  const segment = (name) => `(^|[^[:alnum:]_.-]|${SP}-[[:alnum:]]+)${ereEsc(name)}([^[:alnum:]_.-]|$)`;
   const word = (w) => `${B}${String(w).split(/\s+/).map(ereEsc).join(`${SP}+`)}${E}`;
   // a rule about the live checkout only fires when the call also names that checkout (its folder is in the
   // hook JSON as `cwd`, or in the command). Unknown checkout (the shipped fallback file): the bare line.
@@ -152,6 +198,24 @@ function triggerSpecs(policy, opts = {}) {
         if (r.flagsAny?.length) re += `(.*[[:space:]])?${flagsEre(r.flagsAny, true)}`;
         if (r.urlAny?.length) re += `.*(${r.urlAny.map(ereEsc).join('|')})`;
         if (r.mentions?.length) re += `.*(${r.mentions.map(ereEsc).join('|')})`;
+        if (r.when === 'engineStart') {
+          // a session start: the program followed by one of the words that make it one, OR one of the settings
+          // homes set (or the environment emptied) anywhere in front of it. The bare program name alone is no line.
+          // These lines only ROUTE the call to the rule (which reads the parsed command): they are never a hit the
+          // parser has to explain, so `env | grep claude` or `HOME=/tmp/x npm test && echo claude` is not held for them.
+          const P = `${B}${ereEsc(r.bin)}${E}`;
+          const route = (l) => out.add(l, true);
+          if (r.triggerWords?.length) route(`${P}.*(${r.triggerWords.map(ereEsc).join('|')})`);
+          for (const w of r.firstWords || []) route(`${B}${ereEsc(r.bin)}${SP}+${ereEsc(w)}${E}`);
+          route(`(${ENGINE_ENV.join('|')})=.*${P}`);
+          route(`${P}.*(${ENGINE_ENV.join('|')})=`);          // the name first, in a variable (`C=claude; HOME=/tmp/h $C`)
+          route(`${B}env${E}.*${P}`);
+        } else if (r.nameIsWord) {
+          // a program whose name is also an ordinary word (the installer's is the product's own name: it stands in
+          // folder names, note titles and report text). Its lines only ROUTE the call to the rule, which reads the
+          // parsed command (#571); `programHides` keeps what the line caught where the program itself can hide.
+          out.add(re, true); programOf.set(re, r.bin);
+        } else
         out.add(r.when === 'liveCheckout' && r.argsAny?.length && !r.args ? liveBin(r.bin, r.argsAny) : re);
       } else if (r.flagsAny?.length) out.add(flagsEre(r.flagsAny));
       // a script rule that needs a flag: the flag line above already sends the call to the board, and
@@ -166,17 +230,19 @@ function triggerSpecs(policy, opts = {}) {
           out.add(`${ereEsc(base)}${r.args?.[0] ? `${SP}+${ereEsc(r.args[0])}${E}` : E}`);
           // …and the script handed over on the input, where the subcommand does not follow the name
           // (`sh -s -- gate 5 g1 approve < task.sh`, `cat task.sh | sh -s -- gate …`) (#532)
-          if (r.args?.[0]) for (const l of [`<${SP}*[^[:space:]]*${ereEsc(base)}${E}`, `cat${SP}[^|;&]*${ereEsc(base)}[^|;&]*[|]`, `cat${SP}+[^[:space:]]*${ereEsc(base)}${SP}*[)]`]) { out.add(l); routeLines.add(l); }
+          if (r.args?.[0]) for (const l of [`<${SP}*[^[:space:]]*${ereEsc(base)}${E}`, `cat${SP}[^|;&]*${ereEsc(base)}[^|;&]*[|]`, `cat${SP}+[^[:space:]]*${ereEsc(base)}${SP}*[)]`]) out.add(l, true);
         }
       }
-      if (r.tool) out.add(`tool_name:${SP}*${toolEre(r.tool)}`);
+      // an MCP rule that belongs to a check needs no line: with that check on, every MCP call that is not on the
+      // hook's allow file reaches the Node step anyway
+      if (r.tool && !r.check) out.add(`tool_name:${SP}*${toolEre(r.tool)}`);
       // a guarded path: also matched against the folder the call is made from (a call from inside the folder names nothing)
       for (const p of [...(r.pathAny || []), ...(r.pathWrite ? [r.pathWrite] : [])]) for (const g of listOr(p, policy)) pathLine(g);
       for (const p of [].concat(r.pathGuard || [])) for (const g of listOr(p, policy)) {
         if (String(g).startsWith('<live>/') && needle) {
           // with the checkout named, the file's own name is enough: `cp /tmp/gates.mjs src/` names no full path
           const name = path.basename(String(g).replace(/\/\*\*$/, ''));
-          if (name.length >= 4 && !name.includes('*')) { liveFragments.add(ereEsc(name)); liveCheck = r.check || liveCheck; }
+          if (name.length >= 4 && !name.includes('*')) { liveFragments.add(/\/\*\*$/.test(String(g)) ? segment(name) : ereEsc(name)); liveCheck = r.check || liveCheck; }
           continue;
         }
         pathLine(g);
@@ -189,7 +255,7 @@ function triggerSpecs(policy, opts = {}) {
         out.add(live('>[^|;&]*[$*?{[]'));
       }
       for (const t of r.textAny || []) out.add(ereEsc(t));
-      if (r.sql) out.add(`(drop|truncate)${SP}+(table|schema|database)|delete${SP}+from`);
+      if (r.sql) out.add(r.check ? String(r.sql).replace(/\\b/g, '').replace(/\\s\+/g, `${SP}+`).replace(/\\S\+/g, '[^[:space:]]+') : `(drop|truncate)${SP}+(table|schema|database)|delete${SP}+from`);
     }
   }
   fromCheck = liveCheck || 'selfProtect';
@@ -205,7 +271,7 @@ function triggerSpecs(policy, opts = {}) {
   fromCheck = false;
   return [...lines].map((ere) => ({ ere, live: liveLines.has(ere), flat: liveLines.has(ere) || !plain.has(ere),
     ...(!plain.has(ere) && checkOf.has(ere) ? { check: checkOf.get(ere) } : {}), ...(pathInfo.has(ere) ? { path: pathInfo.get(ere) } : {}),
-    ...(routeLines.has(ere) ? { route: true } : {}) }));
+    ...(routeLines.has(ere) && !deciding.has(ere) ? { route: true, ...(programOf.has(ere) ? { program: programOf.get(ere) } : {}) } : {}) }));
 }
 // long flags exactly (--commit, --commit=x); one-letter flags also inside clusters (-rf).
 // A flag may end the command, so in the hook's JSON it is followed by `",` → after quote-stripping a
@@ -305,7 +371,8 @@ export function parseCommand(src, depth = 0, opts = {}) {
     cur = next;
   };
   const subCmds = [];                                 // already parsed (second-pass shape)
-  const sub = (inner) => { const p = parseCommand(inner, depth + 1, opts); subCmds.push(...p.cmds.map((c) => ({ ...c, fromSub: true }))); data.push(...p.data); opaque.push(...p.opaque); };
+  const innerValues = [];                             // what a body parsed on its own gives its names (merged into varValues below)
+  const sub = (inner) => { const p = parseCommand(inner, depth + 1, opts); subCmds.push(...p.cmds.map((c) => ({ ...c, fromSub: true }))); data.push(...p.data); opaque.push(...p.opaque); innerValues.push(p); };
   const balanced = (open, close, from) => {          // index just after the matching close
     let d = 1; let j = from;
     while (j < s.length && d > 0) {
@@ -392,6 +459,19 @@ export function parseCommand(src, depth = 0, opts = {}) {
   // second pass: words, heredoc bodies, shells with -c, indirect commands
   const out = [...subCmds];
   const vars = {};                                   // NAME=literal assigned in this command (no expansion inside)
+  const varValues = {};                              // every value a name is given in the call (null = not a fixed text)
+  const varTexts = {};                               // …and the text of each value that is not fixed (`Z=$(which x)`)
+  const given = (name, value) => { const fixed = !/[$`]/.test(value); (varValues[name] ||= []).push(fixed ? value : null); if (!fixed) (varTexts[name] ||= []).push(value); };
+  const givenIn = (p) => { for (const [n, vs] of Object.entries(p?.varValues || {})) (varValues[n] ||= []).push(...vs); for (const [n, ts] of Object.entries(p?.varTexts || {})) (varTexts[n] ||= []).push(...ts); };
+  // the program a variable in program position stands for, when the call gives that name one fixed value (`PY=python3; $PY …`)
+  const fixedProgram = (tok) => {
+    const v = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(tok || '');
+    const vals = v && varValues[v[1]];
+    if (!vals?.length || vals.some((x) => x == null || x !== vals[0])) return null;
+    const b = path.basename(vals[0]);
+    return opts.nocaseBin ? b.toLowerCase() : b;
+  };
+  for (const iv of innerValues) givenIn(iv);
   // the folder each simple command runs in: literal `cd` targets so far (subshells scoped); unknown after
   // a cd the gate can't resolve — path- and repo-dependent rules then decide conservatively
   // `sure`: the folder change certainly applied before this command runs: every link from the cd to here is `&&`
@@ -405,7 +485,12 @@ export function parseCommand(src, depth = 0, opts = {}) {
   // shell command (`git switch main && bash -c "git push origin"`): `opts.switchesIn`.
   let sw = [...(opts.switchesIn || [])];
   const innerSwitches = (inner) => { for (const ic of inner) { const t = branchSwitch(ic); if (t) sw = [...sw, t]; } };
-  const bodyOpts = () => ({ ...opts, switchesIn: sw });
+  // #584 PR 2: what runs before each git or gh command and may move a ref it sends or merges (`refMover`), in the
+  // gate's own words; a binding read before the call is not a binding across these. A body handed to a shell starts
+  // with the movers before that shell command, as with the switches (`opts.moversIn`).
+  const movers = [...(opts.moversIn || [])];
+  let moversBefore = [...movers];                       // the movers before the current command: its body does not list the shell itself
+  const bodyOpts = () => ({ ...opts, switchesIn: sw, moversIn: moversBefore });
   for (const c of cmds) {
     for (let k = 0; k < (c.closes || 0); k++) if (cdStack.length) cd = cdStack.pop();
     if (c.sepBefore !== '&&' && cd.targets.length) cd = { ...cd, sure: false };
@@ -414,15 +499,21 @@ export function parseCommand(src, depth = 0, opts = {}) {
       const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(t);
       if (!m) break;
       if (!/[$`]/.test(m[2])) vars[m[1]] = m[2]; else delete vars[m[1]];
+      given(m[1], m[2]);
     }
     const w = words(c.raw, opts);
+    if (NAMING_BINS.has(w.bin)) for (const t of w.tokens.slice(1)) { const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(t); if (m) given(m[1], m[2]); }
     const cmd = { tokens: w.tokens, bin: w.bin, assignOnly: !w.bin, redirects: c.redirects, reads: c.reads, hereFiles: (c.herestrings || []).map(hereFile).filter(Boolean), sepBefore: c.sepBefore, fromSub: !!c.fromSub, dynamicBin: w.dynamic, text: c.raw.join(' '),
       cdTargets: [...cd.targets], cdUnknown: cd.unknown, ...(cd.targets.length && !cd.sure ? { cdUnsure: true } : {}) };
     const inline = inlineBodies(cmd.bin, cmd.tokens);
     if (inline.length) cmd.inlineBodies = inline;
-    if (sw.length && cmd.bin === 'git') cmd.switchesBefore = sw;
+    if (sw.length && (cmd.bin === 'git' || cmd.bin === 'gh')) cmd.switchesBefore = sw;
     const turn = branchSwitch(cmd);
     if (turn) sw = [...sw, turn];
+    if (movers.length && (cmd.bin === 'git' || cmd.bin === 'gh')) cmd.priorMovers = [...new Set(movers)];
+    moversBefore = [...movers];
+    const mv = refMover(cmd);
+    if (mv) movers.push(mv);
     out.push(cmd);
     if (cmd.bin === 'cd' || cmd.bin === 'pushd' || cmd.bin === 'chdir') {     // chdir: zsh's other name for cd (#551)
       const args = cmd.tokens.slice(1); let k = 0;
@@ -441,19 +532,21 @@ export function parseCommand(src, depth = 0, opts = {}) {
       else if (t == null || t === '-' || /^[+-]\d+$/.test(t) || /[$`*?]/.test(t) || pos.length > 1) cd = { targets: cd.targets, unknown: true, sure: false };
       else cd = { targets: [...cd.targets, t], unknown: cd.unknown, sure: sure && (fixedT || cd.sure) };
     } else if (cmd.bin === 'popd') cd = { ...cd, sure: false };     // back to a folder the parser does not track
-    for (const body of c.heredocs) {
-      if (isShell(cmd.bin)) { const p = parseCommand(body, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
-      else if (isInterpreter(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: body, by: cmd.bin, text: body });
-      else data.push(body);
-    }
-    for (const h of c.herestrings) {
-      if (isShell(cmd.bin)) { const p = parseCommand(h, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); }
-      else if (isInterpreter(cmd.bin)) out.push({ tokens: [], bin: null, interpretedBody: h, by: cmd.bin, text: h });
-      else data.push(h);
-    }
+    if ((c.heredocs.length || c.herestrings.length) && !isShell(cmd.bin) && !isInterpreter(cmd.bin)) cmd.fedText = true;
+    // a program word that is a variable with one fixed value (`PY=python3; $PY - <<EOF`) is also read by that value, and
+    // its body stays data as well: this only adds (#612)
+    const asBin = cmd.bin || (cmd.dynamicBin ? fixedProgram(w.tokens[0]) : null);
+    if (!cmd.bin && asBin) cmd.asBin = asBin;
+    const readBody = (body) => {
+      if (isShell(asBin)) { const p = parseCommand(body, depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); innerSwitches(p.cmds); givenIn(p); }
+      else if (isInterpreter(asBin)) out.push({ tokens: [], bin: null, interpretedBody: body, by: asBin, text: body });
+      if (!isShell(cmd.bin) && !isInterpreter(cmd.bin)) data.push(body);
+    };
+    for (const body of c.heredocs) readBody(body);
+    for (const h of c.herestrings) readBody(h);
     if (isShell(cmd.bin)) {
       const ci = cmd.tokens.findIndex((t) => /^-[a-z]*c[a-z]*$/.test(t));
-      if (ci > 0 && cmd.tokens[ci + 1] != null) { const p = parseCommand(cmd.tokens[ci + 1], depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); cmd.inlinedC = true; innerSwitches(p.cmds); }
+      if (ci > 0 && cmd.tokens[ci + 1] != null) { const p = parseCommand(cmd.tokens[ci + 1], depth + 1, bodyOpts()); out.push(...p.cmds); data.push(...p.data); opaque.push(...p.opaque); cmd.inlinedC = true; innerSwitches(p.cmds); givenIn(p); }
       else if (cmd.tokens.length === 1 || (cmd.tokens[1] || '').startsWith('-')) cmd.readsStdin = c.sepBefore === '|' || c.sepBefore === '|&';
     }
   }
@@ -466,7 +559,15 @@ export function parseCommand(src, depth = 0, opts = {}) {
     const add = c.fromSub ? all : subSw;
     if (add.length) c.switchesBefore = [...(c.switchesBefore || []), ...add];
   }
-  return { cmds: out, data, opaque, vars };
+  // the same for what may move a ref (PR 2): a mover inside a substitution counts for every git and gh command, and a
+  // command inside one counts every mover of the call
+  const inSub = [...new Set(subCmds.map(refMover).filter(Boolean))].map((m) => `${m} in a substitution`);
+  if (inSub.length || movers.length) for (const c of out) {
+    if (c.bin !== 'git' && c.bin !== 'gh') continue;
+    const add = c.fromSub ? [...movers, ...inSub] : inSub;
+    if (add.length) c.priorMovers = [...new Set([...(c.priorMovers || []), ...add])];
+  }
+  return { cmds: out, data, opaque, vars, varValues, varTexts };
 }
 // a here-string that is one file's content (`<<< "$(cat x.sh)"`, `<<< "$(< x.sh)"`): the file
 const hereFile = (h) => (String(h).trim().replace(/^["']|["']$/g, '').match(/^\$\(\s*(?:cat\s+|<\s*)([^\s|;&$`()<>]+)\s*\)$/) || [])[1] || null;
@@ -498,12 +599,13 @@ function words(raw, opts = {}) {
     if (after > 0) { k = after; continue; }
     // (where the disk ignores case, ENV and SUDO are env and sudo)
     const b = opts.nocaseBin ? path.basename(t[k] || '').toLowerCase() : path.basename(t[k] || '');
-    if (!WRAPPERS.has(b)) break;
+    if (!(opts.legacyWrappers ? OLD_WRAPPERS : WRAPPERS).has(b)) break;
+    if (b === '-' && k + 1 >= t.length) break;
     k++;
-    const vf = VALUE_FLAGS[b] || [];
-    while (k < t.length && t[k].startsWith('-')) { k += vf.includes(t[k]) ? 2 : 1; }
-    if (b === 'timeout' && /^\d/.test(t[k] || '')) k++;
-    if (b === 'env') while (k < t.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[k])) k++;
+    const vf = (opts.legacyWrappers ? OLD_VALUE_FLAGS : VALUE_FLAGS)[b] || [];
+    while (k < t.length && t[k].startsWith('-') && t[k] !== '-') { k += vf.includes(t[k]) ? 2 : 1; }
+    if ((b === 'timeout' || b === 'gtimeout' || b === 'repeat') && /^\d/.test(t[k] || '')) k++;
+    if (b === 'env' || b === 'genv') while (k < t.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[k])) k++;
   }
   const tokens = t.slice(k);
   const first = tokens[0];
@@ -543,12 +645,118 @@ export function classify(input, policy, ctx = {}) {
   const mode = (n) => (CHECK_MODES.includes(ctx.checks?.[n]) ? ctx.checks[n] : checkMode(policy, n));
   const enforced = CHECKS.filter((n) => mode(n) === 'enforce');
   const observed = CHECKS.filter((n) => mode(n) === 'observe');
-  const r = classifyWith(input, policy, ctx, new Set(enforced));
-  if (r.verdict !== 'clear' || !observed.length) return r;
+  const r = settleDryForm(classifyWith(input, policy, ctx, new Set(enforced)), input, policy, ctx, new Set(enforced));
+  // engineStart reads every session an agent starts from its shell, and holds only the forms that weaken the
+  // gate: a plain start is a reading in observe AND at enforce, so that pass runs while the check is not off
+  const reading = observed.length || enforced.includes('engineStart');
+  if (r.verdict !== 'clear' || !reading) return r;
   // observe: the verdict above stands; say which check would have held the call
-  const all = classifyWith(input, policy, ctx, new Set([...enforced, ...observed]));
-  if (all.verdict === 'gate' && all.check) r.wouldHold = { check: all.check, cls: all.cls, label: all.label, why: all.why };
+  const all = classifyWith(input, policy, { ...ctx, readEveryStart: true }, new Set([...enforced, ...observed]));
+  if (all.verdict === 'gate' && all.check) r.wouldHold = { check: all.check, cls: all.cls, label: all.label, why: all.why, ...(all.rule?.exceptMissionControl ? { exceptMissionControl: true } : {}) };
   return r;
+}
+
+/**
+ * #571: a program whose fast-path line only routes (`nameIsWord`), in a call that names it and where the rules found
+ * no run of it. Could the call run it all the same? → the reason, or null.
+ *  Wherever the name stands:
+ *  - a variable in program position whose fixed value is the program (`Z=bin/zulu; "$Z" init`, `export Z=zulu; $Z init`);
+ *  - a substitution in program position that names it, or a variable given such a substitution (`$(echo zulu) init`,
+ *    `Z=$(which zulu); $Z init`);
+ *  - a shell fed its commands from a pipe (`echo "zulu init" | sh`), as for any gated word; an alias given the program.
+ *  (eval, xargs, watch and the other runners with the program among their own words are read by the rule itself.)
+ *  Only when the name is `hidden` (no command's words and no data show it: it stands in a variable's value), which is
+ *  what the line held by itself while it decided:
+ *  - a variable or a substitution in program position that is not a fixed other program;
+ *  - a word that runs its text (eval, xargs, ssh, trap, su, npx …) spelled with a variable that is not fixed text free of
+ *    the name, or fed text on its input; xargs or parallel fed their words from a pipe;
+ *  - a variable whose fixed value is the program among the words of a program that is not a plain reader (`nice2 $Z init`).
+ * A value read can only ADD a hold: a name the call gives no fixed value, or gives one another way, counts as unknown.
+ */
+function programHides(parsed, program, nocase, hidden) {
+  const same = (w) => { const b = path.basename(String(w || '')); return nocase ? b.toLowerCase() === String(program).toLowerCase() : b === program; };
+  const named = new RegExp(`(^|[^A-Za-z0-9_.-])${jsEsc(program)}([^A-Za-z0-9_-]|$)`, nocase ? 'i' : '');
+  const names = (word) => [...String(word).matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]);
+  // every text a word can stand for, or null when a part of it is not fixed (a substitution, a name with no fixed value)
+  const readings = (word) => {
+    if (/`|\$\(|\$\{[^}]*[^A-Za-z0-9_}]/.test(word)) return null;
+    let outs = [''];
+    for (const part of String(word).split(/(\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*)/)) {
+      const v = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(part);
+      if (!v) { if (part.includes('$')) return null; outs = outs.map((o) => o + part); continue; }
+      const vals = parsed.varValues?.[v[1]];
+      if (!vals?.length || vals.includes(null)) return null;
+      outs = outs.flatMap((o) => [...new Set(vals)].map((x) => o + x));
+      if (outs.length > 64) return null;
+    }
+    return outs;
+  };
+  // (an unquoted value is split into words: its first word is then the program)
+  const isProgram = (x) => same(x) || same(x.trim().split(/\s+/)[0]);
+  const cut = (w) => String(w).slice(0, 40);
+  const unseen = `${program} is named where no command shows it, and`;
+  for (const c of parsed.cmds) {
+    if (c.dynamicBin) {
+      const w = c.tokens[0];
+      const r = readings(w);
+      if (r?.some(isProgram)) return `${program} is behind the variable in program position (${cut(w)})`;
+      if (r) continue;
+      // not a fixed text: the substitution itself names the program, or a name in it was given one that does
+      if (named.test(w) || names(w).some((n) => (parsed.varTexts?.[n] || []).some((t) => named.test(t)))) return `a substitution that names ${program} stands in program position (${cut(w)})`;
+      if (hidden) return `${unseen} a variable or substitution stands in program position (${cut(w)})`;
+      continue;
+    }
+    if (c.readsStdin) return hidden ? `${unseen} ${c.bin} reads its commands from a pipe` : `${c.bin} reads its commands from a pipe in a call that names ${program}`;
+    // an alias given the program (`alias z=zulu; z init`): the later word `z` is nothing the rules know
+    if (c.bin === 'alias' && c.tokens.slice(1).some((w) => { const r = readings(w); return r?.some((x) => x.includes('=') && isProgram(x.slice(x.indexOf('=') + 1))); })) return `an alias is given ${program}`;
+    if (!hidden) continue;
+    const runsText = INDIRECT.has(c.bin) || COMMAND_STRING_BINS.has(c.bin) || RUNS_FIRST_WORD.has(c.bin);
+    if (runsText && c.fedText) return `${unseen} ${c.bin} is fed text the gate cannot read`;      // `source /dev/stdin <<< "$X"`
+    // xargs and parallel build their command from their input (`printf %s "$Z" | xargs -I{} {} init`)
+    if ((c.bin === 'xargs' || c.bin === 'parallel') && (c.sepBefore === '|' || c.sepBefore === '|&')) return `${unseen} ${c.bin} builds its command from a pipe`;
+    if (!c.bin || (TEXT_BINS.has(c.bin) && !runsText)) continue;
+    for (const w of c.tokens.slice(1)) {
+      if (!/[$`]/.test(w)) continue;
+      const r = readings(w);
+      if (runsText && (!r || r.some((x) => named.test(x)))) return `${unseen} ${c.bin} runs text the gate cannot read (${cut(w)})`;
+      if (r?.some(same)) return `${unseen} a variable that holds the program is among the words of ${c.bin} (${cut(w)})`;
+    }
+  }
+  return null;
+}
+
+/**
+ * #598: the dry form a write form is asked to run first must itself be a call the rules let through. A script can
+ * say its flagless run is not a dry run (a runner that still pays without `--live`; its preview is `--quote`):
+ * `policy.dryForms` [{ scriptIn, flags }] names the script's own dry flags, added to the dry form. The dry form is then
+ * read by the same rules; held by any of them = no dry form at all: the gate is filed for the owner as it stands,
+ * and the hint never names a call that pays, sends or writes.
+ */
+export function dryFlagsFor(c, input, policy, ctx) {
+  const out = [];
+  for (const e of Array.isArray(policy?.dryForms) ? policy.dryForms : []) {
+    if (typeof e?.scriptIn !== 'string' || !e.scriptIn || !Array.isArray(e.flags)) continue;   // one glob or one @list (lint says so)
+    if (ruleMatch({ scriptIn: e.scriptIn }, c, { ...input, cwd: c.cwd || input.cwd }, policy, ctx)) out.push(...e.flags.filter((f) => typeof f === 'string' && f.startsWith('-')));
+  }
+  return [...new Set(out)];
+}
+function settleDryForm(r, input, policy, ctx, on) {
+  if (r.verdict !== 'gate' || !r.dryTokens || !r.cmd || ctx.dryForm) return r;
+  // the flag goes where the script reads options: before the first `--` after the script (after it, a parser takes
+  // it for an argument and the script runs its paying form; a recorded run counts only with the flag in this place,
+  // because the dry run is matched on the whole word list in order). A dry flag the call already carries counts as
+  // present only there, too.
+  const at = r.dryTokens.indexOf(scriptPath(r.cmd));
+  const cut = r.dryTokens.indexOf('--', at < 0 ? 1 : at + 1);
+  const opts = cut < 0 ? r.dryTokens : r.dryTokens.slice(0, cut);
+  const add = dryFlagsFor(r.cmd, input, policy, ctx).filter((f) => !opts.includes(f));
+  const tokens = cut < 0 ? [...r.dryTokens, ...add] : [...r.dryTokens.slice(0, cut), ...add, ...r.dryTokens.slice(cut)];
+  const d = classifyWith({ tool: 'Bash', command: tokens.map(shellQuote).join(' '), cwd: r.cmd.cwd || input.cwd }, policy, { ...ctx, line: null, dryForm: true }, on);
+  if (d.verdict !== 'clear') {
+    const form = add.length ? `the call with ${add.join(' ')} and without its write flag` : 'the same call without its write flag';
+    return { ...r, dryTokens: null, noDryForm: { cls: d.cls, label: d.label }, why: `${r.why} · no dry form: ${form} is held too (${d.label})` };
+  }
+  return add.length ? { ...r, dryTokens: tokens } : r;
 }
 
 function classifyWith(input, policy, ctx, on) {
@@ -563,8 +771,12 @@ function classifyWith(input, policy, ctx, on) {
   const text = triggerText(input); const flat = text.replace(/[\n\r\t]+/g, ' ');
   const cwdText = normalizeForTriggers(input.cwd || '');
   const withCwd = `${flat} ${cwdText}`;
-  const hits = triggers.filter((t) => t.re.test(t.live ? withCwd : t.path ? `${t.flat ? flat : text} ${cwdText}` : t.flat ? flat : text));
-  if (!hits.length) return { verdict: 'clear', why: 'no trigger' };
+  const matched = triggers.filter((t) => t.re.test(t.live ? withCwd : t.path ? `${t.flat ? flat : text} ${cwdText}` : t.flat ? flat : text));
+  // with the MCP checks on, an MCP call is judged whether or not a line matched (the hook sends every one
+  // that is not on its allow file)
+  const mcp = tool !== 'Bash' && (on.has('mcpDefault') || on.has('desktop')) ? mcpParts(tool) : null;
+  if (!matched.length && !mcp) return { verdict: 'clear', why: 'no trigger' };
+  const hits = matched.filter((t) => !t.route);          // a route line sends the call to the rules and decides nothing by itself
   const classes = policy?.classes || [];
   const gate = (cls, rule, why, extra = {}) => ({
     verdict: 'gate', cls: cls.id, label: cls.label, rule, why,
@@ -572,7 +784,9 @@ function classifyWith(input, policy, ctx, on) {
     ttlMinutes: Number(rule?.ttlMinutes ?? cls.ttlMinutes ?? policy?.defaults?.ttlMinutes ?? 120),
     approver: cls.approver || policy?.defaults?.approver || 'owner', ...(rule?.check ? { check: rule.check } : {}), ...extra,
   });
-  const active = (r) => !r.check || on.has(r.check);   // a rule that belongs to a check runs only when that check is on
+  // a rule that belongs to a check runs only when that check is on; a rule may leave Mission Control out
+  // (the board says who is asking; with the board down nobody is left out)
+  const active = (r) => (!r.check || on.has(r.check)) && !(r.exceptMissionControl && ctx.missionControl);
   const opaque = (why, extra) => gate(OPAQUE, null, why, extra);
 
   // non-shell tools: MCP names and file paths
@@ -586,11 +800,20 @@ function classifyWith(input, policy, ctx, on) {
         if (globs.some((g) => rootedMatch(g, absPath(input.filePath, input.cwd, ctx), ctx))) return gate(cls, r, `${tool} ${input.filePath}`);
       }
     }
+    if (mcp && on.has('mcpDefault')) {
+      // a known tool whose server now comes from somewhere else is not the tool that was classified
+      // (the source it was first seen under, or the one the policy pins for that server in mcpSources)
+      const pinned = policy?.mcpSources?.[mcp.server] ?? ctx.mcpSeen?.[tool]?.source;
+      const moved = pinned && input.mcpServer?.source && pinned !== input.mcpServer.source;
+      if (moved) return gate(MCP_UNLISTED, null, `tool ${tool}: its server's source changed (${pinned} → ${input.mcpServer.source})`, { check: 'mcpDefault' });
+      if (mcpIsRead(tool, policy)) return { verdict: 'clear', why: 'MCP tool on the read list', mcp: 'read' };
+      return gate(MCP_UNLISTED, null, `tool ${tool} is not on the read list and no rule names it`, { check: 'mcpDefault' });
+    }
     return { verdict: 'clear', why: 'tool not gated' };
   }
 
   let parsed;
-  try { parsed = parseCommand(input.command, 0, { legacyShellKeywords: !!ctx.legacyParser, legacyQuoted: !!ctx.legacyParser, nocaseBin: nocaseOf(ctx).nocase && !ctx.legacyParser }); } catch (e) { return opaque(`unparseable: ${e.message}`); }
+  try { parsed = parseCommand(input.command, 0, { legacyShellKeywords: !!ctx.legacyParser, legacyQuoted: !!ctx.legacyParser, nocaseBin: nocaseOf(ctx).nocase && !ctx.legacyParser, legacyWrappers: !!ctx.legacyParser }); } catch (e) { return opaque(`unparseable: ${e.message}`); }
   const norm = normalizeForTriggers(input.command);
   const keyword = keywordHit(norm, policy);
   if (parsed.opaque.length && keyword) return opaque(parsed.opaque[0]);
@@ -649,8 +872,8 @@ function classifyWith(input, policy, ctx, on) {
   // is a run of that script: the script rules read it as `bash install.sh` / `node x.mjs --commit` (#532)
   const fromInput = parsed.cmds.flatMap((c, k) => stdinScriptRuns(c, parsed.cmds[k - 1]));
   // a ruled program that is itself a script, handed to an interpreter or a shell by its file (`node /opt/homebrew/bin/vercel
-  // deploy --prod`, `bash bin/zulu upgrade`, `. bin/zulu upgrade`) is also read as that program, by the `bin` rules (#612, adds holds)
-  const byFile = programsByFile([...runnable, ...fromInput], classes, nocaseOf(ctx).nocase);
+  // deploy --prod`, `bash bin/zulu init`, `bash < bin/zulu`) is also read as that program, by the `bin` rules (#612, adds holds)
+  const byFile = programsByFile([...runnable, ...fromInput, ...parsed.cmds.filter((c) => !c.bin && c.asBin)], classes, nocaseOf(ctx).nocase);
   for (const c of [...runnable, ...fromInput, ...byFile]) {
     if (!c.bin) continue;
     // judge each command in the folder it actually runs in: `cd X && …`, `git -C X …`
@@ -663,14 +886,16 @@ function classifyWith(input, policy, ctx, on) {
     const cin = { ...input, cwd: where.cwd, ...(where.repo ? { repoCwd: where.repo } : {}), cwdUnknown: where.unknown, cwdUnread: !!where.unread, baseCwd: input.cwd };
     for (const cls of classes) for (const r of cls.rules || []) {
       if (!active(r)) continue;
-      let why = ruleMatch(r, c, cin, policy, rctx);
+      let m = ruleMatch(r, c, cin, policy, rctx);
       // …and in each folder the command may run in instead: held when any of them holds it
-      for (const alt of why ? [] : where.alts || []) {
+      for (const alt of m ? [] : where.alts || []) {
         const { repoCwd: _r, ...rest } = cin;
-        const aw = ruleMatch(r, c, { ...rest, cwd: alt.cwd, ...(alt.repo ? { repoCwd: alt.repo } : {}) }, policy, rctx);
-        if (aw) { why = `${aw} (if a folder change in the call did not apply, it runs in ${alt.cwd})`; break; }
+        const am = ruleMatch(r, c, { ...rest, cwd: alt.cwd, ...(alt.repo ? { repoCwd: alt.repo } : {}) }, policy, rctx);
+        const aw = am && typeof am === 'object' ? am.why : am;
+        if (aw) { m = { ...(typeof am === 'object' ? am : {}), why: `${aw} (if a folder change in the call did not apply, it runs in ${alt.cwd})` }; break; }
       }
-      if (why) return gate(cls, r, why, { cmd: c, dryTokens: cls.requireDryRun || r.requireDryRun ? dryTokens(c, r) : null });
+      const why = m && typeof m === 'object' ? m.why : m;
+      if (why) return gate(cls, r, why, { cmd: c, dryTokens: cls.requireDryRun || r.requireDryRun ? dryTokens(c, r) : null, ...(m && typeof m === 'object' ? { target: m } : {}) });
     }
   }
   // 1.3 checks, after the rules so a call a rule already holds keeps its class
@@ -681,9 +906,79 @@ function classifyWith(input, policy, ctx, on) {
       if (insideGuarded(c)) return opaque(`${c.bin} program passed on the command line runs inside a guarded folder`, { check: 'inlineBodies', cmd: c });
     }
   }
+  // engineStart: its fast-path lines only route, so text that merely lines up is never held. But when one of them
+  // matched and a command of the call has a variable or a substitution where its program should be, the program may
+  // be the engine (`B=claude; $B -p x --bare`, `$(which claude) -p x --bare`): unreadable for this check, and held.
+  if (on.has('engineStart') && matched.some((t) => t.route && t.check === 'engineStart')) {
+    const hidden = parsed.cmds.find((c) => c.dynamicBin);          // (a command that is only a variable is not among the runnable ones)
+    if (hidden) return opaque(`a session start may be behind the variable or substitution in program position (${String(hidden.tokens[0]).slice(0, 40)})`, { check: 'engineStart', cmd: hidden });
+    // …and the same when a shell takes its commands from a pipe (`echo "claude -p x --bare" | sh`): the line it runs is text here
+    const piped = parsed.cmds.find((c) => c.readsStdin);
+    if (piped) return opaque(`${piped.bin} reads its commands from a pipe in a call that names a session start`, { check: 'engineStart', cmd: piped });
+  }
   if (on.has('renamedBins')) {
     const why = renamedProgram(runnable, policy, nocaseOf(ctx).nocase);
     if (why) return opaque(why.text, { check: 'renamedBins', cmd: why.cmd });
+  }
+  // runners (1.3): a program no rule names, with a gated call among its words (`npx vercel --prod`,
+  // `docker exec c gh pr merge 3`, `nix-shell --run "git push origin main"`). No list of runners: every
+  // suffix that starts with a ruled program, an interpreter or a script is read as a command, and every
+  // word that holds a whole command line is read as one.
+  // #571: for a program whose name only routes (`nameIsWord`), the same reading is made whatever the check's switch,
+  // by that program's rules alone and for the words that are known to run what follows them: `eval "zulu init"`,
+  // `xargs zulu init`, `watch zulu init`, `echo init | xargs zulu` were clear while the same forms of a push are held
+  // (a gated word beside eval or xargs is unreadable). `all` = the check itself is on.
+  const lowBin = (b) => (nocaseOf(ctx).nocase ? String(b).toLowerCase() : b);
+  const wordBins = matched.some((t) => t.program) ? new Set(classes.flatMap((cl) => (cl.rules || []).filter((r) => r.nameIsWord && r.bin && active(r)).map((r) => lowBin(r.bin)))) : new Set();
+  if (on.has('runners') || wordBins.size) {
+    const all = on.has('runners');
+    const low = lowBin;
+    const ruledBins = new Set(classes.flatMap((cl) => (cl.rules || []).map((r) => r.bin).filter(Boolean).map(low)));
+    for (const c of runnable) {
+      // (launchctl submit … -- <command> is the one ruled program that runs its words, later)
+      const submit = c.bin === 'launchctl' && c.tokens[1] === 'submit' && c.tokens.includes('--');
+      // the words that run what follows them (eval, xargs, watch, ssh <host>, parallel) are read like any runner, and so
+      // is what find runs on what it finds; `.` and `source` name a script (read as a script run once the installer PR, #507, is in)
+      const indirect = INDIRECT.has(c.bin) && c.bin !== '.' && c.bin !== 'source';
+      const finds = c.bin === 'find' && c.tokens.some((t) => FIND_EXEC.has(t));
+      // only the names literally on the two lists skip this reading: a versioned or further name (python3.13, tcsh)
+      // keeps the unknown program's reading it had before #612, so that fix only adds holds
+      if (!c.bin || onTheLists(c.bin)) continue;
+      // (a ruled program that takes a command line as one word, such as tmux since the pane rules, is still read: its rule is about panes, not about what the line runs)
+      if (!indirect && !finds && ((ruledBins.has(c.bin) && !submit && !COMMAND_STRING_BINS.has(c.bin)) || PLAIN_BINS.has(c.bin) || READERS.has(c.bin) || INDIRECT.has(c.bin))) continue;
+      if (!all && !(indirect || finds || RUNS_FIRST_WORD.has(c.bin) || COMMAND_STRING_BINS.has(c.bin))) continue;
+      const where = commandCwd(c, input.cwd, ctx);
+      const cin = { ...input, cwd: where.cwd, cwdUnknown: where.unknown, cwdUnread: !!where.unread, baseCwd: input.cwd };
+      for (let k = submit ? c.tokens.indexOf('--') + 1 : 1; k < c.tokens.length; k++) {
+        const tok = c.tokens[k];
+        // `xargs echo vercel`, `watch grep vercel log`: the runner's FIRST word is a text program, so that is what it runs
+        // and the rest is its arguments. Only there: further on, the word may be a flag's value (`npx -p echo vercel --prod`)
+        // or a name the runner takes (`docker exec echo vercel --prod`, a container called echo), and the reading goes on.
+        if (!finds && k === 1 && TEXT_BINS.has(tok) && RUNS_FIRST_WORD.has(c.bin)) break;
+        if (/\s/.test(tok.trim())) {                    // a whole command line handed over as one word:
+          // only where a command string is expected (after -c / --run / --command …, or a program that takes
+          // one), never an ordinary quoted argument such as a comment's text
+          if (!(COMMAND_FLAGS.has(c.tokens[k - 1]) || COMMAND_STRING_BINS.has(c.bin))) continue;
+          const inner = classifyWith({ ...input, command: tok, cwd: where.cwd }, policy, ctx, new Set([...on].filter((n) => n !== 'runners')));
+          if (inner.verdict === 'gate' && (all || (inner.rule?.bin && wordBins.has(low(inner.rule.bin))))) return { ...inner, why: `${c.bin} runs: ${inner.why}`, ...(all ? { check: 'runners' } : {}), cmd: c, dryTokens: null };
+          continue;
+        }
+        const b = low(path.basename(tok));
+        if (tok.startsWith('-') || !(ruledBins.has(b) || isInterpreter(b) || isShell(b) || SCRIPT_EXT.test(tok))) continue;
+        if (!all && !wordBins.has(b)) continue;
+        if (PACKAGE_VERBS.has(c.tokens[k - 1])) continue;   // `npm install vercel` names a package, it does not run it
+        // find: only the word right after -exec / -execdir / -ok / -okdir starts a command, and it ends at `;` or `+`
+        if (finds && !FIND_EXEC.has(c.tokens[k - 1])) continue;
+        const stop = finds ? c.tokens.findIndex((t, j) => j > k && (t === ';' || t === '\\;' || t === '+')) : -1;
+        const pseudo = { ...c, tokens: c.tokens.slice(k, stop > 0 ? stop : undefined), bin: b };
+        for (const cls of classes) for (const r of cls.rules || []) {
+          if (!active(r) || (!all && !(r.bin && wordBins.has(low(r.bin))))) continue;
+          const m = ruleMatch(r, pseudo, cin, policy, rctx);
+          const why = m && typeof m === 'object' ? m.why : m;
+          if (why) return gate(cls, r, `${c.bin} runs: ${why}`, { ...(all ? { check: 'runners' } : {}), cmd: c, dryTokens: cls.requireDryRun || r.requireDryRun ? dryTokens(c, r) : null });
+        }
+      }
+    }
   }
   // invariant: every trigger hit must be explained by recognised commands or data
   const explained = [
@@ -698,6 +993,14 @@ function classifyWith(input, policy, ctx, on) {
   // ("gh pr view 5 && git merge x" reads as gh…pr…merge, #438). Every word came from a recognised
   // command and no single command matched a rule above, so nothing gated runs. Anything else stays opaque.
   const oneLine = explained.replace(/\n/g, ' ');
+  // a program whose name is also a word (#571): its line only routed the call here, so the name in a note, a title or
+  // a variable's value holds nothing. Kept from the time the line decided: the name where no command or data shows
+  // it, in a call with a place where a value becomes the program.
+  for (const t of matched) {
+    if (!t.route || !t.program) continue;
+    const where = programHides(parsed, t.program, nocaseOf(ctx).nocase, !t.re.test(oneLine));
+    if (where) return opaque(where);
+  }
   const unattributed = unexplained.filter((h) => !h.re.test(oneLine));
   if (unattributed.length) { const u = unattributed.sort((a, b) => (a.check ? 1 : 0) - (b.check ? 1 : 0))[0]; return opaque(`a gated pattern the parser could not attribute (${u.ere.slice(0, 60)})`, viaCheck(u)); }
   if (unexplained.length) return { verdict: 'clear', why: `words from separate commands lined up into a trigger; no single command matched (${unexplained[0].ere.slice(0, 40)})`, scripts: runnable.filter((c) => isScript(c)).map((c) => c) };
@@ -715,7 +1018,7 @@ function renamedProgram(cmds, policy, nocase = false) {
   const ruled = new Set((policy?.classes || []).flatMap((c) => (c.rules || []).map((r) => r.bin).filter(Boolean).map(low)));
   const globals = new Set([...VALUE_FLAGS.git, ...VALUE_FLAGS.gh]);
   for (const c of cmds) {
-    if (!c.bin || SHELLS.has(c.bin) || INTERPRETERS.has(c.bin) || INDIRECT.has(c.bin)) continue;    // only names literally on the lists skip this: a versioned name keeps it
+    if (!c.bin || onTheLists(c.bin) || INDIRECT.has(c.bin)) continue;    // a versioned name keeps this reading (#612)
     // a path into a usual PATH folder runs the same file the bare name would: judged like the bare name
     const byPath = c.tokens[0].includes('/') && !USUAL_BIN_DIR.test(c.tokens[0]);
     if ((PLAIN_BINS.has(c.bin) || READERS.has(c.bin)) && !byPath) continue;
@@ -783,8 +1086,8 @@ function keywordHit(norm, policy) {
 const jsEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const listOr = (p, policy) => (String(p).startsWith('@') ? policy?.lists?.[String(p).slice(1)] || [] : [p]);
 
-// a script handed to an interpreter or a shell
-const runsAScript = (bin) => isInterpreter(bin) || isShell(bin);
+// a script handed to an interpreter or a shell, or read into the calling shell with `.` / `source`: either way the script runs
+const runsAScript = (bin) => isInterpreter(bin) || isShell(bin) || bin === '.' || bin === 'source';
 // Flags of the interpreters and shells whose next word is the flag's value, not the script (#530):
 // `node --import ./pre.mjs scripts/x.mjs`, `bash --rcfile ./rc.sh x.sh`. The list only picks which word is
 // called "the script"; a rule that names a script is tried on every script-looking word (scriptWords).
@@ -794,7 +1097,7 @@ const NODE_VALUE_FLAGS = ['-r', '--require', '--import', '--loader', '--experime
   '--preload', '--tsconfig', '--project', '-P', '--config', '--cwd'];
 const SHELL_VALUE_FLAGS = ['--rcfile', '--init-file', '-O', '+O', '-o', '+o'];
 const SCRIPT_VALUE_FLAGS = { python: ['-W', '-X', '-Q'], python3: ['-W', '-X'], ruby: ['-I', '-r', '-C', '-E', '-K', '-F', '-T'], perl: ['-I', '-M', '-m', '-C'], php: ['-c', '-d', '-z', '-F'] };
-const scriptValueFlag = (bin, t) => (isShell(bin) ? SHELL_VALUE_FLAGS : SCRIPT_VALUE_FLAGS[progName(bin)] || NODE_VALUE_FLAGS).includes(t);
+const scriptValueFlag = (bin, t) => bin !== '.' && bin !== 'source' && (isShell(bin) ? SHELL_VALUE_FLAGS : SCRIPT_VALUE_FLAGS[progName(bin)] || NODE_VALUE_FLAGS).includes(t);
 const scriptLike = (p) => SCRIPT_EXT.test(p) || p.includes('/');
 /** Every word of an interpreter or shell call that looks like a script, with whether it sits where a flag's value sits. */
 function scriptCands(c) {
@@ -877,9 +1180,9 @@ function stdinScriptRuns(c, prev) {
 
 /**
  * The commands an interpreter or shell call also is when one of its script words names a ruled program (#612):
- * `bash [flags] <path>/zulu upgrade` → `zulu upgrade`, with the words after the script. Read by the `bin` rules only.
+ * `bash [flags] <path>/zulu init` → `zulu init`, with the words after the script. Read by the `bin` rules only.
  */
-/** The first word an interpreter or shell takes as its script, past its flags (`bash -x zulu upgrade`, `bash -- zulu`: a shell
+/** The first word an interpreter or shell takes as its script, past its flags (`bash -x zulu init`, `bash -- zulu`: a shell
  * looks a name without a slash up on PATH too). None after a command string, python's `-m`, or code on the command line. */
 function firstOperand(c) {
   if (inlineBodies(c.bin, c.tokens).length) return null;
@@ -897,15 +1200,15 @@ function programsByFile(cmds, classes, nocase) {
   const low = (b) => (nocase ? String(b).toLowerCase() : String(b));
   const ruled = new Set(classes.flatMap((cl) => (cl.rules || []).map((r) => r.bin).filter(Boolean).map(low)));
   const out = [];
-  for (const c of cmds) {
-    // `.` and `source` run the file in the calling shell: read here too (`. bin/zulu upgrade`), for the `bin` rules only
-    const sourced = c?.bin === '.' || c?.bin === 'source';
-    if (!c?.bin || c.byFile || !(runsAScript(c.bin) || sourced)) continue;
-    for (const w of new Set([...scriptWords(c), sourced ? c.tokens[1] : firstOperand(c)].filter(Boolean))) {
+  for (const c0 of cmds) {
+    // a variable in program position with one fixed value is read by it (`I=sh; $I ./bin/zulu init`)
+    const c = c0?.bin ? c0 : c0?.asBin ? { ...c0, bin: c0.asBin } : c0;
+    if (!c?.bin || c.byFile || !runsAScript(c.bin)) continue;
+    for (const w of new Set([...scriptWords(c), firstOperand(c)].filter(Boolean))) {
       const name = low(path.basename(w));
       const k = c.tokens.indexOf(w);
       // (no exemption for a shell's syntax check, `bash -n bin/zulu`: a flag's value and `-n +n` defeated every reading of
-      // it; a held syntax check is the cheaper error)
+      // it, MC's fourth read; a held syntax check is the cheaper error)
       if (!ruled.has(name) || k < 0) continue;
       out.push({ ...c, tokens: [name, ...c.tokens.slice(k + 1)], bin: name, byFile: w, viaStdin: undefined });
     }
@@ -930,7 +1233,8 @@ function ruleMatch(r, c, input, policy, ctx, only) {
     const sp = theScript;
     const abs = sp ? absPath(sp, input.cwd, ctx) : null;
     const nc = nocaseOf(ctx);                          // the script's name in another letter case is the same script there
-    if (!abs || !listOr(r.scriptIn, policy).some((g) => globMatch(expandPath(g, ctx), abs, nc) || globMatch(g, path.basename(abs), nc))) return null;
+    // (`<repo>/…` is the board's checkout and every git worktree of it)
+    if (!abs || !listOr(r.scriptIn, policy).some((g) => globMatch(expandPath(g, ctx), abs, nc) || globMatch(g, path.basename(abs), nc) || rootedMatch(g, abs, ctx, nc))) return null;
   } else if (r.script) {
     if (!isScript(c)) return null;
   } else if (r.bin) {
@@ -950,7 +1254,14 @@ function ruleMatch(r, c, input, policy, ctx, only) {
   if (r.argsAny && !r.argsAny.some((a) => pos.includes(a) || c.tokens.includes(a))) return null;
   if (r.notArgs && r.notArgs.some((pre) => pre.every((a, k) => pos[k] === a))) return null;
   if (r.flagsAny && !r.flagsAny.some((f) => hasFlag(c, f))) return null;
-  if (r.unlessFlags && (Array.isArray(r.unlessFlags) ? r.unlessFlags : listOr(r.unlessFlags, policy)).some((f) => hasFlag(c, f))) return null;
+  // a freeing flag counts only where the program reads options: before the first `--` after the script (or the
+  // program). After it, a parser takes it for an argument and the call runs its held form (#598). Adds holds only;
+  // a held flag (`flagsAny`) is still read anywhere.
+  if (r.unlessFlags) {
+    const k = c.tokens.indexOf('--', Math.max(1, theScript ? c.tokens.indexOf(theScript) + 1 : 1));
+    const opts = k < 0 ? c : { ...c, tokens: c.tokens.slice(0, k) };
+    if ((Array.isArray(r.unlessFlags) ? r.unlessFlags : listOr(r.unlessFlags, policy)).some((f) => hasFlag(opts, f))) return null;
+  }
   if (r.method === 'POST' && !isPost(c)) return null;
   if (r.urlAny && !c.tokens.some((t) => r.urlAny.some((u) => t.includes(u)))) return null;
   if (r.labels && !labelsOf(pos).some((l) => listOr(r.labels, policy).includes(l))) return null;
@@ -967,17 +1278,29 @@ function ruleMatch(r, c, input, policy, ctx, only) {
     const sameName = (t, g) => !t.startsWith('/') && !t.startsWith('~') && samePath(path.basename(t), path.basename(String(g)), ctx) && !String(g).endsWith('*');
     const matches = (t) => !t.startsWith('-') && globs.some((g) => rootedMatch(g, absPath(t, input.cwd, ctx), ctx) || (input.cwdUnknown && sameName(t, g)));
     // (going into a write-guarded folder is not a write: what is then written relative to it is read against that folder)
-    const hit = c.redirects.find(matches) || ((r.pathAny || !(isReader(c) || NO_TOUCH.has(c.bin))) ? c.tokens.slice(1).find(matches) : null);
-    if (!hit) return null;
+    // The words of echo and printf are text, never a target: only their redirect writes. A sed expression is not a file.
+    // An empty word (`sed -i ""`) names nothing.
+    const words = WORDS_ARE_TEXT.has(c.bin) && !r.pathAny ? [] : c.bin === 'sed' ? sedFiles(c) : c.bin === 'plutil' ? plutilFile(c) : c.tokens.slice(1).filter((t) => t !== '');
+    const hit = c.redirects.find(matches) || ((r.pathAny || !(isReader(c) || NO_TOUCH.has(c.bin))) ? words.find(matches) : null);
+    if (hit == null) return null;
     return `${c.bin} touches ${hit}`;
   }
   if (r.when === 'pushProtected') return pushProtected(r, c, input, policy, ctx);
   if (r.when === 'outsideRepo') return rmOutside(c, input, ctx);
+  if (r.when === 'installerWrite') return installerWrite(c, theScript);
+  if (r.when === 'engineStart') return engineStart(c, input, ctx);
   if (r.when === 'gitConfigWrite') return gitConfigWrite(c, input, policy, ctx);
   if (r.when === 'gitDashC') return gitDashC(c);
   if (r.when === 'gitRefWrite') return gitRefWrite(c);
   if (r.when === 'liveCheckout') return liveGit(c, input, policy, ctx);
   if (r.when === 'boardProcess') return killsBoard(c, input, ctx);
+  if (r.when === 'ghApiWrite') return ghApiWrite(c);
+  if (r.when === 'ghPublicRepo') return ghPublicRepo(c, input, policy, ctx);
+  if (r.when === 'curlWrite') return curlWrite(c);
+  if (r.when === 'browserAction') return browserAction(c, ctx);
+  if (r.when === 'uiScript') return uiScript(c, input);
+  if (r.when === 'otherPane') return otherPane(c, input);
+  if (r.when === 'paneCommand') return c.tokens.some((t) => ['--command', '--layout'].includes(t.split('=')[0])) ? `cmux ${positionals(c)[0]} starts a terminal with a command` : null;
   if (r.flagsAny) return `${r.flagsAny.find((f) => hasFlag(c, f))} on ${scriptPath(c) || c.bin}`;
   if (r.scriptIn) return `runs ${theScript}${r.args || r.argsAny ? ` ${pos.slice(1, 3).join(' ')}` : ''}`;
   return `${c.bin} ${pos.slice(0, 2).join(' ')}`.trim();
@@ -1008,7 +1331,8 @@ export function writeTargets(c) {
     }
     case 'mv': return pos.length < 2 ? pos : [...pos.slice(0, -1), ...intoDir(pos[pos.length - 1], pos.slice(0, -1))];
     case 'tee': case 'rm': case 'unlink': case 'truncate': case 'touch': case 'chmod': case 'chown': case 'rmdir': case 'patch': case 'shred': return pos;
-    case 'sed': return isReader(c) ? [] : args.filter((t, k) => !t.startsWith('-') && !['-e', '-f', '--expression', '--file'].includes(args[k - 1]));   // an -e expression is not a file
+    case 'sed': return isReader(c) ? [] : sedFiles(c);
+    case 'plutil': return plutilWrites(c) ? plutilFile(c) : [];
     case 'perl': case 'ruby': return args.some((t) => /^-[A-Za-z0-9]*i/.test(t) && !t.startsWith('--')) ? pos : [];
     case 'dd': return args.filter((t) => t.startsWith('of=')).map((t) => t.slice(3));
     case 'curl': return flagValues(args, '-o', '--output');
@@ -1032,12 +1356,37 @@ function guardedWrite(r, c, input, policy, ctx) {
   // $HOME and $PWD are known: read them as the folders they are
   const homeDir = ctx.home || process.env.HOME || '~';
   // …and so are $(pwd), `pwd` and ~name (the folder next to the caller's own home)
+  // A variable given a fixed value anywhere in the same call (`F=src/gates.mjs; echo x > $F`, also through export,
+  // declare, local or eval) is ALSO read as each such value. A value read this way may add a hold and never
+  // removes one: the text as written is judged first, exactly as before, because the value at the write need not
+  // be the one the gate read (an assignment after the write, inside an `if`, a `read`, a `printf -v`).
+  const assigned = {};
+  for (const m of String(input.command || '').matchAll(/(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|)]*)/g)) {
+    const v = m[2].replace(/^["']|["']$/g, '');
+    if (v !== '' && !/[$`]/.test(v)) (assigned[m[1]] ||= new Set()).add(v);
+  }
+  const VAR = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/;
+  const readings = (t, depth = 0) => {
+    const m = VAR.exec(t);
+    const vals = m && assigned[m[1] || m[2]];
+    if (!m || !vals || depth > 3) return [];
+    const out = [];
+    for (const v of [...vals].slice(0, 6)) { const next = t.slice(0, m.index) + v + t.slice(m.index + m[0].length); out.push(next, ...readings(next, depth + 1)); }
+    return out.slice(0, 32);
+  };
   const known = (t) => String(t).replace(/^\$\{?HOME\}?(?=\/|$)/, homeDir).replace(/^(\$\{?PWD\}?|\$\(\s*pwd\s*\)|`\s*pwd\s*`)(?=\/|$)/, input.cwd || '.')
     .replace(/^~([A-Za-z_][A-Za-z0-9_.-]*)(?=\/|$)/, (m, u) => (homeDir.startsWith('/') ? path.join(path.dirname(homeDir), u) : m));
   const fixed = (t) => !t.startsWith('-') && !/[$`*?]/.test(t) && !/\[[^\]/]+\]/.test(t);
   const sameName = (t, g) => !t.startsWith('/') && !t.startsWith('~') && path.basename(t) === path.basename(String(g)) && !String(g).endsWith('*');
   // any other variable in front: the gate cannot know the folder, so a tail that ends like a guarded file asks
-  const tailOf = (t) => { const m = /^(?:\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*)(\/[^$`*?]+)$/.exec(t); return m ? m[1] : null; };
+  // (a command substitution in front is the same: `"$(git rev-parse --show-toplevel)/src/gates.mjs"`)
+  // (any balanced substitution: `"$(cd "$(dirname "$(pwd)/x")" && pwd)/src/gates.mjs"`)
+  const tailOf = (t) => {
+    let rest = null;
+    if (t.startsWith('$(')) { let d = 0; for (let k = 1; k < t.length; k++) { if (t[k] === '(') d++; else if (t[k] === ')' && --d === 0) { rest = t.slice(k + 1); break; } } }
+    else { const m = /^(?:\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|`[^`]*`)/.exec(t); if (m) rest = t.slice(m[0].length); }
+    return rest != null && /^\/[^$`*?]+$/.test(rest) ? rest : null;
+  };
   const ends = (a, b) => (nc.nocase ? a.toLowerCase().endsWith(b.toLowerCase()) : a.endsWith(b));
   const endsGuarded = (tail) => globs.some((g) => {
     const e = expandPath(g, ctx);
@@ -1061,14 +1410,16 @@ function guardedWrite(r, c, input, policy, ctx) {
       return startsPath(lit, folder + '/', ctx) || startsPath(folder + '/', lit, ctx);         // a guarded file below that folder, or the folder inside a guarded one
     });
   };
-  const covers = (raw) => {
+  const covers = (raw) => coversAsWritten(raw) || readings(String(raw)).some(coversAsWritten);
+  const coversAsWritten = (raw) => {
     const t = known(raw);
     if (t.startsWith('-')) return false;
-    if (/\{[^{}]*,[^{}]*\}/.test(t)) return braces(t).some(covers);  // src/gates.{mjs,bak}
+    if (/\{[^{}]*,[^{}]*\}/.test(t)) return braces(t).some(coversAsWritten);  // src/gates.{mjs,bak}
     if (!fixed(t)) { const tail = tailOf(t); return (!!tail && endsGuarded(tail)) || spelled(t); }
     return globs.some((g) => rootedMatch(g, absPath(t, input.cwd, ctx), ctx, nc) || (input.cwdUnknown && sameName(t, g)));
   };
-  const above = (raw) => {
+  const above = (raw) => aboveAsWritten(raw) || readings(String(raw)).some(aboveAsWritten);
+  const aboveAsWritten = (raw) => {
     const t = known(raw);
     if (!fixed(t)) return false;
     const a = absPath(t, input.cwd, ctx).replace(/\/+$/, '');
@@ -1125,6 +1476,11 @@ function gitTarget(c, cwd, ctx, line = '') {
   const root = ctx.boardRoot;
   // set in front of the command, or exported by an earlier command of the same call
   if (root) for (const n of ['GIT_WORK_TREE', 'GIT_DIR']) { const v = envValue(n, `${c.text || ''} ${line}`, ctx); if (v != null && startsPath(expandPath(v, ctx), root, ctx)) named.push(root); }
+  // the live repo's own git dir decides, whatever work tree is named beside it: its HEAD and index are what move
+  if (root) {
+    const gd = flagValues(c.tokens, '--git-dir')[0] ?? envValue('GIT_DIR', `${c.text || ''} ${line}`, ctx);
+    if (gd != null && samePath(absPath(gd, cwd, ctx).replace(/\/+$/, ''), path.join(root, '.git'), ctx)) return path.resolve(root);
+  }
   return named.length ? absPath(named[0], cwd, ctx) : null;
 }
 /** The value NAME=… is given anywhere in this text (quotes dropped), or null. A value that starts with the board's folder is read as that folder, spaces and all. */
@@ -1272,6 +1628,8 @@ function liveGit(c, input, policy, ctx) {
     // the index and HEAD are what a free stash or restore writes out: moving them is the write
     case 'update-index': return has('--cacheinfo', '--index-info') ? `git update-index writes an index entry ${where}` : null;
     case 'update-ref': return `git update-ref ${where}`;
+    // takes files out of the work tree (the hook script among them: a hook whose program is missing lets calls run)
+    case 'sparse-checkout': return ['set', 'init', 'add', 'reapply'].includes(rest[0]) ? `git sparse-checkout ${rest[0]} ${where}` : null;
     // a replacement makes git read one commit as another: what HEAD holds is then something else
     case 'replace': return rest.length && !has('-l', '--list') ? `git replace ${where}` : null;
     case 'symbolic-ref': return rest.length >= 2 || has('-d', '--delete') ? `git symbolic-ref moves ${rest[0] || 'a ref'} ${where}` : null;
@@ -1399,11 +1757,101 @@ function killsBoard(c, input, ctx) {
   return hit ? `${c.bin} ${pat} would stop the board` : null;
 }
 
+// ── remote writes and desktop driving (1.3, checks `remoteWrite` and `desktop`) ──
+/** `gh api` that changes something: a write method, or fields (which make it a POST) unless the method says GET. A graphql call is a write only when it sends a mutation. */
+function ghApiWrite(c) {
+  const args = c.tokens.slice(c.tokens.indexOf('api') + 1);
+  const method = (flagValues(args, '-X', '--method')[0] || (args.find((t) => /^-X[A-Za-z]+$/.test(t)) || '').slice(2)).toUpperCase();
+  const fields = args.some((t) => ['-f', '-F', '--field', '--raw-field', '--input'].includes(t.split('=')[0]));
+  if (args.find((t) => !t.startsWith('-')) === 'graphql') {
+    if (args.some((t) => /\bmutation\b/i.test(t))) return 'gh api graphql mutation';
+    // a body the gate cannot read: the whole request from a file or stdin, or the query field read from one
+    const unread = args.some((t, k) => t === '--input' || t.startsWith('--input=') || (['-F', '--field'].includes(args[k - 1]) && /^query=@/.test(t)) || /^--field=query=@/.test(t) || /^-Fquery=@/.test(t));
+    return unread ? 'gh api graphql with a body from a file or stdin (the gate cannot read it)' : null;
+  }
+  const landing = args.some((t) => /\/pulls\/\d+\/merge\b/.test(t));
+  if (method && method !== 'GET' && method !== 'HEAD') return `gh api ${method}${landing ? ' (merges a pull request through the API)' : ''}`;
+  return fields && !method ? 'gh api with fields (a POST)' : null;
+}
+/** A gh call that posts text (a comment, an issue, a pull request, an edit) aimed at a repo on the publicRemotes list. */
+function ghPublicRepo(c, input, policy, ctx) {
+  const lists = listOr('@publicRemotes', policy);
+  if (!lists.length) return null;
+  const toks = c.tokens;
+  const flag = flagValues(toks, '-R', '--repo')[0];
+  const url = toks.map((t) => /github\.com\/([^/\s]+\/[^/\s#?]+)/.exec(t)?.[1]).find(Boolean);
+  const named = flag || url;
+  const slug = named ? (repoSlug(`/${String(named).replace(/^https?:\/\/[^/]+\//, '')}`) || named) : input.cwdUnknown ? null : repoSlug(ctx.git?.(input.cwd, ['remote', 'get-url', 'origin']));
+  const what = `gh ${positionals(c).slice(0, 2).join(' ')}`;
+  if (!slug) return input.cwdUnread ? `${what} with no repo named, ${unreadWhere('--repo <owner/name>')} (public repos are on a list)` : `${what} on a repo the gate cannot resolve (public repos are on a list)`;
+  return lists.some((g) => globMatch(String(g).toLowerCase(), String(slug).toLowerCase())) ? `${what} on public repo ${slug}` : null;
+}
+/** curl to the GitHub API with a write method or a body. */
+function curlWrite(c) {
+  const t = c.tokens;
+  const method = (flagValues(t, '-X', '--request')[0] || (t.find((x) => /^-X[A-Za-z]+$/.test(x)) || '').slice(2)).toUpperCase();
+  if (method ? !['GET', 'HEAD'].includes(method) : isPost(c)) return `curl ${method || 'POST'} to the GitHub API${t.some((x) => /\/pulls\/\d+\/merge\b/.test(x)) ? ' (merges a pull request)' : ''}`;
+  return null;
+}
+const BROWSER_ACTIONS = new Set(['click', 'dblclick', 'type', 'fill', 'press', 'key', 'keydown', 'keyup', 'check', 'uncheck', 'select', 'eval', 'set-input-files',
+  'addinitscript', 'addscript', 'repl', 'dialog']);
+const BROWSER_NAV = new Set(['goto', 'navigate', 'open', 'open-split', 'new']);
+const BROWSER_READS = new Set(['snapshot', 'url', 'get-url', 'status', 'wait', 'identify', 'get', 'is', 'find', 'screenshot', 'console', 'errors', 'highlight', 'hover', 'focus',
+  'scroll', 'scroll-into-view', 'back', 'forward', 'reload', 'tab', 'viewport', 'frame', 'download', 'profiles', 'focus-webview', 'is-webview-focused', 'enable', 'disable']);
+/** Does this text name the board's own address (any host this machine answers on, with the board's port)? */
+export function namesBoard(text, ctx = {}) {
+  const port = ctx.board?.port;
+  if (!port) return false;
+  return new RegExp(`(localhost|127\\.0\\.0\\.1|\\[::1\\]|0\\.0\\.0\\.0|100\\.\\d+\\.\\d+\\.\\d+|[a-z0-9.-]+\\.ts\\.net${(ctx.board.hosts || []).map((h) => `|${jsEsc(h)}`).join('')}):${port}(?!\\d)`, 'i').test(String(text));
+}
+/** `cmux browser …` that clicks, types or runs script in a browser panel, or points one at this board. Reading a panel is free. */
+function browserAction(c, ctx) {
+  const args = c.tokens.slice(c.tokens.indexOf('browser') + 1);
+  let k = 0; let surface = null;
+  if (args[k] === '--surface') { surface = args[k + 1]; k += 2; }
+  else if (args[k] && !BROWSER_ACTIONS.has(args[k]) && !BROWSER_NAV.has(args[k]) && !BROWSER_READS.has(args[k])) { surface = args[k]; k++; }
+  const sub = args[k];
+  if (BROWSER_ACTIONS.has(sub)) return { why: `cmux browser ${sub}${surface ? ` on ${surface}` : ''}`, surface };
+  if (BROWSER_NAV.has(sub) && args.slice(k + 1).some((t) => namesBoard(t, ctx))) return { why: `cmux browser ${sub} to this board`, surface, board: true };
+  return null;
+}
+/** `cmux send` / `send-key` aimed at a pane other than the caller's own: the text arrives there looking typed. */
+function otherPane(c, input) {
+  const ws = flagValues(c.tokens, '--workspace')[0]; const surface = flagValues(c.tokens, '--surface')[0];
+  const own = String(input.workspaceId || '').toLowerCase();
+  if (ws && (!own || ws.toLowerCase() !== own)) return `cmux ${positionals(c)[0]} into workspace ${ws}`;
+  if (surface) return `cmux ${positionals(c)[0]} into surface ${surface}`;
+  return null;
+}
+/** osascript that scripts the interface or a browser page. */
+function uiScript(c, input) {
+  const text = String(input.command || '');
+  if (/System Events/i.test(text) && /\b(click|keystroke|key code)\b/i.test(text)) return 'osascript drives the interface (System Events)';
+  if (/do JavaScript/i.test(text) || /execute[^\n]*javascript/i.test(text)) return 'osascript runs script in a browser page';
+  return null;
+}
+
 // Programs that only read the files they're given (for pathWrite rules: reading a guarded config is fine).
 // sed and find count only in their read-only forms.
 const READERS = new Set(['ls', 'stat', 'test', '[', 'file', 'plutil', 'cat', 'less', 'head', 'tail', 'grep', 'rg', 'jq', 'wc', 'diff', 'cmp',
   'shasum', 'md5', 'bat', 'awk', 'cut', 'sort', 'uniq', 'tr', 'nl', 'column', 'strings', 'od', 'xxd', 'du']);
+const WORDS_ARE_TEXT = new Set(['echo', 'printf']);
+// plutil rewrites the file it is given with these (-extract and -convert too, unless the output is `-o -`); -p, -lint and -type only read
+const PLUTIL_WRITES = ['-replace', '-insert', '-remove', '-convert', '-create', '-extract'];
+const plutilWrites = (c) => c.tokens.some((t) => PLUTIL_WRITES.includes(t)) && !c.tokens.some((t, k) => t === '-o' && c.tokens[k + 1] === '-');
+/** The file a writing plutil call rewrites: the one after -o, else the last word (keys and values are not paths). */
+const plutilFile = (c) => { const k = c.tokens.indexOf('-o'); const f = k >= 0 ? c.tokens[k + 1] : c.tokens[c.tokens.length - 1]; return f && !f.startsWith('-') ? [f] : []; };
+/** The files a sed call names: what follows its expression (or every plain word when the expression came with -e or -f). */
+function sedFiles(c) {
+  const args = c.tokens.slice(1);
+  const valued = ['-e', '-f', '--expression', '--file'];
+  const scripted = args.some((t) => valued.includes(t) || t.startsWith('--expression=') || t.startsWith('--file='));
+  // BSD sed takes the backup suffix as the word after -i (`sed -i "" …`, `sed -i .bak …`); an empty one names nothing
+  const pos = args.filter((t, k) => t !== '' && !t.startsWith('-') && !valued.includes(args[k - 1]) && !(args[k - 1] === '-i' && /^\.[A-Za-z0-9~]+$/.test(t)));
+  return scripted ? pos : pos.slice(1);
+}
 export function isReader(c) {
+  if (c.bin === 'plutil') return !plutilWrites(c);
   if (READERS.has(c.bin)) return !(c.bin === 'sort' && c.tokens.some((t) => t === '-o' || t.startsWith('--output')));
   if (c.bin === 'sed') return !c.tokens.slice(1).some((t) => /^-[A-Za-z]*i/.test(t) || t.startsWith('--in-place'));
   if (c.bin === 'find') return !c.tokens.some((t) => ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls'].includes(t));
@@ -1531,6 +1979,44 @@ export function branchSwitch(c) {
   if (sub === 'rebase') { const w = words(['--onto', '-s', '--strategy', '-X', '--strategy-option', '-x', '--exec']); return w.length >= 2 ? named(w[1], false, 'git rebase <upstream> <branch>') : null; }
   if (!GIT_COMMANDS.has(sub)) return { unknown: `git ${sub} (a command the gate does not know: an alias may switch the branch)` };
   return null;
+}
+// #584 PR 2: commands that move no local ref. A `git push` moves only remote-tracking ones, so it is listed (a merge
+// after it merges another head) and the push binding passes over it. Anything else before a push or a merge in the same call may change the commit
+// it sends or the PR head it merges.
+const REF_READERS = new Set(['echo', 'printf', 'pwd', 'ls', 'cat', 'true', ':', 'cd', 'pushd', 'popd', 'chdir', 'test', '[', 'sleep', 'date', 'wc', 'head', 'tail', 'grep', 'which']);
+const GIT_REF_READERS = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'add', 'ls-files', 'ls-remote', 'describe', 'blame', 'grep', 'shortlog', 'show-ref', 'cat-file', 'version']);
+// the gh verbs that only read (MC's read of PR 2: `gh pr edit --base`, `gh pr create`, `gh repo sync`, a `gh api`
+// write all move what a merge lands); `gh api` reads only as a plain GET
+const GH_READS = { pr: ['view', 'list', 'checks', 'diff', 'status'], issue: ['view', 'list', 'status'], repo: ['view', 'list'], run: ['view', 'list', 'watch'],
+  release: ['view', 'list'], auth: ['status'], status: null, search: null, browse: null };
+/** What a command is called on a row when it may move a ref a later push sends or merge merges; null when it moves none. */
+export function refMover(c) {
+  if (c.interpretedBody != null) return `a ${c.by || 'script'} body`;
+  if (!c.bin) return c.assignOnly && c.text ? 'a variable set in the call' : null;
+  const bin = String(c.bin).split('/').pop();
+  const word = (() => {
+    if (REF_READERS.has(bin)) return null;
+    if (bin === 'gh') {
+      const p = positionals(c);
+      if (p[0] === 'api') return ghApiWrite(c) ? 'gh api (a write)' : null;
+      return p[0] in GH_READS && (GH_READS[p[0]] === null || GH_READS[p[0]].includes(p[1])) ? null : `gh ${p.slice(0, 2).join(' ')}`.trim();
+    }
+    if (bin !== 'git') return bin;
+    const { sub, args } = gitWords(c);
+    if (sub === 'fetch' && !args.some((a) => a.includes(':'))) return null;     // remote-tracking refs only
+    if (sub === 'branch' && branchSwitch(c) == null && args.every((a) => a.startsWith('-'))) return null;   // a listing
+    if (sub === 'stash' && ['list', 'show'].includes(args[0])) return null;
+    if (sub === 'remote' && (args.length === 0 || ['-v', 'show', 'get-url'].includes(args[0]))) return null;
+    return GIT_REF_READERS.has(sub) ? null : `git ${sub || ''}`.trim();
+  })();
+  if (word) return word;
+  // a reader that writes a file is not a reader (`echo <sha> > .git/refs/heads/x`, `git show --output=…`); saying less
+  // on a row is the safe direction, so any file target counts
+  const reads = new Set(c.reads || []);
+  const writesFile = (c.redirects || []).some((t) => !reads.has(t) && t !== '/dev/null' && !/^&?-?\d*$/.test(t))
+    || (bin === 'git' && c.tokens.some((t) => t === '--output' || t.startsWith('--output=')));
+  if (!writesFile) return null;
+  return `${bin === 'git' ? `git ${gitWords(c).sub || ''}`.trim() : bin === 'gh' ? `gh ${positionals(c).slice(0, 2).join(' ')}`.trim() : bin} (writes a file)`;
 }
 /** A git command's subcommand and its words, after git's own options. */
 function gitWords(c) {
@@ -1687,6 +2173,93 @@ export function repoSlug(url) {
   return m ? m[1] : null;
 }
 
+// ── engineStart (1.3): a session an agent starts from its own shell ───────────────────────────────
+// A child session started with settings of its own can run with no gate hook at all (seen live: a
+// start that leaves out the user settings, or one whose settings switch hooks off, sends the board
+// nothing). The gate sees only the parent's command, so that command is what is read.
+const ENGINE_FREE_WORDS = { claude: ['mcp', 'config', 'doctor', 'update', 'install', 'auth', 'login', 'logout', 'setup-token', 'plugin', 'plugins', 'agents', 'migrate-installer', 'help'],
+  codex: ['login', 'logout', 'mcp', 'completion', 'help', 'apply', 'debug', 'features'] };
+const ENGINE_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'HOME', 'XDG_CONFIG_HOME'];
+/**
+ * `claude …` or `codex …` run from an agent's shell.
+ *   → null for what starts no session (--version, --help, `claude mcp list` …)
+ *   → a reason, always, for a form that weakens the gate inside the new session
+ *   → a reason for a plain headless start only when every start is being read (ctx.readEveryStart: the
+ *     reading pass). A plain start is never held, whatever the switch says; whether it ever should be is
+ *     the owner's call, with the readings.
+ */
+function engineStart(c, input, ctx) {
+  const eng = c.bin;
+  const args = c.tokens.slice(1);
+  // free only where the program itself stops there: the version or help flag, or a management word, as the FIRST word
+  if (['--version', '-v', '-V', '--help', '-h'].includes(args[0])) return null;
+  const first = args.find((t) => !t.startsWith('-'));
+  if ((ENGINE_FREE_WORDS[eng] || []).includes(args[0])) return null;
+  const val = (...names) => flagValues(args, ...names)[0];
+  const weak = [];
+  // settings of its own
+  // (given more than once, the later one may be what counts: every value has to keep the user settings)
+  const sources = flagValues(args, '--setting-sources').find((v) => !String(v).split(',').map((x) => x.trim()).includes('user'));
+  if (sources != null) weak.push(`--setting-sources ${sources} leaves out the user settings (the gate hook is registered there)`);
+  if (args.some((t) => t === '--settings' || t.startsWith('--settings='))) weak.push('--settings gives the session settings of its own (they can switch every hook off)');
+  if (args.includes('--bare')) weak.push('--bare starts a session that loads no hooks');
+  // no asking inside the session
+  const pm = val('--permission-mode');
+  if (pm && /^bypass/i.test(pm)) weak.push(`--permission-mode ${pm}`);
+  for (const f of ['--dangerously-skip-permissions', '--allow-dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox', '--yolo']) if (args.includes(f)) weak.push(f);
+  if (eng === 'codex') {
+    const sb = val('--sandbox', '-s'); if (sb === 'danger-full-access') weak.push(`--sandbox ${sb}`);
+    const cfg = flagValues(args, '-c', '--config').find((v) => /^(hooks|sandbox|approval|shell_environment_policy|profile)/i.test(v) || /hook/i.test(v));
+    if (cfg) weak.push(`a config value for this one run (${cfg.split('=')[0]})`);
+  }
+  // another home for its settings: set in front of the call, exported earlier in the same call, or the environment emptied
+  const line = `${c.text || ''} ${input.command || ''}`;
+  const env = ENGINE_ENV.find((n) => new RegExp(`(^|[^A-Za-z0-9_])${n}=`).test(line));
+  if (env) weak.push(`${env} is set for the call (the session reads its settings from another place)`);
+  if (/(^|[^A-Za-z0-9_-])env\s+(-[A-Za-z]*i|--ignore-environment|-u\s*(HOME|CLAUDE_CONFIG_DIR)|--unset[= ](HOME|CLAUDE_CONFIG_DIR))/.test(line)) weak.push('the environment is emptied or HOME is unset for the call');
+  if (weak.length) return `starts a ${eng} session the gate may not see: ${weak[0]}${weak.length > 1 ? ` (and ${weak.length - 1} more)` : ''}`;
+  // a plain headless start: a reading, never a hold
+  const headless = eng === 'codex' ? ['exec', 'e'].includes(first) : args.some((t) => t === '-p' || t === '--print');
+  return headless && ctx.readEveryStart ? `starts a headless ${eng} session (a reading: plain starts are not held)` : null;
+}
+// The installer's own dispatch (install.sh `case "${1:-}"`), word for word. A test reads that table and fails when a
+// word is missing here, so a new installer word cannot go free unnoticed.
+// No word, `--yes` and `--dry-run` reach the LIGHT install (config, the board as one LaunchAgent); `--full` and the
+// full install's own flags reach the FULL one. Both write, and both loop over their words for `--dry-run`.
+const INSTALL_LIGHT = new Set(['', '--dry-run', '--yes', '-y']);
+const INSTALL_FULL = new Set(['--full', 'full', '--force', '--deadman', '--sandbox']);
+export const INSTALL_WORDS = {
+  free: ['check', 'verify', 'doctor', 'restore', '--demo', 'demo', 'demo-stop', '-h', '--help', 'help'],   // restore's write form carries --apply (class `write`)
+  held: ['init', '--brain', 'brain', 'setup', 'mission-control', 'star', 'backup'],                          // init and backup: see below
+  other: ['upgrade', 'rollback', '--guardrails', 'guardrails'],                                              // classes and rules of their own
+  light: [...INSTALL_LIGHT],
+  full: [...INSTALL_FULL],
+};
+/**
+ * `install.sh …` or `zulu …`: held unless the FIRST word is one the installer answers without writing, or the form is
+ * a dry run where the installer honours one. The installer looks at its first word and nothing else, so `--help`,
+ * `--demo` or `-n` as a later word frees nothing (`install.sh --force --help` is a full install).
+ */
+function installerWrite(c, script = scriptPath(c)) {
+  const toks = c.tokens;
+  let words;
+  if (runsAScript(c.bin)) {
+    const k = toks.indexOf(script);
+    if (toks.slice(1, k).some((t) => /^-[A-Za-z]*n[A-Za-z]*$/.test(t))) return null;      // `bash -n install.sh`: the shell only checks the syntax
+    words = toks.slice(k + 1);
+  } else words = toks.slice(1);
+  const first = words[0] ?? '';
+  const what = `${path.basename(toks[0] === c.bin ? c.bin : script || c.bin)}${first ? ` ${first}` : ''}`;
+  if (INSTALL_WORDS.other.includes(first) || INSTALL_WORDS.free.includes(first)) return null;
+  // the light and the full install loop over their words: a dry run anywhere is a dry run
+  if (INSTALL_LIGHT.has(first)) return words.includes('--dry-run') ? null : `runs the light install (${what.trim()})`;
+  if (INSTALL_FULL.has(first)) return words.includes('--dry-run') ? null : `runs the full install (${what.trim()})`;
+  // `init <a second word that is not empty>` only lists what it would create (the installer tests the word: `init ""` is a real init)
+  if (first === 'init') return words.length > 1 && words[1] !== '' ? null : 'runs install.sh init (copies the example files into overlay/)';
+  if (first === 'backup') return words.includes('--with-secrets') ? 'a backup that carries the secrets file' : null;
+  // --brain, brain, setup, mission-control, star: no dry form the installer honours. An unknown first word is asked too.
+  return `runs the installer: ${first}`;
+}
 function rmOutside(c, input, ctx) {
   // the working tree is the git repo the command runs in; outside any repo there is none, so only the
   // caller's own scratch space is free (a cwd that isn't a repo — e.g. the home folder — is not "inside")
@@ -1828,7 +2401,7 @@ export function wouldEnforce(policy, agent, opts = {}) {
 
 // ── fingerprints ────────────────────────────────────────────────────────────
 const sha = (s) => createHash('sha256').update(s).digest('hex');
-export const HASH_VERSION = 'gate-v2';     // v2 binds non-shell tool input; v1 grants can never match
+export const HASH_VERSION = 'gate-v3';     // v3 binds the content of the scripts a shell command runs; v2 bound non-shell tool input
 
 /** JSON with object keys sorted at every level (strings as-is), so equal inputs hash equally. */
 export function canonicalJson(v) {
@@ -1841,9 +2414,11 @@ export function canonicalJson(v) {
  * Binds the exact call: engine, folder, tool, and — for a shell — the command text; for any
  * other tool its whole input (an MCP call's arguments, an edit's file + old/new text).
  */
-export function cmdHash({ engine = 'claude', cwd = '', tool = 'Bash', command = '', filePath = '', toolInput = null }) {
+export function cmdHash({ engine = 'claude', cwd = '', tool = 'Bash', command = '', filePath = '', toolInput = null, scripts = [] }) {
   const what = tool === 'Bash' || toolInput == null ? String(command).trim() : canonicalJson(toolInput);
-  return sha([HASH_VERSION, engine, cwd, tool, what, filePath].join('\u0000'));
+  // scripts: one content hash per script file the command runs (the board reads them), so an approved
+  // script that changes before it runs is a different call
+  return sha([HASH_VERSION, engine, cwd, tool, what, filePath, ...(scripts || [])].join('\u0000'));
 }
 
 /**
@@ -1855,6 +2430,7 @@ export function scriptsRun(command, cwd, ctx = {}) {
   const out = [];
   const entry = (p, c) => { const w = commandCwd(c, cwd, ctx); return { path: p, cwd: w.cwd, ...(w.unread && !/^(\/|~(\/|$))/.test(p) ? { unread: true } : {}) }; };
   parsed.cmds.forEach((c, k) => {
+    // a script handed over on the program's input (`bash -s -- --yes < x.sh`) runs too: its file is bound like a named one
     for (const v of stdinScriptRuns(c, parsed.cmds[k - 1])) if (!/[$`*?]/.test(v.viaStdin)) out.push(entry(v.viaStdin, c));
   });
   for (const c of parsed.cmds) {
@@ -1864,6 +2440,115 @@ export function scriptsRun(command, cwd, ctx = {}) {
   }
   return out;
 }
+/**
+ * #589: a script the call itself writes and also runs. The grant's hash and the dry run are of the file as it is when
+ * the gate reads it, before the call; a call that changes the file and then runs it runs content nobody approved.
+ * → [{ script, by }] (the script as written, and the gate's word for what writes it), empty when none.
+ * Writes: an output redirect (not `/dev/null`, not a descriptor), the programs `writeTargets` knows (cp, mv, tee, sed -i,
+ * patch, curl -o …), and git `checkout … -- <paths>` / `restore <paths>`. Order is not read: a loop or a substitution
+ * can run a later word first, so any other command of the call that writes the file counts.
+ */
+export function scriptsEditedInCall(command, cwd, ctx = {}) {
+  let parsed; try { parsed = parseCommand(command); } catch { return []; }
+  const fold = (p) => (ctx.ignoreCase ?? ['darwin', 'win32'].includes(process.platform) ? p.toLowerCase() : p);
+  const abs = (p, c) => fold(path.resolve(commandCwd(c, cwd, ctx).cwd || cwd || '/', String(p).replace(/^~(?=\/|$)/, ctx.home || process.env.HOME || '~')));
+  const writes = [];
+  parsed.cmds.forEach((c, k) => {
+    if (!c.bin) return;
+    const reads = new Set(c.reads || []);
+    const targets = [...(c.redirects || []).filter((t) => !reads.has(t) && t !== '/dev/null' && !/^&?-?\d*$/.test(t)), ...writeTargets(c)];
+    if (c.bin === 'git') {
+      const p = positionals(c); const dd = c.tokens.indexOf('--');
+      if (p[0] === 'restore') targets.push(...p.slice(1));
+      if (p[0] === 'checkout' && dd > 0) targets.push(...c.tokens.slice(dd + 1));
+    }
+    for (const t of targets) if (!/[$`*?]/.test(t)) writes.push({ k, file: abs(t, c), by: String(c.bin).split('/').pop() });
+  });
+  if (!writes.length) return [];
+  const out = [];
+  parsed.cmds.forEach((c, k) => {
+    const runs = [...stdinScriptRuns(c, parsed.cmds[k - 1]).map((v) => v.viaStdin)];
+    if (c.bin && isScript(c) && !['npx', 'uv', 'pnpm', 'npm'].includes(c.bin)) { const sp = scriptPath(c); if (sp) runs.push(sp); }
+    for (const sp of runs) {
+      if (/[$`*?]/.test(sp)) continue;
+      const w = writes.find((x) => x.k !== k && x.file === abs(sp, c));
+      if (w && !out.some((o) => o.script === sp)) out.push({ script: sp, by: w.by });
+    }
+  });
+  return out;
+}
+/** `gh pr merge` as the only command of the call, with no head pin of its own: the form the hook can pin. */
+export function soleMerge(command) {
+  let parsed; try { parsed = parseCommand(command); } catch { return false; }
+  const run = parsed.cmds.filter((c) => !c.assignOnly);
+  if (parsed.opaque.length || run.length !== 1 || run[0].bin !== 'gh' || run[0].fromSub) return false;
+  return ghWordsMatch(run[0].tokens, ['pr', 'merge']) && !run[0].tokens.some((t) => t.startsWith('--match-head-commit'));
+}
+/**
+ * The merge command with the head pinned, or null when the pin would not reach the program. The pin is
+ * appended to the text, and the shell hands it to `gh` only when the line ends with the command's own last
+ * word: behind a comment, a closing semicolon, an ampersand, a bracket or `--` it is dropped, runs as another
+ * command, or arrives as a plain word. So the pinned text is parsed again and used only when it is still one
+ * command whose own words are the old ones followed by the option and the head. null = read the head again.
+ */
+export function pinnedMerge(command, head) {
+  if (!soleMerge(command) || !/^[0-9a-f]{7,64}$/i.test(String(head || ''))) return null;
+  const text = String(command).trim();
+  // a line the parser reads but a shell may read otherwise: a comment sign, a line break, a group, a list end
+  // (an output redirect such as 2>&1 or &>file is none of these)
+  if (/[#\n\r;&(){}\\]/.test(text.replace(/\d*>&\d+|&>>?/g, ' ')) || /(^|\s)--(\s|$)/.test(text)) return null;
+  const pinned = `${text} --match-head-commit ${head}`;
+  let was, now; try { was = parseCommand(text); now = parseCommand(pinned); } catch { return null; }
+  const one = (p) => { const run = p.cmds.filter((c) => !c.assignOnly); return !p.opaque.length && run.length === 1 && run[0].bin === 'gh' && !run[0].fromSub ? run[0] : null; };
+  const a = one(was), b = one(now);
+  if (!a || !b || !ghWordsMatch(b.tokens, ['pr', 'merge'])) return null;
+  const want = [...a.tokens, '--match-head-commit', head];
+  return b.tokens.length === want.length && want.every((t, k) => b.tokens[k] === t) ? pinned : null;
+}
+// `git push` options: the ones whose next word is their value, and the ones that take none. Any other
+// option is one the reading does not know, and the push is then not bound to a commit.
+const PUSH_VALUE_FLAGS = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec']);
+const PUSH_PLAIN_FLAGS = new Set(['-f', '--force', '-u', '--set-upstream', '-n', '--dry-run', '-q', '--quiet', '-v', '--verbose', '--porcelain', '--progress', '--no-progress',
+  '--no-verify', '--verify', '--atomic', '--no-atomic', '--thin', '--no-thin', '--force-with-lease', '--no-force-with-lease', '--force-if-includes', '--no-force-if-includes',
+  '--signed', '--no-signed', '--no-recurse-submodules', '-4', '--ipv4', '-6', '--ipv6']);
+const PUSH_EQ_FLAGS = ['--force-with-lease=', '--signed=', '--recurse-submodules=', '--push-option=', '--repo=', '--receive-pack=', '--exec='];
+const PUSH_WIDE = new Set(['--all', '--branches', '--mirror', '--tags', '--follow-tags', '--prune']);
+/**
+ * The local refs a `git push` sends: the source side of every refspec.
+ * → { refs: [names] } (a bare push sends HEAD) | { unbound: '<why>' } for a form that names no fixed set of
+ * refs (`--all`, `--mirror`, `--tags`, a wildcard, an option the reading does not know) | { refs: [] } for a pure delete.
+ */
+export function pushedRefs(c) {
+  const at = c.tokens.indexOf('push');
+  if (at < 0) return { unbound: 'not read as a push' };
+  const words = []; let del = false;
+  for (let k = at + 1; k < c.tokens.length; k++) {
+    const t = c.tokens[k];
+    if (!t.startsWith('-') || t === '-') { words.push(t); continue; }
+    if (PUSH_WIDE.has(t)) return { unbound: `${t} sends whatever matches` };
+    if (t === '-d' || t === '--delete') { del = true; continue; }
+    if (PUSH_VALUE_FLAGS.has(t)) { k++; continue; }
+    if (PUSH_PLAIN_FLAGS.has(t) || PUSH_EQ_FLAGS.some((f) => t.startsWith(f))) continue;
+    if (/^-[fnuqv46]+$/.test(t)) continue;                       // a cluster of the one-letter options that take no value
+    return { unbound: `the option ${t.split('=')[0]} is not one the gate knows` };
+  }
+  const specs = words.slice(1);                                  // the first word is the remote
+  if (del) return { refs: [] };
+  if (!specs.length) return { refs: ['HEAD'], bare: true };      // what a bare push sends also depends on the repo's push settings (the caller reads them)
+  const refs = [];
+  for (let k = 0; k < specs.length; k++) {
+    let s = specs[k];
+    if (s === 'tag' && specs[k + 1]) { refs.push(`refs/tags/${specs[++k]}`); continue; }
+    s = s.replace(/^\+/, '');
+    if (s.startsWith(':')) continue;                              // a delete: nothing local is sent
+    const src = s.split(':')[0] || 'HEAD';
+    if (/[*?[$`]/.test(src)) return { unbound: `${src} is not one fixed ref` };
+    if (!refs.includes(src)) refs.push(src);
+  }
+  return { refs };
+}
+/** The local ref a `git push` sends first (kept for callers that want one name). null for a pure delete or a form that is not bound. */
+export function pushedRef(c) { const r = pushedRefs(c); return r.refs?.[0] ?? null; }
 
 /** What the owner sees for a non-shell call: the tool and its input, readable. */
 export function describeToolCall(tool, input = {}) {
@@ -1890,7 +2575,7 @@ export const DEFAULT_POLICY = {
   version: 1, mode: 'enforce', enforceFor: ['*'],
   defaults: { ttlMinutes: 120, approver: 'owner', requireDryRun: false },   // 120: an approval survives a long agent turn (#343 item 7)
   // 1.3 checks, each off | observe | enforce. observe: the call passes and the reading says "would hold".
-  checks: { inlineBodies: 'observe', renamedBins: 'observe', selfProtect: 'observe' },
+  checks: { inlineBodies: 'observe', renamedBins: 'observe', selfProtect: 'observe', mcpDefault: 'observe', remoteWrite: 'observe', desktop: 'observe', paneReach: 'observe', runners: 'observe', engineStart: 'observe' },
   classes: [
     { id: 'merge', label: 'Merge a pull request', standing: true, rules: [{ bin: 'gh', args: ['pr', 'merge'] }] },
     { id: 'push', label: 'Push to a protected branch or public remote, force-push, push tags or delete a ref',
@@ -1903,6 +2588,12 @@ export const DEFAULT_POLICY = {
       rules: [{ bin: 'launchctl', argsAny: ['bootstrap', 'bootout', 'load', 'unload', 'enable', 'disable'], unlessLabels: '@paidOrOutbound' }] },
     // #435 (deferred from #346): an agent on a release install runs the one-click upgrade or a rollback
     // as a gated action; the check form changes nothing. Not standing: a program go never covers it.
+    // 1.3 (check `engineStart`): an agent starting a session from its own shell. Held: the forms that leave the
+    // gate hook out of that session or stop it asking. Every headless start gets a reading. Not standing.
+    { id: 'engine-start', label: 'Start an agent session the gate may not see',
+      // (triggerWords and firstWords only build the fast-path lines; the rule itself reads every call of the program)
+      rules: [{ bin: 'claude', triggerWords: ['-p', '--print', '--setting', '--bare', 'permission'], when: 'engineStart', check: 'engineStart' },
+        { bin: 'codex', triggerWords: ['exec', 'bypass', 'yolo', 'danger', '-c', '--config', '--sandbox', '-s'], firstWords: ['e'], when: 'engineStart', check: 'engineStart' }] },
     { id: 'upgrade', label: 'Upgrade or roll back this install',
       rules: [{ bin: 'zulu', args: ['upgrade'], unlessFlags: ['--check'] }, { bin: 'zulu', args: ['rollback'] },
         { scriptIn: ['**/upgrade.mjs'], unlessFlags: ['--check'] },
@@ -1915,9 +2606,47 @@ export const DEFAULT_POLICY = {
       rules: [{ script: true, flagsAny: ['--commit', '--apply', '--write', '--execute', '--confirm', '--activate', '--live', '--send', '--go'] }] },
     { id: 'outbound', label: 'Send a message or post outside the system',
       rules: [{ bin: 'curl', method: 'POST', urlAny: ['slack.com/api/chat.', 'slack.com/api/files.', 'api.twilio.com', 'a.klaviyo.com/api/campaign-send'] },
-        { tool: '^mcp__.*__(send_message|reply|forward)$' }] },
+        { tool: '^mcp__.*__(send_message|reply|forward)$' },
+        // 1.3 (check `mcpDefault`): every send, reply, forward and schedule form, posts, and the chat tools that change something
+        { tool: '^mcp__.*__(.*_)?(send|reply|forward|schedule)(_.*)?$', check: 'mcpDefault' }, { tool: '^mcp__.*__.*post-(create|update)$', check: 'mcpDefault' },
+        { tool: '^mcp__.*__slack_(add_reaction|create_conversation|complete_file_upload|create_canvas|update_canvas|add_list_record|update_list_record|create_list|update_list)$', check: 'mcpDefault' }] },
     { id: 'store', label: 'Write to the store through an MCP tool',
-      rules: [{ tool: '^mcp__.*Shopify__(graphql_mutation|create-.*|update-.*|set-inventory|bulk-.*|add-to-collection|publish-.*|upload-.*)$' }] },
+      rules: [{ tool: '^mcp__.*Shopify__(graphql_mutation|create-.*|update-.*|set-inventory|bulk-.*|add-to-collection|publish-.*|upload-.*)$' },
+        { tool: '^mcp__.*Shopify__(switch-shop|upload[-_].*|import-.*|set-.*)$', check: 'mcpDefault' }] },
+    // 1.3: tools and commands that drive the desktop or a browser. Standing: a program go on the task covers the
+    // class (never an action aimed at this board); without one each action asks.
+    { id: 'desktop', label: 'Drive the desktop or a browser (click, type, run page script)', standing: true,
+      rules: [{ tool: '^mcp__(.*[-_])?computer[-_]use__(?!(screenshot|zoom|cursor_position|list_granted_applications|read_clipboard)$).+$', check: 'desktop' },
+        { tool: '^mcp__cmux-cua__(click|double_click|right_click|type_text|press_key|hotkey|drag|scroll|launch_app|kill_app|set_value|perform_actions)$', check: 'desktop' },
+        { tool: '^mcp__claude-in-chrome__(computer|navigate|form_input|javascript_tool|file_upload|browser_batch)$', check: 'desktop' },
+        { bin: 'cmux', args: ['browser'], when: 'browserAction', check: 'desktop' },
+        { bin: 'osascript', when: 'uiScript', check: 'desktop' }, { bin: 'cliclick', check: 'desktop' },
+        { bin: 'open', mentions: ['--remote-debugging'], check: 'desktop' }] },
+    // 1.3 (check `paneReach`, meant to be read in observe first): typing into another agent's pane, or starting
+    // a terminal with a command, by an agent other than Mission Control
+    { id: 'panes', label: "Type into another pane, or start a terminal with a command",
+      rules: [{ bin: 'cmux', argsAny: ['send', 'send-key'], when: 'otherPane', check: 'paneReach', exceptMissionControl: true },
+        { bin: 'cmux', argsAny: ['new-split', 'new-pane', 'new-surface', 'new-workspace'], when: 'paneCommand', check: 'paneReach', exceptMissionControl: true },
+        { bin: 'tmux', argsAny: ['send-keys'], check: 'paneReach', exceptMissionControl: true }] },
+    // 1.3: writes to a remote service that no other class names
+    { id: 'remote-write', label: 'Change something in a remote account or service',
+      rules: [{ tool: '^mcp__.*__(.*[-_])?(create|update|edit|delete|trash|untrash|remove|share|copy|transition|add|apply|mark|unmark|label|unlabel)([-_].*)?$', check: 'mcpDefault' },
+        { tool: '^mcp__.*__batch$', check: 'mcpDefault' },
+        { tool: '^mcp__.*__(create|edit|update|delete|remove|transition|add|set|send|post|publish|share|trash)[A-Z].*$', check: 'mcpDefault' },
+        { bin: 'gh', args: ['api'], when: 'ghApiWrite', check: 'remoteWrite' },
+        { bin: 'curl', urlAny: ['api.github.com'], when: 'curlWrite', check: 'remoteWrite' },
+        { bin: 'gh', args: ['workflow', 'run'], check: 'remoteWrite' }, { bin: 'gh', args: ['workflow', 'enable'], check: 'remoteWrite' }, { bin: 'gh', args: ['workflow', 'disable'], check: 'remoteWrite' },
+        { bin: 'gh', args: ['release', 'create'], check: 'remoteWrite' }, { bin: 'gh', args: ['release', 'delete'], check: 'remoteWrite' }, { bin: 'gh', args: ['release', 'edit'], check: 'remoteWrite' },
+        { bin: 'gh', args: ['pr', 'close'], check: 'remoteWrite' }, { bin: 'gh', args: ['pr', 'ready'], check: 'remoteWrite' },
+        { bin: 'gh', args: ['issue', 'close'], check: 'remoteWrite' }, { bin: 'gh', args: ['issue', 'delete'], check: 'remoteWrite' },
+        // what publishes or speaks in public: a gist, a public repo, a review; a comment, an issue, a pull request or an edit on a repo of @publicRemotes
+        { bin: 'gh', args: ['gist', 'create'], check: 'remoteWrite' }, { bin: 'gh', args: ['gist', 'edit'], check: 'remoteWrite' },
+        { bin: 'gh', args: ['repo', 'create'], flagsAny: ['--public'], check: 'remoteWrite' }, { bin: 'gh', args: ['pr', 'review'], check: 'remoteWrite' },
+        { bin: 'gh', args: ['pr', 'comment'], when: 'ghPublicRepo', check: 'remoteWrite' }, { bin: 'gh', args: ['issue', 'comment'], when: 'ghPublicRepo', check: 'remoteWrite' },
+        { bin: 'gh', args: ['issue', 'create'], when: 'ghPublicRepo', check: 'remoteWrite' }, { bin: 'gh', args: ['pr', 'create'], when: 'ghPublicRepo', check: 'remoteWrite' },
+        { bin: 'gh', args: ['pr', 'edit'], when: 'ghPublicRepo', check: 'remoteWrite' }, { bin: 'gh', args: ['issue', 'edit'], when: 'ghPublicRepo', check: 'remoteWrite' },
+        { bin: 'gh', args: ['repo', 'edit'], check: 'remoteWrite' }, { bin: 'gh', args: ['repo', 'archive'], check: 'remoteWrite' }, { bin: 'gh', args: ['repo', 'rename'], check: 'remoteWrite' },
+        { sql: '\\b(update\\s+\\S+\\s+set|delete\\s+from|insert\\s+into|alter\\s+(table|schema|database|role|policy))\\b', check: 'remoteWrite' }] },
     { id: 'delete', label: 'Delete outside the working tree, drop data, delete repos',
       rules: [{ bin: 'rm', flagsAny: ['-r', '-R', '--recursive'], when: 'outsideRepo' },
         // find that deletes or runs something on what it finds is a delete too (it names files by pattern)
@@ -1942,8 +2671,14 @@ export const DEFAULT_POLICY = {
         { scriptIn: ['**/install.sh'], flagsAny: ['--guardrails'], unlessFlags: ['--dry-run'] },
         { scriptIn: ['**/install.sh'], args: ['guardrails'], unlessFlags: ['--dry-run'] },
         // the wrapper in bin/ runs the installer with the same words from anywhere
-        { bin: 'zulu', flagsAny: ['--guardrails'], unlessFlags: ['--dry-run'] },
-        { bin: 'zulu', args: ['guardrails'], unlessFlags: ['--dry-run'] },
+        { bin: 'zulu', flagsAny: ['--guardrails'], unlessFlags: ['--dry-run'], nameIsWord: true },
+        { bin: 'zulu', args: ['guardrails'], unlessFlags: ['--dry-run'], nameIsWord: true },
+        // the installer of this checkout (or a worktree of it), and the `zulu` wrapper that runs it from anywhere: the full
+        // install, init, the brain step and setup write LaunchAgents, overlay files and hook settings. `installerWrite`
+        // reads the call the way the installer itself does, by its FIRST word, so a freeing flag counts only where the
+        // installer honours it. upgrade and rollback have their own class; the Guardrails-only form has its own rules.
+        { scriptIn: ['<repo>/install.sh'], when: 'installerWrite' }, { bin: 'zulu', when: 'installerWrite', nameIsWord: true },
+        { scriptIn: ['<repo>/scripts/bootstrap.sh'], args: ['install'], unlessFlags: ['--dry-run'] },
         // 1.3 self-protection (check `selfProtect`): writes to the files the gate rests on, git that can change
         // them in the live checkout or move what "landed" means, and stopping the board
         { pathGuard: ['@gateCode', '@guardGate'], check: 'selfProtect' },
@@ -1951,17 +2686,21 @@ export const DEFAULT_POLICY = {
         { bin: 'git', mentions: ['core.hookspath=', 'alias.'], when: 'gitDashC', check: 'selfProtect' },
         { bin: 'git', argsAny: ['update-ref', 'symbolic-ref', 'fetch', 'push'], mentions: ['refs/remotes/', 'refs/heads/main', 'refs/heads/master', 'refs/heads/origin/', 'refs/tags/origin/', 'refs/replace/'], when: 'gitRefWrite', check: 'selfProtect' },
         { bin: 'git', args: ['remote'], argsAny: ['set-url', 'add', 'rename', 'remove', 'rm', 'set-head', 'set-branches'], check: 'selfProtect' },
-        { bin: 'git', argsAny: ['pull', 'merge', 'rebase', 'cherry-pick', 'revert', 'apply', 'am', 'checkout', 'switch', 'reset', 'stash', 'restore', 'branch', 'rm', 'mv', 'read-tree', 'bisect', 'fetch', 'tag', 'update-ref', 'symbolic-ref', 'update-index', 'checkout-index', 'clean', 'submodule', 'replace'], when: 'liveCheckout', check: 'selfProtect' },
+        { bin: 'git', argsAny: ['pull', 'merge', 'rebase', 'cherry-pick', 'revert', 'apply', 'am', 'checkout', 'switch', 'reset', 'stash', 'restore', 'branch', 'rm', 'mv', 'read-tree', 'bisect', 'fetch', 'tag', 'update-ref', 'symbolic-ref', 'update-index', 'checkout-index', 'clean', 'submodule', 'replace', 'sparse-checkout'], when: 'liveCheckout', check: 'selfProtect' },
         { bin: 'kill', when: 'boardProcess', check: 'selfProtect' }, { bin: 'pkill', when: 'boardProcess', check: 'selfProtect' },
         { bin: 'killall', when: 'boardProcess', check: 'selfProtect' }, { bin: 'xargs', argsAny: ['kill'], when: 'boardProcess', check: 'selfProtect' },
         { bin: 'launchctl', argsAny: ['kill', 'stop', 'remove', 'reboot'], when: 'boardProcess', check: 'selfProtect' },
         { bin: 'fuser', when: 'boardProcess', check: 'selfProtect' }, { bin: 'kill-port', when: 'boardProcess', check: 'selfProtect' },
         { bin: 'reboot', when: 'boardProcess', check: 'selfProtect' }, { bin: 'shutdown', when: 'boardProcess', check: 'selfProtect' },
         { bin: 'halt', when: 'boardProcess', check: 'selfProtect' }, { bin: 'poweroff', when: 'boardProcess', check: 'selfProtect' },
-        { bin: 'osascript', mentions: ['restart', 'shut down', 'shutdown', 'log out', 'logout'], when: 'boardProcess', check: 'selfProtect' }] },
+        { bin: 'osascript', mentions: ['restart', 'shut down', 'shutdown', 'log out', 'logout'], when: 'boardProcess', check: 'selfProtect' },
+        // what later gh words mean, and which repo a gh call with no repo named acts on
+        { bin: 'gh', args: ['alias', 'set'], check: 'selfProtect' }, { bin: 'gh', args: ['alias', 'import'], check: 'selfProtect' },
+        { bin: 'gh', args: ['repo', 'set-default'], unlessFlags: ['--view', '-v'], check: 'selfProtect' }] },
   ],
   lists: {
     paidOrOutbound: [], publicRemotes: [], deployOnPush: [],
+    mcpRead: [],                              // MCP tools that only read, exact names or globs (mcp__server__get_*); the read pattern covers the rest
     guardedScripts: [],                       // scripts that write without any flag: gated on every run
     dryFlags: ['--dry-run', '-n', '--check', '--plan'],   // …except these runs, which change nothing
     guardSecrets: ['<repo>/data/guardrails/**', '<repo>/data/mesh-decision-token'],
@@ -1972,14 +2711,21 @@ export const DEFAULT_POLICY = {
     gateCode: ['<live>/scripts/gate-hook.sh', '<live>/scripts/gate-hook.mjs', '<live>/scripts/gate-triggers.default', '<live>/scripts/guardrails-install.sh',
       '<live>/scripts/merge-hooks.mjs', '<live>/scripts/env.sh', '<live>/src/gates.mjs', '<live>/src/gate-service.mjs', '<live>/src/gate-ledger.mjs',
       '<live>/src/request-guard.mjs', '<live>/src/guard.mjs', '<live>/src/caller.mjs', '<live>/src/tasks.mjs', '<live>/src/config.mjs', '<live>/server.mjs',
-      '<live>/public/**', '<live>/src/gate-integrity.mjs', '<live>/scripts/gate-config-hook.sh', '<live>/scripts/gate-config-hook.mjs'],
+      '<live>/public/**', '<live>/src/gate-integrity.mjs', '<live>/scripts/gate-config-hook.sh', '<live>/scripts/gate-config-hook.mjs',
+      // …and every other module the gate service and the two hook programs load (#571; a test follows their imports)
+      '<live>/src/receipt-chain.mjs', '<live>/src/row-context.mjs', '<live>/src/private-file.mjs', '<live>/src/secret-text.mjs',
+      '<live>/src/profile.mjs', '<live>/src/completion-packet.mjs', '<live>/src/upgrade.mjs', '<live>/src/worktree.mjs'],
     // guardGate: identity, where the hook finds the board, the records, hook settings anywhere, shell and git start files, session maps
     guardGate: ['<live>/overlay/config/agents.json', '<live>/config/agents.json', '<live>/data/local.env', '<live>/data/tasks/**',
       '**/.claude/settings.json', '**/.claude/settings.local.json', '~/.claude.json', '~/.codex/config.toml', '**/.codex/hooks.json',
       '/Library/Application Support/ClaudeCode/**', '/etc/codex/**',
-      '~/.zshrc', '~/.zshenv', '~/.zprofile', '~/.zlogin', '~/.bashrc', '~/.bash_profile', '~/.profile', '~/.gitconfig',
+      // (the shell reads these before every command an agent runs: an export there reaches the tool's git and not the hook, #572.
+      // git's second settings file is spelled like `**/.git/config`: as `~/.config/git/**` its line would be the folder's path
+      // with no end, which also matches `.config/github-copilot`; as a single file its line would be the bare word `config`)
+      '~/.zshrc', '~/.zshenv', '~/.zprofile', '~/.zlogin', '~/.bashrc', '~/.bash_profile', '~/.bash_login', '~/.profile', '~/.gitconfig', '**/.config/git/config',
       '**/.git/hooks/**', '**/.git/config', '<live>/.git/HEAD', '<live>/.git/index', '<live>/.git/refs/**', '<live>/.git/packed-refs', '<live>/.git/info/**', '<live>/.gitattributes',
-      '~/.config/cmux/**', '~/.cmuxterm/claude-hook-sessions.json', '~/.cmuxterm/codex-hook-sessions.json'],
+      '~/.config/cmux/**', '~/.cmuxterm/claude-hook-sessions.json', '~/.cmuxterm/codex-hook-sessions.json',
+      '~/.cmuxterm/claude-settings/**'],     // the settings files cmux starts its sessions with (`claude --settings <file>`)
   },
 };
 

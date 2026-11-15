@@ -74,9 +74,11 @@ test('setup card: none without a state file; due → warn (skipped required) →
   assert.match(setupCard(doc).detail, /^setup 0\/10 .*\(next: GitHub account\)$/);
   for (const s of STEPS) doc.steps[s.id] = { status: 'done' };
   doc.steps.vault = { status: 'skipped' };
+  assert.equal(setupCard(doc).status, 'ok', 'the vault is optional since 1.3');
+  doc.steps.github = { status: 'skipped' };
   assert.equal(setupCard(doc).status, 'warn');
-  assert.match(setupCard(doc).detail, /skipped: Obsidian vault/);
-  doc.steps.vault = { status: 'done' };
+  assert.match(setupCard(doc).detail, /skipped: GitHub account/);
+  doc.steps.github = { status: 'done' };
   assert.equal(setupCard(doc).status, 'ok');
   assert.equal(summarize(doc).complete, true);
 });

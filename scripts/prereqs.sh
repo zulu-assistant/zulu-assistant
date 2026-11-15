@@ -11,7 +11,7 @@
 set -euo pipefail
 YES=0 DRY=0
 for a in "$@"; do case $a in --yes|-y) YES=1 ;; --dry-run) DRY=1 ;; *) echo "unknown flag $a"; exit 2 ;; esac; done
-CLAUDE_MIN=2.1.280
+CLAUDE_MIN=2.1.295          # onFailure on a hook entry (the gate fails closed when its script cannot start)
 GRAPHIFY_PIN=0.9.83
 SKIP=" ${ZULU_SKIP:-} "
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

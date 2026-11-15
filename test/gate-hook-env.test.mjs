@@ -108,7 +108,8 @@ test('the Node program is the one the registered command names: an assignment on
     assert.equal(verdict(r).permissionDecision, 'deny', JSON.stringify(env.GATE_NODE));
     assert.match(verdict(r).permissionDecisionReason, /^GATE: the hook is registered without the path of its Node program \(GATE_NODE\), and it does not look one up on the session's PATH\. Run scripts\/guardrails-install\.sh again/);
     // a call with no trigger never needed Node, and one that already ran is never answered
-    assert.equal(spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify(pre(FREE)), env, encoding: 'utf8' }).stdout, '');
+    // (made from a folder with no trigger word in its path: this suite also runs in checkouts whose path holds one, #541)
+    assert.equal(spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify({ ...pre(FREE), cwd: '/srv/work' }), env, encoding: 'utf8' }).stdout, '');
     assert.equal(spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify(post(GATED)), env, encoding: 'utf8' }).stdout, '');
   }
   assert.equal(existsSync(marker), false, 'the stand-in on PATH never ran');

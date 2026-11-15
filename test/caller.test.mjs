@@ -23,7 +23,7 @@ import { decisionSurface } from '../src/gate-ledger.mjs';
 import { DEFAULT_POLICY } from '../src/gates.mjs';
 import { localVerdict, sessionWorkspace } from '../scripts/gate-hook.mjs';
 import { OWNER } from '../src/config.mjs';
-import { demoEnv } from './demo-board.mjs';
+import { demoEnv, freePort } from './demo-board.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ip = (...parts) => parts.join('.');               // other tailnet-range addresses, built here so no address literal sits in the file
@@ -601,7 +601,7 @@ test('board down: the hook reads its session from the agent process above it; a 
 
 // ── the running demo board with the door switched on (MC_DEMO_CALLER=1) ──
 test('a running board: an owner decision made from this test process is refused exactly when an agent runs the suite; other writes are untouched', { skip: !HAS_LSOF && 'lsof is not installed', timeout: 60000 }, async () => {
-  const port = 39600 + Math.floor(Math.random() * 90);
+  const port = await freePort();
   const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_DEMO_CALLER: 'observe,agent', MC_PORT: String(port) }), stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   const J = { 'content-type': 'application/json' };
@@ -650,8 +650,8 @@ const leave = (port, pathname, token, body) => new Promise((resolve) => {
   const p = spawn(process.execPath, ['-e', `const s=require('net').connect(${port},'127.0.0.1',()=>s.write(${JSON.stringify(req)},()=>process.exit(0)))`], { stdio: 'ignore' });
   p.on('close', resolve);
 });
-async function demoBoard(switches, portBase) {
-  const port = portBase + Math.floor(Math.random() * 40);
+async function demoBoard(switches) {
+  const port = await freePort();
   const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_DEMO_CALLER: switches, MC_PORT: String(port) }), stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   const J = { 'content-type': 'application/json' };
@@ -676,7 +676,7 @@ async function demoBoard(switches, portBase) {
 
 test('a running board: a decision from a sender that left is refused under "browser"; under "agent" it passes — and is logged, counted and reported as such', { skip: !HAS_LSOF && 'lsof is not installed', timeout: 90000 }, async () => {
   // door at 'browser': the request is handled, and refused — the approval stays undecided
-  const strict = await demoBoard('observe,browser', 39650);
+  const strict = await demoBoard('observe,browser');
   try {
     assert.equal(strict.status.caller.tripwire, 'browser');
     const id = await strict.asking();
@@ -689,7 +689,7 @@ test('a running board: a decision from a sender that left is refused under "brow
   } finally { strict.child.kill(); }
   // door at 'agent' (the shipped setting): nothing can be seen of the sender, so it passes, as a
   // detached command does — but never silently: a would-refuse reading, a line of its own, a count
-  const loose = await demoBoard('observe,agent', 39655);
+  const loose = await demoBoard('observe,agent');
   try {
     assert.equal(loose.status.caller.tripwire, 'agent');
     const id = await loose.asking();
@@ -705,7 +705,7 @@ test('a running board: a decision from a sender that left is refused under "brow
 });
 
 test('a running board, observe: a short-lived command-line caller is looked up BEFORE it gets its answer, so it is still there to be seen', { skip: !HAS_LSOF && 'lsof is not installed', timeout: 60000 }, async () => {
-  const b = await demoBoard('observe,agent', 39560);
+  const b = await demoBoard('observe,agent');
   try {
     assert.equal(b.status.caller.mode, 'observe');
     const id = await b.asking();
@@ -736,8 +736,8 @@ test('the server wires it in: the door stands before the token check, names are 
   assert.match(src, /await decisionDoor\(req, `card action /);
   // a declared name is noted (observe) at each place one is resolved, without holding the request
   // …and BEFORE the answer goes out: a command-line caller exits the moment it has its answer
-  assert.equal((src.match(/await noteCaller\(req, me\.name, /g) || []).length, 5);
-  assert.equal((src.match(/(?<!function )noteCaller\(req, /g) || []).length, 5, 'no call that is not awaited');
+  assert.equal((src.match(/await noteCaller\(req, me\.name, /g) || []).length, 6);   // the sixth: dropping queued messages (slice 2c)
+  assert.equal((src.match(/(?<!function )noteCaller\(req, /g) || []).length, 6, 'no call that is not awaited');
   assert.match(src, /async function noteCaller\(req, declared, what\) \{\n\s*if \(CALLER\.mode !== 'observe'\) return;[^\n]*\n\s*try \{\n\s*const ev = await evidenceOf\(req\);/);
   // the peer is captured when the request arrives, and the lookup can ask the board's own socket whether the sender left
   assert.match(src, /if \(!allowedSource\(req\)\) \{ res\.writeHead\(403\); return res\.end\('forbidden'\); \}\n[^\n]*\n[^\n]*\n\s*req\.peer = \{ address: req\.socket\.remoteAddress, port: req\.socket\.remotePort, localPort: req\.socket\.localPort \};/);
@@ -748,7 +748,7 @@ test('the server wires it in: the door stands before the token check, names are 
   // every door line says what kind of caller the board saw, and why
   assert.match(src, /const from = `\$\{path\.basename\(ev\?\.exe \|\| '\?'\)\} pid \$\{ev\?\.pid \?\? '\?'\} \[\$\{ev\?\.kind \?\? 'none'\}: /);
   // …and checked (mode 'on') at the same five places, before the request is answered
-  assert.equal((src.match(/await nameCheck\(req, /g) || []).length, 5);
+  assert.equal((src.match(/await nameCheck\(req, /g) || []).length, 6);
   assert.match(src, /async function nameCheck\(req, name, what[^\n]*\n\s*if \(CALLER\.mode !== 'on'\) return \{ proven: true, why: '' \};/);
   assert.match(src, /gates\.check\(await readBody\(req\), \{ evidence: CALLER\.mode === 'off' \? null : \(\) => evidenceOf\(req\), names: CALLER\.mode === 'on' \}\)/);
   // the suites are run by agents: a demo board looks at its callers only when a test asks it to

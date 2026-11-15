@@ -35,7 +35,7 @@ test('canonical JSON: key order never matters, values always do; the hash versio
   const h = (toolInput) => cmdHash({ cwd: '/w', tool: MUTATE, toolInput });
   assert.equal(h({ query: 'mutation A', variables: { id: 1 } }), h({ variables: { id: 1 }, query: 'mutation A' }));
   assert.notEqual(h({ query: 'mutation A', variables: { id: 1 } }), h({ query: 'mutation A', variables: { id: 2 } }));
-  assert.equal(HASH_VERSION, 'gate-v2');
+  assert.equal(HASH_VERSION, 'gate-v3');
   // a shell command still binds its text, not its description/timeout
   assert.equal(cmdHash({ cwd: '/w', command: 'gh pr merge 1' }), cmdHash({ cwd: '/w', command: 'gh pr merge 1', toolInput: { command: 'gh pr merge 1', description: 'x' } }));
 });

@@ -9,8 +9,8 @@ This runbook takes a logged-in macOS account to a running Zulu Assistant:
   and so does demo mode. To install without cmux, see §2b (Guardrails only);
 - **Mission Control** and the **Agent Mesh** (see `MISSION-CONTROL.md`, `AGENT-MESH.md`);
 - **the brain**: an Obsidian vault, Graphify and Claude memory (see [BRAIN.md](BRAIN.md)). The board
-  runs without it, but this installer sets it up by default and `zulu setup` treats its two steps as
-  required (see §3 for how to leave it out);
+  runs without it. The default install leaves it out; the full install sets it up (see §3 for how to
+  leave it out there), and in `zulu setup` its two steps are optional;
 - optionally **team chat intake**: teammates post requests in Slack, and they become tasks (see [3c](#3c-optional-team-chat-intake-slack)).
 
 One command does the scriptable work, then a guided setup collects what only you can provide:
@@ -21,13 +21,26 @@ curl -fsSL https://zuluassistant.com/install | bash
 
 Alternative, straight from GitHub: `curl -fsSL https://raw.githubusercontent.com/zulu-assistant/zulu-assistant/main/get.sh | bash`.
 
+That one command is the **light install**: a Node check, your config (`overlay/`), the board as one
+LaunchAgent, and the board opens. Nothing else is installed: no Homebrew packages, nothing in your
+Claude settings, nothing paid. The board shows your live Claude Code sessions, read-only, and a
+*next steps* card. It shows no Guardrails card and, on a Mac without cmux, no cmux card: you asked
+for neither, and the next-steps card names both with their commands. Run it again any time: it
+adds what is missing and removes nothing.
+
+Everything described from §3 on is the **full install**, one flag more:
+
+```bash
+curl -fsSL https://zuluassistant.com/install | bash -s -- --full     # or, from a clone: ./install.sh --full
 ```
-get.sh → clone → install.sh: toolchain (asks once) → overlay/ → agent OS → brain → zulu setup
+
+```
+get.sh → clone → install.sh --full: toolchain (asks once) → overlay/ → agent OS → brain → zulu setup
 zulu setup: GitHub → engines (Claude / Codex) → you + policy → what to watch → alerts
             → vault → Graphify + memory → macOS permissions → residents → verify + Mission Control
 ```
 
-Already cloned? `./install.sh` from the checkout does the same. This document explains each piece
+Already cloned? `./install.sh` (light) or `./install.sh --full` from the checkout does the same. This document explains each piece
 and what the setup cannot automate.
 
 ## 1. Prerequisites
@@ -37,7 +50,7 @@ and what the setup cannot automate.
 | macOS | 26 (tested on 26.6) | launchd and TCC behaviour described here; older versions are untested | — |
 | Homebrew | any | installs cmux, gh, uv | https://brew.sh |
 | Node | **22** (nvm recommended) | zero-dependency server; launchd has no shell profile, so `scripts/env.sh` resolves Node itself (nvm pin → newest nvm → Homebrew) | `nvm install 22` |
-| Claude Code | **≥ 2.1.280** (tested 2.1.296) | current model IDs need it; the mesh's readiness kick works around a 2.1.280 unsubmitted-prompt bug | `npm i -g @anthropic-ai/claude-code` |
+| Claude Code | **≥ 2.1.295** (tested 2.1.321) | the gate hook's entries use `onFailure`, which needs it (in 1.3; 1.2.0 needs ≥ 2.1.280 for the current model IDs) | `npm i -g @anthropic-ai/claude-code` |
 | cmux | **0.65.x** (0.64.x also works) | the code works around specific cmux quirks (see CMUX-SETUP.md) | `brew install --cask cmux` |
 | gh | any, logged in | clone, PRs, Actions secrets for the dead-man switch | `brew install gh` |
 | Codex CLI | optional to run, tested 0.162.1; installed by default (`ZULU_SKIP=codex` leaves it out) | Codex as Mission Control / worker engine, Codex panes | `npm i -g @openai/codex` |
@@ -95,7 +108,7 @@ your ledger and policy stay.
 ## 3. Full install
 
 ```bash
-./install.sh
+./install.sh --full
 ```
 
 In order, it:
@@ -154,10 +167,10 @@ without it, unload it after the install: `launchctl bootout gui/$(id -u)/<prefix
 (On a test account, `scripts/bootstrap.sh install --sandbox` skips it, along with the vault's backup job.) Nothing else the
 installer loads calls a paid service.
 
-**To leave the brain out:** `ZULU_SKIP="obsidian graphify uv" ./install.sh` keeps those tools off the
+**To leave the brain out:** `ZULU_SKIP="obsidian graphify uv" ./install.sh --full` keeps those tools off the
 machine. The skills and hook guards in step 4 are still copied; remove them from `~/.claude/` if you do
-not want them. In `zulu setup`, the vault and brain steps are marked required: skip them and the setup
-card stays open.
+not want them. In `zulu setup`, the vault and brain steps are optional: skip them and the setup card
+still closes.
 
 ### Your configuration
 
@@ -309,7 +322,7 @@ No script can do these. Do them early; some need an app relaunch.
    osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/cmux.app", hidden:false}'
    ```
 3. **Logins**: `gh auth login`; `claude`, then `/login`; `codex login` if you use Codex.
-4. **First cmux launch**: `open -a cmux`, then run `./install.sh` again. With the socket up it applies
+4. **First cmux launch**: `open -a cmux`, then run `./install.sh --full` again. With the socket up it applies
    pane chrome and validates the sidebar. Choosing the Dock or the phosphor sidebar is your click;
    agents never switch them.
 5. **Power chain (optional, recommended for an always-on Mac)**:
@@ -435,7 +448,7 @@ It runs the steps below for you, adds migrations and a test run, and rolls back 
 ./install.sh backup                       # a restore point first
 git pull --ff-only                        # the new release
 node scripts/migrate.mjs                  # data and overlay migrations (the one-click path runs these itself)
-./install.sh                              # re-runs the idempotent install steps (never overwrites your overlay/)
+./install.sh --full                       # re-runs the idempotent install steps (never overwrites your overlay/); plain ./install.sh on a light install
 launchctl kickstart -k gui/$(id -u)/<prefix>.master-console   # restart the board on the new code
 ./install.sh verify
 ```

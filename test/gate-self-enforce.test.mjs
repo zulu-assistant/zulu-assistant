@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, writeFileSync, realpathSync, existsSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -137,6 +137,34 @@ test('the three files of the settings-change check are on the gate code list, in
   }
 });
 
+// #571: the list had the files somebody thought of. The receipt chain, which decides whether an approval may run,
+// was not on it; seven more modules the gate loads were not either.
+test('every module the gate service and the two hook programs load is on the gate code list, in the default and its twin', () => {
+  const seen = new Set();
+  const walk = (rel) => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    const src = readFileSync(path.join(ROOT, rel), 'utf8');
+    for (const m of src.matchAll(/\bfrom\s*['"](\.{1,2}\/[^'"]+)['"]|\bimport\s*\(?\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
+      const next = path.join(path.dirname(rel), m[1] || m[2]);
+      if (existsSync(path.join(ROOT, next))) walk(next);
+    }
+  };
+  for (const root of ['src/gate-service.mjs', 'scripts/gate-hook.mjs', 'scripts/gate-config-hook.mjs']) walk(root);
+  assert.ok(seen.size >= 17, `the walk found ${seen.size} modules`);
+  const twin = JSON.parse(readFileSync(path.join(ROOT, 'examples', 'policy.json'), 'utf8'));
+  for (const [name, list] of [['the code default', DEFAULT_POLICY.lists.gateCode], ['examples/policy.json', twin.lists.gateCode]]) {
+    const missing = [...seen].filter((f) => !list.includes(`<live>/${f}`)).sort();
+    assert.deepEqual(missing, [], `${name}: the gate loads these and its gateCode list does not name them (add each as <live>/…, in both files, and regenerate scripts/gate-triggers.default)`);
+  }
+  assert.deepEqual(twin.lists.gateCode, DEFAULT_POLICY.lists.gateCode);
+  // each is then a guarded write in the live checkout and free in a worktree
+  for (const f of ['src/receipt-chain.mjs', 'src/row-context.mjs', 'src/private-file.mjs', 'src/secret-text.mjs', 'src/profile.mjs', 'src/completion-packet.mjs', 'src/upgrade.mjs', 'src/worktree.mjs']) {
+    const r = file('Edit', `${L}/${f}`); assert.equal(r.verdict, 'gate', f); assert.equal(r.check, 'selfProtect');
+    assert.equal(file('Edit', `${W}/${f}`).verdict, 'clear', `worktree copy: ${f}`);
+  }
+});
+
 // ── the real hook script with real hook JSON, board down ──
 const HOOK_FILES = ['scripts/gate-hook.sh', 'scripts/gate-hook.mjs', 'scripts/gate-triggers.default', 'src/gates.mjs', 'src/caller.mjs'].filter((f) => existsSync(new URL(`../${f}`, import.meta.url)));
 test('real hook JSON, board down: the new forms reach the Node step and are denied at enforce; off and observe answer alike; ordinary calls never start Node', () => {
@@ -182,4 +210,76 @@ test('the 6c lines while the check only observes: they route the call and never 
   const body = py(`print(open("${L}/.git/HEAD").read())`);
   const enf = bash(body, 'enforce', W); assert.equal(enf.verdict, 'gate', enf.why); assert.equal(enf.check, 'selfProtect');
   assert.equal(bash(body, 'off', W).verdict, 'clear'); assert.equal(bash(body, 'observe', W).verdict, 'clear'); assert.equal(bash(body, 'observe', W).wouldHold?.check, 'selfProtect');
+});
+
+// ── slice 6d (task #516): four more forms from the review of slice 6c ──
+test('6d.1: sparse-checkout in the live checkout takes files out of the work tree', () => {
+  for (const c of ['git sparse-checkout set docs', 'git sparse-checkout init --cone', 'git sparse-checkout init', 'git sparse-checkout add docs', 'git sparse-checkout reapply', 'git sparse-checkout set --no-cone "/*" "!scripts/"']) held(c);
+  held(`git -C "${L}" sparse-checkout set docs`, W);
+  for (const c of ['git sparse-checkout list', 'git sparse-checkout disable', 'git sparse-checkout']) free(c);
+  for (const c of ['git sparse-checkout set docs', 'git sparse-checkout init --cone']) free(c, W);
+});
+
+test('6d.2: the live repo\'s git dir with another work tree: its HEAD and index move', () => {
+  for (const c of [`git --git-dir="${L}/.git" --work-tree=/tmp/x reset --hard some-branch`, `git --git-dir="${L}/.git" --work-tree=/tmp/x reset some-branch`, `git --git-dir="${L}/.git" --work-tree=/tmp/x checkout some-branch`,
+    `git --work-tree=/tmp/x --git-dir="${L}/.git" checkout -b other`, `git --git-dir="${L}/.git" --work-tree=/tmp/x switch other`, `git --git-dir="${L}/.git" --work-tree=/tmp/x update-ref HEAD abc123`,
+    `git --git-dir="${L}/.git" --work-tree=/tmp/x read-tree some-branch`, `GIT_DIR="${L}/.git" GIT_WORK_TREE=/tmp/x git reset --hard some-branch`, `git --git-dir "${L}/.git" --work-tree /tmp/x merge some-branch`]) held(c, W);
+  // reads through that pairing, and a write that leaves the live HEAD and index alone
+  for (const c of [`git --git-dir="${L}/.git" --work-tree=/tmp/x status`, `git --git-dir="${L}/.git" --work-tree=/tmp/x diff`, `git --git-dir="${L}/.git" --work-tree=/tmp/x log -1`,
+    `git --git-dir="${L}/.git" --work-tree=/tmp/claude-x/tree checkout -- .`]) free(c, W);
+  // another repo's git dir with another work tree is none of the gate's business
+  free('git --git-dir=/tmp/other/.git --work-tree=/tmp/x reset --hard some-branch', W);
+});
+
+test('6d.3: a write target that starts with a command substitution follows the tail rule', () => {
+  for (const c of ['echo x > "$(git rev-parse --show-toplevel)/src/gates.mjs"', 'cp /tmp/g "$(git rev-parse --show-toplevel)/src/gates.mjs"', 'echo x > `git rev-parse --show-toplevel`/server.mjs', 'tee "$(dirname "$0")/scripts/gate-hook.sh" < /tmp/h',
+    'cp /tmp/g "$(realpath .)/src/gates.mjs"', 'echo x >> "$(cd .. && pwd)/Board Dir/src/gates.mjs"', 'sed -i "" s/a/b/ "$(git rev-parse --show-toplevel)/server.mjs"']) held(c);
+  for (const c of ['echo x > "$(git rev-parse --show-toplevel)/docs/notes.md"', 'cp /tmp/g "$(mktemp -d)/gates.txt"', 'echo x > "$(git rev-parse --show-toplevel)/README.md"', 'cat "$(git rev-parse --show-toplevel)/src/gates.mjs"']) free(c);
+});
+
+test('6d.4: a variable set in the same call as the whole write target is read as its value', () => {
+  for (const c of ['F=src/gates.mjs; echo x > $F', 'F=src/gates.mjs; echo x > "$F"', 'F=src/gates.mjs\necho x >> "${F}"', `T="${L}/server.mjs"; cp /tmp/g "$T"`, 'D=src; cp /tmp/g $D/gates.mjs', 'D=src && tee "$D/gates.mjs" < /tmp/g',
+    'F=server.mjs; sed -i "" s/a/b/ "$F"', 'F=scripts/gate-hook.sh; rm "$F"', 'OUT=public; cp -R /tmp/site/. "$OUT"']) held(c);
+  held(`T="${L}/server.mjs"; cp /tmp/g "$T"`, W);
+  for (const c of ['F=docs/notes.md; echo x > $F', 'F=/tmp/claude-x/out.txt; echo x > "$F"', 'D=docs; cp /tmp/g $D/a.md', 'F=src/gates.mjs; cat "$F"', 'F=src/gates.mjs; wc -l $F']) free(c);
+  for (const c of ['F=src/gates.mjs; echo x > $F', 'D=src; cp /tmp/g $D/gates.mjs']) free(c, W);
+});
+
+test('6d.4, the review of PR 130: a value read from an assignment may add a hold and never removes one', () => {
+  // each of these is held on main by the text as written (a variable in front of a guarded tail) and must stay held,
+  // whatever value the gate could read: the value at the write is not always the one read
+  for (const c of ['D=src; cp /tmp/g $D/gates.mjs; D=docs', 'D=docs; if true; then D=src; fi; cp /tmp/g $D/gates.mjs', 'D=docs; export D=src; cp /tmp/g $D/gates.mjs', 'D=docs; declare D=src; cp /tmp/g $D/gates.mjs',
+    'D=docs; printf -v D %s src; cp /tmp/g $D/gates.mjs', 'D=docs; eval D=src; cp /tmp/g $D/gates.mjs', 'D=docs; read D < /tmp/name; cp /tmp/g $D/gates.mjs', 'D=docs; D=$(cat /tmp/name); cp /tmp/g $D/gates.mjs',
+    'D=docs; D=src; cp /tmp/g $D/gates.mjs', 'D=docs; cp /tmp/g $D/gates.mjs', 'D=docs; for D in src; do cp /tmp/g $D/gates.mjs; done', 'D=docs; unset D; cp /tmp/g $D/gates.mjs', 'D=docs; (D=src; cp /tmp/g $D/gates.mjs)']) held(c);
+  // the gain: the whole target in a variable. Every value the name is given in the call is read, so the order does not matter
+  for (const c of ['F=docs/a.md; F=src/gates.mjs; echo x > $F', 'F=src/gates.mjs; echo x > $F; F=docs/a.md', 'F=docs/a.md; if true; then F=src/gates.mjs; fi; echo x > $F', 'F=docs/a.md; export F=server.mjs; echo x > "$F"',
+    'declare F=src/gates.mjs; echo x > $F', 'F=docs/a.md; eval F=src/gates.mjs; echo x > $F']) held(c);
+  // a name in the middle of a target stays the unknown name it was on main (no relief is taken from a value read)
+  held('N=3; echo x > out-$N.txt'); held('echo x > out-$N.txt');
+});
+
+test('6d.3, the review of PR 130: any balanced substitution in front of a guarded tail follows the tail rule', () => {
+  for (const c of ['echo x > "$(cd "$(dirname "$(pwd)/x")" && pwd)/src/gates.mjs"', 'cp /tmp/g "$(echo "$(echo "$(echo a)")")/server.mjs"', 'echo x > "$( (cd .. && pwd) )/Board Dir/src/gates.mjs"', 'tee "$(f "$(g)" "$(h "$(i)")")/scripts/gate-hook.sh" < /tmp/h']) held(c);
+  for (const c of ['echo x > "$(cd "$(dirname "$(pwd)/x")" && pwd)/docs/notes.md"', 'cat "$(cd "$(dirname "$(pwd)/x")" && pwd)/src/gates.mjs"']) free(c);
+});
+
+test('6d: real hook JSON, board down: the four forms are denied at enforce and silent in off and observe', () => {
+  const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'gate 6d-')));
+  const dirs = {};
+  for (const m of ['off', 'observe', 'enforce']) {
+    const dir = path.join(base, m, 'Board Dir');
+    for (const f of HOOK_FILES) cpSync(path.join(ROOT, f), path.join(dir, f));
+    writeFileSync(path.join(dir, 'policy.json'), JSON.stringify(policyAt(m)));
+    mkdirSync(path.join(dir, 'data', 'guardrails'), { recursive: true });
+    writeFileSync(path.join(dir, 'data', 'guardrails', 'triggers'), triggerLines(policyAt(m), { boardRoot: dir, home: os.homedir() }).join('\n') + '\n');
+    dirs[m] = dir;
+  }
+  const env = { ...process.env, GATE_NODE: process.execPath, MESH_BOARD: 'http://127.0.0.1:9', GATE_TIMEOUT_MS: '300', CMUX_WORKSPACE_ID: '', MESH_GATE_IDENTITY: '', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const run = (dir, command, cwd = dir) => spawnSync('sh', [path.join(dir, 'scripts', 'gate-hook.sh'), '--env-board'], { input: JSON.stringify({ session_id: 's', transcript_path: '/t.jsonl', cwd, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command, description: 'x' } }), env, encoding: 'utf8' }).stdout;
+  const decision = (out) => (out ? JSON.parse(out).hookSpecificOutput.permissionDecision : 'pass');
+  const rows = (dir) => [['git sparse-checkout set docs', dir], ['git sparse-checkout init --cone', dir], [`git --git-dir="${dir}/.git" --work-tree=/tmp/x reset --hard some-branch`, os.tmpdir()],
+    ['echo x > "$(git rev-parse --show-toplevel)/src/gates.mjs"', dir], ['F=src/gates.mjs; echo x > $F', dir], [`T="${dir}/server.mjs"; cp /tmp/g "$T"`, os.tmpdir()]];
+  for (const [c, cwd] of rows(dirs.enforce)) assert.equal(decision(run(dirs.enforce, c, cwd)), 'deny', `enforce: ${c}`);
+  for (const m of ['off', 'observe']) for (const [c, cwd] of rows(dirs[m])) assert.equal(run(dirs[m], c, cwd), '', `${m}: ${c}`);
+  for (const [c, cwd] of [['git sparse-checkout list', dirs.enforce], ['F=docs/notes.md; echo x > $F', dirs.enforce], ['npm test', dirs.enforce]]) assert.equal(run(dirs.enforce, c, cwd), '', c);
 });

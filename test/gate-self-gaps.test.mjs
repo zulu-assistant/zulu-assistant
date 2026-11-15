@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, writeFileSync, realpathSync, existsSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -98,6 +98,25 @@ test('5. bulk writers into the checkout, a patch that names no file, and two red
     'rsync -a src/ /tmp/backup/', 'patch -p1 --dry-run -d /tmp/other < /tmp/fix.diff', 'exec > /tmp/log.txt', 'echo x >| /tmp/out.txt']) free(c);
   for (const c of ['cp -R /tmp/src .', 'tar -xf /tmp/x.tar', 'patch -p1 < /tmp/fix.diff', 'exec > server.mjs', 'rsync -a /tmp/x/ src/']) free(c, W);
   assert.deepEqual(parseCommand('echo x >| out.txt').cmds.map((c) => [c.bin, c.redirects]), [['echo', ['out.txt']]]);
+});
+
+// #572: an export in a shell start file reaches the git of every later tool call and not the hook's own process
+// (seen in a scratch probe), and git's own settings files can send a push elsewhere: writes to them are guarded
+test('6. the files a shell or git reads at start are guarded, in the default and its twin', () => {
+  const twin = JSON.parse(readFileSync(new URL('../examples/policy.json', import.meta.url), 'utf8'));
+  const START = ['~/.zshenv', '~/.zshrc', '~/.zprofile', '~/.zlogin', '~/.bashrc', '~/.bash_profile', '~/.bash_login', '~/.profile', '~/.gitconfig', '**/.config/git/config', '~/.codex/config.toml'];
+  for (const list of [DEFAULT_POLICY.lists.guardGate, twin.lists.guardGate]) for (const f of START) assert.ok(list.includes(f), f);
+  for (const c of ["echo 'export GIT_DIR=/b/.git' >> ~/.zshenv", "printf 'export GIT_WORK_TREE=/w\\n' >> $HOME/.bash_login", 'cp /tmp/p ~/.zprofile', 'tee -a ~/.profile < /tmp/x',
+    'mkdir -p ~/.config/git && printf "[url \\"x\\"]\\n" >> ~/.config/git/config', 'cp /tmp/c ~/.config/git/config', 'sed -i "" s/a/b/ ~/.gitconfig']) held(c);
+  for (const c of ['cat ~/.zshenv', 'grep -c export ~/.bash_login', 'cat ~/.config/git/config', 'ls ~/.config/git', 'echo x > ~/.config/gh/notes.txt', 'echo x > ~/.bash_history_notes',
+    'echo x > ~/.config/github-copilot/apps.json', 'cp /tmp/c ~/.config/gitui/key_bindings.ron', 'echo x > ~/.config/git/ignore']) free(c);
+  // the fast path: git's settings file is routed; a folder whose name only starts the same way is not (Mission Control's read of the first head)
+  const lines = compileTriggers(DEFAULT_POLICY, {});
+  const routed = (c) => lines.filter((t) => t.re.test(normalizeForTriggers(`tool_name:Bash ${c} `))).map((t) => t.ere);
+  assert.deepEqual(routed('cat ~/.config/git/config'), ['\\.config/git/config']);
+  assert.deepEqual(routed('printf x >> $HOME/.config/git/config'), ['\\.config/git/config']);
+  for (const c of ['ls ~/.config/github-copilot/x', 'cat ~/.config/gitui/theme.ron', 'ls ~/.config/git', 'cat ~/.config/gh/config.yml', 'cat app/config/gitconfig.txt']) assert.deepEqual(routed(c), [], c);
+  assert.ok(routed('echo x >> ~/.bash_login').length === 1);
 });
 
 test('6. a variable in the target: $HOME and $PWD are known; any other one with a guarded file name behind it asks', () => {

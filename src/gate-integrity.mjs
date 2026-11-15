@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 
 export const MAX_HEADS = 20;
 export const DEFAULT_BEHIND_MINUTES = 30;
+export const DEFAULT_START_SETTINGS_DIRS = ['~/.cmuxterm/claude-settings'];
 
 /** The git blob id of a file's bytes: sha1("blob <size>\0" + bytes) — sha256 for a repo that uses it. */
 export function blobId(buf, algo = 'sha1') {
@@ -47,6 +48,8 @@ export function integritySettings(cfg) {
     readEveryMinutes: num(c.readEveryMinutes, 10, 1),
     branch: typeof c.branch === 'string' && c.branch ? c.branch : null,          // null = the remote's default branch
     remote: typeof c.remote === 'string' && c.remote ? c.remote : 'origin',
+    // folders that hold settings files sessions are STARTED with (`claude --settings <file>`); cmux keeps its own there
+    startSettingsDirs: Array.isArray(c.startSettingsDirs) ? c.startSettingsDirs.filter((d) => typeof d === 'string' && d) : DEFAULT_START_SETTINGS_DIRS,
   };
 }
 
@@ -184,7 +187,7 @@ export function hookEntries(settings) {
   const hooks = settings && typeof settings === 'object' && settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {};
   for (const [event, groups] of Object.entries(hooks)) {
     for (const g of Array.isArray(groups) ? groups : []) {
-      for (const h of Array.isArray(g?.hooks) ? g.hooks : []) if (h && typeof h.command === 'string') out.push({ event, matcher: typeof g.matcher === 'string' ? g.matcher : '', command: h.command });
+      for (const h of Array.isArray(g?.hooks) ? g.hooks : []) if (h && typeof h.command === 'string') out.push({ event, matcher: typeof g.matcher === 'string' ? g.matcher : '', command: h.command, onFailure: typeof h.onFailure === 'string' ? h.onFailure : null });
     }
   }
   return out;
@@ -201,6 +204,7 @@ export function registrationProblems(settings, { repo, codex = false, configHook
   const problems = [];
   if (!codex && settings.disableAllHooks === true) problems.push('the user settings file sets disableAllHooks');
   if (!codex && hookEnvSet(settings).length) problems.push(`the user settings file sets ${hookEnvSet(settings).join(', ')} in env: ${ENV_WHY}`);
+  if (!codex && gitEnvSet(settings).strict.length) problems.push(`the user settings file sets ${gitEnvSet(settings).strict.join(', ')} in env: ${GIT_WHY}`);
   const entries = hookEntries(settings);
   for (const [event, tools] of Object.entries(MUST_COVER)) {
     const mine = entries.filter((e) => e.event === event && isHookCommand(e.command, repo));
@@ -217,6 +221,19 @@ export function registrationProblems(settings, { repo, codex = false, configHook
   if (configHook && !codex && !entries.some((e) => e.event === 'ConfigChange' && isHookCommand(e.command, repo, CONFIG_HOOK) && e.matcher === ''))
     problems.push('ConfigChange does not run this checkout\'s settings-change hook');
   return { ok: problems.length === 0, problems };
+}
+
+/**
+ * The two entries that can STOP something, when they are registered for this checkout WITHOUT
+ * `onFailure: "block"` (Claude Code 2.1.295 or later). Without the field a hook whose script cannot
+ * start, or that answers after its time limit, lets the call run (seen live on Claude Code 2.1.321).
+ * An install made before the field existed lacks it until the installer is run again.
+ * → ['the gate hook', 'the settings-change hook'] (those that lack it; an entry that is not registered at all is not listed here)
+ */
+export function failOpenEntries(settings, { repo } = {}) {
+  const entries = hookEntries(settings);
+  const lacks = (event, script) => entries.some((e) => e.event === event && isHookCommand(e.command, repo, script) && e.onFailure !== 'block');
+  return [...(lacks('PreToolUse', GATE_HOOK) ? ['the gate hook'] : []), ...(lacks('ConfigChange', CONFIG_HOOK) ? ['the settings-change hook'] : [])];
 }
 
 /** The two settings files of a repo that a session there reads on top of the user's own. */
@@ -239,11 +256,42 @@ export function hookEnvSet(settings) {
   const env = settings && typeof settings === 'object' && settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
   return HOOK_ENV.filter((k) => Object.prototype.hasOwnProperty.call(env, k));
 }
+/**
+ * git's own variables in a settings file's `env` block (#572). The block reaches the shell every tool call runs
+ * in, from the session's first call (seen on Claude Code 2.1.321: from folder A, `git remote get-url origin`
+ * answered with repository B's address). The board reads a call's repository with its own git, in its own
+ * environment, by the call's folder. So with one of these set, the board judges repository A while git acts on B.
+ *   strict  point every git call of the session at another repository, index or object store, or put settings
+ *           into it. Nobody has an ordinary reason to set them for a whole session: red, and the change is refused.
+ *   soft    change how git reaches a remote or which settings file it reads. People do set them (a deploy key,
+ *           a proxy, a settings file of their own), and each can also send a push somewhere else: a note, no colour.
+ * Not here: names that only change what git shows or asks (GIT_PAGER, GIT_EDITOR, GIT_TERMINAL_PROMPT, GIT_AUTHOR_*).
+ */
+export const GIT_STEER_ENV = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_NAMESPACE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS'];
+const GIT_STEER_NUMBERED = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
+export const GIT_SOFT_ENV = ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_PROXY_COMMAND', 'GIT_EXEC_PATH'];
+const GIT_WHY = 'git then acts on another repository or with other settings than the folder\'s, and the board, which reads the folder, does not see it';
+const GIT_SOFT_WHY = 'git then reaches its remotes or reads its settings another way than the board does when it reads a push';
+/** Which of them a settings file sets → { strict: [names], soft: [names] }. Names only: a value is never read into a message. */
+export function gitEnvSet(settings) {
+  const env = settings && typeof settings === 'object' && settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {};
+  const names = Object.keys(env);
+  return { strict: names.filter((k) => GIT_STEER_ENV.includes(k) || GIT_STEER_NUMBERED.test(k)).sort().slice(0, 12), soft: names.filter((k) => GIT_SOFT_ENV.includes(k)).sort() };
+}
 /** Why a settings file of any level switches the gate off or steers it (a clause after the file's name), or null. */
 export function settingsProblem(settings) {
   if (disablesHooks(settings)) return 'sets disableAllHooks, which switches the gate hook off';
   const env = hookEnvSet(settings);
-  return env.length ? `sets ${env.join(', ')} in env: ${ENV_WHY}` : null;
+  const git = gitEnvSet(settings).strict;
+  const parts = [];
+  if (env.length) parts.push(`sets ${env.join(', ')} in env: ${ENV_WHY}`);
+  if (git.length) parts.push(`sets ${git.join(', ')} in env: ${GIT_WHY}`);
+  return parts.length ? parts.join('; and it ') : null;
+}
+/** What a settings file does that the owner should know and nobody is stopped for (a clause after the file's name), or null. */
+export function settingsNote(settings) {
+  const soft = gitEnvSet(settings).soft;
+  return soft.length ? `sets ${soft.join(', ')} in env: ${GIT_SOFT_WHY}` : null;
 }
 
 /**
@@ -292,6 +340,131 @@ export function sessionVerdict({ changed, others = [], repo }) {
     return { block: true, why: `${what}; letting this change through would make the session read that file again`, file: o.file };
   }
   return { block: false, why: '', file: null };
+}
+
+// ── the settings a session is STARTED with (pure) ───────────────────────────
+// `claude --settings <file or JSON>` is one more settings source, ranked above the user, project
+// and local files; cmux starts every session that way. Seen on Claude Code 2.1.321:
+// `disableAllHooks` there, as a file or as JSON text on the command line, silences the
+// user-level gate hook from the session's first call, and its `env` block reaches every hook
+// process. It is read ONCE, at the start: a later change to the file reaches no running session,
+// fires no ConfigChange event, and is not picked up when another settings change is re-read. So
+// the settings-change hook has nothing to judge here; the card reads what each running session was
+// started with, and the folders such files are kept in for the next start.
+/** Is this process a Claude Code session, by its command line (`ps -o args=`)? The program itself, or Node running it. */
+export const isClaudeCommand = (args) => /^(?:\S*\/)?claude(?:\s|$)/.test(String(args || '')) || /^(?:\S*\/)?node\s+\S*(?:\/claude|claude-code\/cli\.js)(?:\s|$)/.test(String(args || ''));
+
+/** The JSON object that starts at text[0] === '{', by its own braces and strings; null when it never closes. */
+function jsonPrefix(text) {
+  let depth = 0; let inStr = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (inStr) { if (c === '\\') i += 1; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true;
+    else if (c === '{') depth += 1;
+    else if (c === '}') { depth -= 1; if (depth === 0) return text.slice(0, i + 1); }
+  }
+  return null;
+}
+
+/**
+ * Every `--settings` value on a session's command line, as `ps` prints it: the arguments joined by
+ * spaces, their quoting lost. So a value is read two ways:
+ *   inline   it starts with `{`: the JSON text itself (there is no file)
+ *   file     a path; with the quoting lost a space may belong to it, so `candidates` holds the
+ *            first word, the first two words, … up to the next word that starts with `-`
+ * → [{ inline: text|null (null = not readable as JSON) } | { candidates: [path, …] }]
+ */
+export function startSettingsArgs(args) {
+  const out = [];
+  const text = String(args || '');
+  const re = /(?:^|\s)--settings(?:=|\s+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const rest = text.slice(re.lastIndex);
+    if (rest.startsWith('{')) { out.push({ inline: jsonPrefix(rest) }); continue; }
+    const words = rest.split(' ');
+    const candidates = [];
+    for (let i = 0; i < words.length && i < 12; i += 1) {
+      if (i > 0 && words[i].startsWith('-')) break;
+      const c = words.slice(0, i + 1).join(' ');
+      if (c.trim()) candidates.push(c);
+    }
+    out.push({ candidates });
+  }
+  return out;
+}
+
+/** The sessions whose `--settings` value is a relative path: only for these does anyone need to know the session's folder. → [pid] */
+export function needsCwd(procs = []) {
+  const out = [];
+  for (const p of procs) {
+    if (!isClaudeCommand(p.args)) continue;
+    if (startSettingsArgs(p.args).some((f) => !('inline' in f) && f.candidates.length && !f.candidates[0].startsWith('/') && !f.candidates[0].startsWith('~/'))) out.push(p.pid);
+  }
+  return out;
+}
+
+/**
+ * The sessions that were started with settings of their own, and what those settings do.
+ *   procs     [{ pid, args }]                  every process (`ps -axww -o pid=,args=`)
+ *   readJson  (absolute path) → object | null  null = missing or not JSON
+ *   cwdOf     (pid) → folder | null            asked only for a relative path (`needsCwd`); it must answer at once, from
+ *                                              what the caller already looked up: this function never waits
+ *   dirs      [{ dir, files: [name] }]         folders that hold such files (cmux's): read whether or not a session uses them now
+ * → { problems: [text], notes: [text], files: [paths read], sessions: n }
+ * A problem is red on the card. A value the board cannot read is a note: it cannot say what it holds.
+ */
+export function startSettingsScan({ procs = [], readJson = () => null, cwdOf = () => null, dirs = [], home = '' } = {}) {
+  const short = (f) => (home && f.startsWith(`${home}/`) ? `~${f.slice(home.length)}` : f);
+  const byFile = new Map();           // file → { pids, why }
+  const problems = []; const notes = [];
+  let sessions = 0; let inlineBad = 0; let unread = 0;
+  for (const p of procs) {
+    if (!isClaudeCommand(p.args)) continue;
+    const found = startSettingsArgs(p.args);
+    if (!found.length) continue;
+    sessions += 1;
+    for (const f of found) {
+      if ('inline' in f) {
+        let j = null;
+        try { j = f.inline ? JSON.parse(f.inline) : null; } catch { j = null; }
+        const why = j ? settingsProblem(j) : null;
+        if (why) problems.push(`session ${p.pid} was started with settings on its command line that ${why.replace(/^sets /, 'set ')}`);
+        else if (!j) inlineBad += 1;
+        const soft = j ? settingsNote(j) : null;
+        if (soft) notes.push(`session ${p.pid} was started with settings on its command line that ${soft.replace(/^sets /, 'set ')}`);
+        continue;
+      }
+      // the first candidate that is a readable settings file; a relative one is read from the session's own folder
+      let hit = null;
+      for (const c of f.candidates) {
+        let abs = c.startsWith('~/') && home ? `${home}${c.slice(1)}` : c;
+        if (!abs.startsWith('/')) { const cwd = cwdOf(p.pid); if (!cwd) continue; abs = `${String(cwd).replace(/\/+$/, '')}/${abs.replace(/^\.\//, '')}`; }
+        const j = readJson(abs);
+        if (j && typeof j === 'object') { hit = { file: abs, j }; break; }
+      }
+      if (!hit) { unread += 1; continue; }
+      const row = byFile.get(hit.file) || { pids: [], why: settingsProblem(hit.j), note: settingsNote(hit.j) };
+      row.pids.push(p.pid);
+      byFile.set(hit.file, row);
+    }
+  }
+  for (const d of dirs) for (const name of d.files || []) {
+    const file = `${String(d.dir).replace(/\/+$/, '')}/${name}`;
+    if (byFile.has(file)) continue;
+    const j = readJson(file);
+    if (j && typeof j === 'object') byFile.set(file, { pids: [], why: settingsProblem(j), note: settingsNote(j) });
+  }
+  for (const [file, row] of byFile) {
+    if (row.note) notes.push(`${short(file)} ${row.note}`);
+    if (!row.why) continue;
+    const who = row.pids.length ? `${row.pids.length} running session${row.pids.length === 1 ? ' was' : 's were'} started with it` : 'the next session started with it';
+    problems.push(`${short(file)} ${row.why} (${who})`);
+  }
+  if (unread) notes.push(`${unread} session${unread === 1 ? ' was' : 's were'} started with a settings file the board cannot read`);
+  if (inlineBad) notes.push(`${inlineBad} session${inlineBad === 1 ? ' was' : 's were'} started with settings text the board cannot read`);
+  return { problems, notes, files: [...byFile.keys()], sessions };
 }
 
 // ── the port (pure) ─────────────────────────────────────────────────────────
@@ -398,15 +571,18 @@ export function createGateIntegrity({ root, files, git, readFile, readState, wri
     if (!ancestorCache.has(key)) { if (ancestorCache.size > 500) ancestorCache.clear(); ancestorCache.set(key, git(['merge-base', '--is-ancestor', a, b]) !== null); }
     return ancestorCache.get(key);
   };
+  // (kept per commit AND file list: a file newly on the list is not in what was read for the old list, and
+  // read from that it looked changed until the board restarted; seen when a rules file gained an entry, #571)
   const treeOf = (commit, paths) => {
-    if (!treeCache.has(commit)) {
+    const key = `${commit}\n${paths.join('\n')}`;
+    if (!treeCache.has(key)) {
       if (treeCache.size > 40) treeCache.clear();
       const out = git(['ls-tree', '-r', commit, '--', ...paths]);
       const m = new Map();
       for (const line of String(out || '').split('\n')) { const x = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line); if (x) m.set(x[2], x[1]); }
-      treeCache.set(commit, m);
+      treeCache.set(key, m);
     }
-    return treeCache.get(commit);
+    return treeCache.get(key);
   };
 
   /** Ask the remote for its head: every `readEveryMinutes`, or now when `force` (a merge was just released). */

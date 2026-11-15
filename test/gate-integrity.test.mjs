@@ -13,8 +13,9 @@ import { fileURLToPath } from 'node:url';
 import {
   blobId, algoOf, integritySettings, noteHead, newestHead, fileState, judge, MAX_HEADS, createGateIntegrity,
   CLAUDE_MATCHER, isHookCommand, matcherCovers, hookEntries, registrationProblems, disablesHooks, configChangeVerdict, portProblem,
-  HOOK_ENV, hookEnvSet, settingsProblem, sessionVerdict, isBareHookCommand,
+  HOOK_ENV, hookEnvSet, settingsProblem, settingsNote, gitEnvSet, GIT_STEER_ENV, GIT_SOFT_ENV, sessionVerdict, isBareHookCommand,
   gatePaths, remoteTarget, readRemoteRef, integrityCard, OWN_FILES, CONFIG_HOOK,
+  isClaudeCommand, startSettingsArgs, startSettingsScan, DEFAULT_START_SETTINGS_DIRS, needsCwd,
 } from '../src/gate-integrity.mjs';
 import { settingsFileFor, sessionFolders, judgeChange, blockOutput, boardUrl } from '../scripts/gate-config-hook.mjs';
 import { DEFAULT_POLICY, triggerLines } from '../src/gates.mjs';
@@ -35,9 +36,9 @@ test('blob ids are git\'s own; settings: absent = off, only "on" switches it on'
   }
   assert.equal(algoOf(sha('a')), 'sha1'); assert.equal(algoOf('a'.repeat(64)), 'sha256');
   for (const off of [undefined, null, false, 'off', {}, { mode: 'observe' }]) assert.equal(integritySettings(off).mode, 'off');
-  assert.deepEqual(integritySettings({ mode: 'on' }), { mode: 'on', behindMinutes: 30, readEveryMinutes: 10, branch: null, remote: 'origin' });
+  assert.deepEqual(integritySettings({ mode: 'on' }), { mode: 'on', behindMinutes: 30, readEveryMinutes: 10, branch: null, remote: 'origin', startSettingsDirs: ['~/.cmuxterm/claude-settings'] });
   assert.equal(integritySettings('on').mode, 'on');
-  assert.deepEqual({ ...integritySettings({ mode: 'on', behindMinutes: 5, readEveryMinutes: 2, branch: 'trunk', remote: 'up' }) }, { mode: 'on', behindMinutes: 5, readEveryMinutes: 2, branch: 'trunk', remote: 'up' });
+  assert.deepEqual({ ...integritySettings({ mode: 'on', behindMinutes: 5, readEveryMinutes: 2, branch: 'trunk', remote: 'up' }) }, { mode: 'on', behindMinutes: 5, readEveryMinutes: 2, branch: 'trunk', remote: 'up', startSettingsDirs: ['~/.cmuxterm/claude-settings'] });
   for (const never of [0, false]) assert.equal(integritySettings({ mode: 'on', behindMinutes: never }).behindMinutes, 0, 'never red for being behind');
   assert.equal(integritySettings({ mode: 'on', behindMinutes: -5 }).behindMinutes, 30);
 });
@@ -230,6 +231,57 @@ test('a settings file\'s env block: the variables the gate hook reads may not be
   assert.match(registrationProblems({ ...installed(), env: { MC_PORT: '4999' } }, { repo: REPO }).problems.join(), /the user settings file sets MC_PORT in env/);
 });
 
+// #572. Seen in a scratch probe on Claude Code 2.1.321: a settings file's env block reaches the shell every tool call
+// runs in, and with GIT_DIR there git answered from folder A with repository B's address. The board reads a call's
+// repository by its folder, in its own environment, and sees none of it.
+test('git\'s own variables in an env block: the names that point git at another repository are refused at every level; a key, a proxy or another settings file is a note', () => {
+  assert.deepEqual(GIT_STEER_ENV, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_NAMESPACE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS']);
+  assert.deepEqual(GIT_SOFT_ENV, ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_PROXY_COMMAND', 'GIT_EXEC_PATH']);
+  assert.deepEqual(gitEnvSet({ env: { GIT_DIR: '/b/.git', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'url.x.insteadOf', GIT_CONFIG_VALUE_0: 'y', GIT_SSH_COMMAND: 'ssh -i k', GIT_PAGER: 'cat', EDITOR: 'vi' } }),
+    { strict: ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_DIR'], soft: ['GIT_SSH_COMMAND'] });
+  for (const none of [null, {}, { env: null }, { env: 'GIT_DIR=x' }, { env: ['GIT_DIR'] }, { env: { GIT_PAGER: 'cat', GIT_EDITOR: 'vi', GIT_TERMINAL_PROMPT: '0', GIT_AUTHOR_NAME: 'a', GIT_TRACE: '1', GIT_DIRX: 'x', git_dir: 'x', GIT_CONFIG_KEY_: 'x' } }])
+    assert.deepEqual(gitEnvSet(none), { strict: [], soft: [] });
+  // each strict name by itself; the value never reaches a message
+  for (const name of [...GIT_STEER_ENV, 'GIT_CONFIG_KEY_3', 'GIT_CONFIG_VALUE_0']) {
+    const p = settingsProblem({ env: { [name]: '/other/s3cret/.git' } });
+    assert.equal(p, `sets ${name} in env: git then acts on another repository or with other settings than the folder's, and the board, which reads the folder, does not see it`);
+  }
+  // with one of the hook's own variables beside it, both are said
+  assert.equal(settingsProblem({ env: { MESH_BOARD: 'x', GIT_WORK_TREE: '/w' } }), 'sets MESH_BOARD in env: the gate hook reads that from its environment, so the file steers the hook; and it sets GIT_WORK_TREE in env: git then acts on another repository or with other settings than the folder\'s, and the board, which reads the folder, does not see it');
+  // the softer names: no problem, a note
+  for (const name of GIT_SOFT_ENV) {
+    assert.equal(settingsProblem({ env: { [name]: 'x' } }), null, name);
+    assert.equal(settingsNote({ env: { [name]: 'ssh -i /k/s3cret' } }), `sets ${name} in env: git then reaches its remotes or reads its settings another way than the board does when it reads a push`);
+  }
+  assert.equal(settingsNote({ env: { GIT_DIR: '/b/.git', GIT_PAGER: 'cat' } }), null);
+  // the settings-change verdict: blocked at every level, a soft name passes
+  const v = (o) => configChangeVerdict({ repo: REPO, ...o });
+  for (const source of ['project_settings', 'local_settings', 'user_settings']) {
+    const base = source === 'user_settings' ? installed() : {};
+    const r = v({ source, settings: { ...base, env: { GIT_DIR: '/b/.git' } } });
+    assert.equal(r.block, true, source); assert.match(r.why, /^the change sets GIT_DIR in env: git then acts on another repository/);
+    assert.deepEqual(v({ source, settings: { ...base, env: { GIT_SSH_COMMAND: 'ssh -i k', GIT_CONFIG_GLOBAL: '/x/gitconfig', GIT_PAGER: 'cat' } } }), { block: false, why: '' }, source);
+  }
+  // …and while such a file is on disk no other change of the session passes
+  const user = { source: 'user_settings', settings: installed(), file: '/home/u/.claude/settings.json' };
+  const r = sessionVerdict({ changed: { source: 'project_settings', settings: { permissions: {} }, file: '/w/app/.claude/settings.json' }, others: [user, { source: 'local_settings', settings: { env: { GIT_CONFIG_PARAMETERS: "'a.b=c'" } }, file: '/w/app/.claude/settings.local.json' }], repo: REPO });
+  assert.equal(r.block, true); assert.match(r.why, /^\/w\/app\/\.claude\/settings\.local\.json sets GIT_CONFIG_PARAMETERS in env: git then acts[^;]*; letting this change through would make the session read that file again$/);
+  // the card says so for the user's own file
+  assert.match(registrationProblems({ ...installed(), env: { GIT_DIR: '/b/.git' } }, { repo: REPO }).problems.join(), /the user settings file sets GIT_DIR in env: git then acts on another repository/);
+  assert.deepEqual(registrationProblems({ ...installed(), env: { GIT_SSH_COMMAND: 'x' } }, { repo: REPO }).problems, []);
+  // the settings a session is started with: a problem for the strict names, a note for the softer ones
+  const files = { '/h/steer.json': { env: { GIT_DIR: '/b/.git' } }, '/h/key.json': { env: { GIT_SSH_COMMAND: 'ssh -i k' } } };
+  const scan = startSettingsScan({ procs: [{ pid: 5, args: 'claude --settings /h/steer.json' }, { pid: 6, args: 'claude --settings /h/key.json' }, { pid: 7, args: 'claude --settings {"env":{"GIT_WORK_TREE":"/w","GIT_PROXY_COMMAND":"p"}}' }], readJson: (f) => files[f] || null, home: '/h' });
+  assert.deepEqual(scan.problems, ['session 7 was started with settings on its command line that set GIT_WORK_TREE in env: git then acts on another repository or with other settings than the folder\'s, and the board, which reads the folder, does not see it',
+    '~/steer.json sets GIT_DIR in env: git then acts on another repository or with other settings than the folder\'s, and the board, which reads the folder, does not see it (1 running session was started with it)']);
+  assert.deepEqual(scan.notes, ['session 7 was started with settings on its command line that set GIT_PROXY_COMMAND in env: git then reaches its remotes or reads its settings another way than the board does when it reads a push',
+    '~/key.json sets GIT_SSH_COMMAND in env: git then reaches its remotes or reads its settings another way than the board does when it reads a push']);
+  // the card reads the user file and every agent's project and local file for both
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const userNote = settingsNote\(userSettings\);\n\s*if \(userNote\) notes\.push\(/);
+  assert.match(src, /const note = settingsNote\(j\);\n\s*if \(note\) notes\.push\(/);
+});
+
 test('every event is judged on all the settings files of the session: a change blocked earlier may not come in with the next harmless one', () => {
   const user = { source: 'user_settings', settings: installed(), file: '/home/u/.claude/settings.json' };
   const proj = (settings) => ({ source: 'project_settings', settings, file: '/w/app/.claude/settings.json' });
@@ -331,12 +383,20 @@ test('the board wires it in: one poll stage, read-only helpers, the card file ca
   // the settings-change hook reports a block to the board, from this machine only
   assert.match(src, /url\.pathname === '\/api\/gates\/config-change' && req\.method === 'POST'\) \{\n[^\n]*\n[^\n]*\n\s*if \(!localOnly\(req\)\) throw/);
   assert.match(src, /JSON\.stringify\(\{ \.\.\.c, \.\.\.\(integ \? \{ integrity: integ \} : \{\}\), at: Date\.now\(\) \}\)/);
+  // one function writes the card file; a process's first poll computes it BEFORE its first snapshot (the file on
+  // disk is the previous process's), waits at most 3 s for it, and later polls compute it at the end
+  assert.match(src, /async function writeGateCard\(\) \{[\s\S]{0,900}await writeFile\(GATE_CARD_FILE, /);
+  assert.match(src, /if \(GUARDRAILS_ONLY\) await stages\.run\('guardrails-card', writeGateCard\);\n/);
+  assert.match(src, /if \(!GUARDRAILS_ONLY\) await Promise\.race\(\[stages\.run\('guardrails-card', writeGateCard\), new Promise\(\(r\) => setTimeout\(r, FIRST_CARD_WAIT_MS\)\)\]\);\nserver\.listen\(/, 'the first card of a process, before it listens');
+  assert.equal(src.split("stages.run('guardrails-card', writeGateCard)").length - 1, 3, 'before listening, before each Guardrails-only snapshot, and at the end of a poll');
   assert.match(src, /if \(integrity && answer\.decision === 'allow'\) for \(const ms of \[20e3, 90e3\]\) setTimeout\(\(\) => integrity\.readRemote\(true\)/);
+  // an entry of ours that would not fail closed is said on the card, without colour (a note, never a problem)
+  assert.match(src, /const open = failOpenEntries\(userSettings, \{ repo: LIVE \}\);\n\s*if \(open\.length\) notes\.push\(/);
   // the only git commands the check runs are ones that read
   const used = [...readFileSync(path.join(ROOT, 'src', 'gate-integrity.mjs'), 'utf8').matchAll(/git\(\['([a-z-]+)'/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(used)].sort(), ['cat-file', 'config', 'describe', 'ls-tree', 'merge-base', 'rev-list', 'rev-parse', 'symbolic-ref']);
   // every repo a registered agent works in is looked at for a settings file that switches hooks off
-  assert.match(src, /for \(const repo of repos\) for \(const f of PROJECT_SETTINGS\) \{\n\s*const why = settingsProblem\(await json\(path\.join\(repo, f\)\)\);\n\s*if \(why\) registration\.push\(/);
+  assert.match(src, /for \(const repo of repos\) for \(const f of PROJECT_SETTINGS\) \{\n\s*const j = await json\(path\.join\(repo, f\)\);\n\s*const why = settingsProblem\(j\);\n\s*if \(why\) registration\.push\(/);
   // shipped settings: off in the examples until the installer turns it on
   assert.match(readFileSync(path.join(ROOT, 'examples', 'config', 'jobs.mjs'), 'utf8'), /^\s*gateIntegrity: \{ mode: 'off' \},$/m);
 });
@@ -399,7 +459,7 @@ test('the settings-change hook, pure: which file changed, and the answer Claude 
   assert.deepEqual(JSON.parse(blockOutput('x')), { decision: 'block', reason: 'GATE: this settings change is not applied to the running session — x' });
   // the template registers it, with no matcher (every source); the card can tell whether it is there
   const tmpl = JSON.parse(readFileSync(path.join(ROOT, 'examples', 'claude', 'guardrails-hooks.json.tmpl'), 'utf8').replaceAll('__REPO__', REPO).replaceAll('__NODE_BIN_DIR__', '/opt/node/bin'));
-  assert.deepEqual(tmpl.hooks.ConfigChange, [{ hooks: [{ type: 'command', command: `GATE_NODE='/opt/node/bin/node' '${REPO}/${CONFIG_HOOK}'`, timeout: 30 }] }]);
+  assert.deepEqual(tmpl.hooks.ConfigChange, [{ hooks: [{ type: 'command', command: `GATE_NODE='/opt/node/bin/node' '${REPO}/${CONFIG_HOOK}'`, timeout: 30, onFailure: 'block' }] }]);   // fails closed (#503)
   assert.equal(registrationProblems(tmpl, { repo: REPO, configHook: true }).ok, true);
   assert.match(registrationProblems(installed(), { repo: REPO, configHook: true }).problems.join(), /ConfigChange does not run this checkout's settings-change hook/);
   assert.equal(registrationProblems(installed(), { repo: REPO }).ok, true, 'not asked for, not a problem');
@@ -447,6 +507,13 @@ test('the settings-change hook, the real script on the documented input: switchi
   writeFileSync(local, JSON.stringify({ env: { MESH_BOARD: 'http://127.0.0.1:4999/s3cret' } }));
   const why = reason(run(input('local_settings', local)));
   assert.match(why, /the change sets MESH_BOARD in env/); assert.doesNotMatch(why, /4999|s3cret/);
+  // git's own variables (#572): a name that points git at another repository is blocked the same way; a key or a proxy passes
+  writeFileSync(local, JSON.stringify({ env: { GIT_DIR: '/other/s3cret/.git' } }));
+  const gitWhy = reason(run(input('local_settings', local)));
+  assert.match(gitWhy, /the change sets GIT_DIR in env: git then acts on another repository/); assert.doesNotMatch(gitWhy, /s3cret/);
+  assert.match(reason(run(input('project_settings', project))), /settings\.local\.json sets GIT_DIR in env/);
+  writeFileSync(local, JSON.stringify({ env: { GIT_SSH_COMMAND: 'ssh -i ~/.ssh/deploy', GIT_PAGER: 'cat' } }));
+  passes(run(input('local_settings', local)), 'a deploy key and a pager');
   // the local file put right (and one that is half-written): everything passes again, with no output
   for (const text of ['{}', JSON.stringify({ permissions: { allow: ['Bash(ls:*)'] }, env: { EDITOR: 'vi' } }), '{ "disableAllHo']) {
     writeFileSync(local, text);
@@ -515,10 +582,10 @@ function repos() {
   return { origin, live, land, edit, originHead: () => git(origin, 'rev-parse', 'HEAD'), liveHead: () => git(live, 'rev-parse', 'HEAD') };
 }
 /** The check over the live clone, with the clock and "what the remote says" in the test's hands. */
-function checker(r, { remote = async () => r.originHead(), state = null } = {}) {
+function checker(r, { remote = async () => r.originHead(), state = null, files = () => FILES } = {}) {
   let t = T0; let saved = state; let asked = 0;
   const gi = createGateIntegrity({
-    root: r.live, files: () => FILES,
+    root: r.live, files,
     git: (args) => { try { return execFileSync('git', ['-C', r.live, ...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } },
     readFile: (p) => readFile(path.join(r.live, p)),
     readState: async () => saved, writeState: async (s) => { saved = structuredClone(s); },
@@ -555,6 +622,25 @@ test('a live checkout: current after a clone; a changed gate file is red at once
   rmSync(path.join(r.live, 'public', 'app.js'));
   v = await c.gi.check();
   assert.equal(v.status, 'down'); assert.deepEqual(v.changed, ['public/app.js']);
+});
+
+// #571 (seen on the day a rules file gained one gate file: the card went red until the board was restarted)
+test('a file newly on the list is read from the commit, not from what was kept for the old list', async () => {
+  const r = repos(); const list = [...FILES];
+  const c = checker(r, { files: () => list });
+  let v = await c.gi.check();
+  assert.equal(v.status, 'ok'); assert.equal(v.files, 3);
+  // the rules file gains an entry while the board runs: an unchanged file that landed with the same commit
+  list.push('README.md');
+  v = await c.gi.check();
+  assert.equal(v.status, 'ok', v.detail); assert.equal(v.state, 'current'); assert.equal(v.files, 4); assert.deepEqual(v.changed, []);
+  // …and it is compared from then on
+  r.edit('README.md', 'changed here\n');
+  v = await c.gi.check();
+  assert.equal(v.status, 'down'); assert.deepEqual(v.changed, ['README.md']);
+  // an entry taken off the list again is no longer compared
+  list.pop();
+  assert.equal((await c.gi.check()).status, 'ok');
 });
 
 test('a landing not yet fast-forwarded here is "behind": amber, green after the fast-forward, red when it is left too long', async () => {
@@ -656,4 +742,110 @@ test('the settings-change hook tells its own checkout\'s board, not one the envi
   // review finding 3: with twenty kept heads a poll asked git about each one, every time
   const src = readFileSync(path.join(ROOT, 'src', 'gate-integrity.mjs'), 'utf8');
   assert.match(src, /const has = \(sha\) => \{ if \(here\.has\(sha\)\) return true; const yes = git\(\['cat-file', '-e', `\$\{sha\}\^\{commit\}`\]\) !== null; if \(yes\) \{/);
+});
+
+// ── the settings a session is STARTED with (task 513) ───────────────────────
+test('a session\'s command line: which processes are Claude sessions, and every --settings value on it, as a file or as JSON text', () => {
+  assert.equal(isClaudeCommand('/opt/node/bin/claude --name x'), true);
+  assert.equal(isClaudeCommand('claude -p hi'), true);
+  assert.equal(isClaudeCommand('/opt/node/bin/node /opt/lib/claude-code/cli.js -p hi'), true);
+  assert.equal(isClaudeCommand('/Applications/cmux.app/Contents/Resources/bin/cmux hooks claude'), false, 'a program that is told about claude is not a session');
+  assert.equal(isClaudeCommand('/Applications/Claude.app/Contents/MacOS/Claude'), false, 'the desktop app');
+  assert.deepEqual(startSettingsArgs('claude --name x'), []);
+  // a file: ps has lost the quoting, so every reading up to the next flag is offered
+  assert.deepEqual(startSettingsArgs('/n/claude --settings /h/.cmuxterm/claude-settings/8d.json --mcp-config={"a":1} --name x'), [{ candidates: ['/h/.cmuxterm/claude-settings/8d.json'] }]);
+  assert.deepEqual(startSettingsArgs('claude --settings=/tmp/my file.json --name x'), [{ candidates: ['/tmp/my', '/tmp/my file.json'] }]);
+  // JSON text: cut by its own braces; a brace inside a string does not end it
+  assert.deepEqual(startSettingsArgs('claude -p hi --settings {"disableAllHooks": true, "env": {"A": "} x"}} --model m'), [{ inline: '{"disableAllHooks": true, "env": {"A": "} x"}}' }]);
+  assert.deepEqual(startSettingsArgs('claude --settings {"disableAllHooks": tr'), [{ inline: null }], 'text that never closes cannot be read');
+  // twice on one line: both are read
+  assert.equal(startSettingsArgs('claude --settings /a.json --settings {"env":{}}').length, 2);
+  assert.deepEqual(integritySettings('on').startSettingsDirs, DEFAULT_START_SETTINGS_DIRS);
+  assert.deepEqual(integritySettings({ mode: 'on', startSettingsDirs: ['/x', 7, ''] }).startSettingsDirs, ['/x']);
+  assert.deepEqual(integritySettings({ mode: 'on', startSettingsDirs: [] }).startSettingsDirs, [], 'an empty list reads no folder');
+});
+
+test('the scan of start-up settings: a file or text that switches hooks off or steers the hook is a problem; shared files are read once; what cannot be read is a note', () => {
+  const HOME = '/h';
+  const disk = {
+    '/h/.cmuxterm/claude-settings/ok.json': { hooks: { PreToolUse: [] }, preferredNotifChannel: 'x' },
+    '/h/.cmuxterm/claude-settings/old.json': { hooks: {} },
+    '/h/.cmuxterm/claude-settings/off.json': { disableAllHooks: true },
+    '/tmp/my file.json': { env: { MESH_BOARD: 'http://127.0.0.1:9', OTHER: 'x' } },
+    '/repo/a/rel.json': { disableAllHooks: true },
+    '/h/t.json': { env: { PATH: '/x' } },
+  };
+  const reads = [];
+  const readJson = (f) => { reads.push(f); return disk[f] ?? null; };
+  const cmux = { dir: '/h/.cmuxterm/claude-settings', files: ['ok.json', 'old.json'] };
+
+  // a busy install's shape: many sessions, one harmless file; the other file in the folder is read too
+  const fleet = [1, 2, 3].map((pid) => ({ pid, args: `/n/claude --settings /h/.cmuxterm/claude-settings/ok.json --name a${pid}` }));
+  let r = startSettingsScan({ procs: [...fleet, { pid: 9, args: '/bin/zsh -l' }, { pid: 10, args: 'claude --name plain' }], readJson, dirs: [cmux], home: HOME });
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual(r.notes, []);
+  assert.equal(r.sessions, 3);
+  assert.deepEqual(r.files.sort(), ['/h/.cmuxterm/claude-settings/ok.json', '/h/.cmuxterm/claude-settings/old.json']);
+
+  // disableAllHooks in a file a running session was started with
+  r = startSettingsScan({ procs: [...fleet, { pid: 4, args: 'claude -p x --settings /h/.cmuxterm/claude-settings/off.json' }, { pid: 5, args: 'claude --settings=/h/.cmuxterm/claude-settings/off.json' }], readJson, dirs: [cmux], home: HOME });
+  assert.deepEqual(r.problems, ['~/.cmuxterm/claude-settings/off.json sets disableAllHooks, which switches the gate hook off (2 running sessions were started with it)']);
+
+  // the same file lying in the folder with no session on it yet: the next start would take it
+  r = startSettingsScan({ procs: fleet, readJson, dirs: [{ ...cmux, files: ['ok.json', 'off.json'] }], home: HOME });
+  assert.deepEqual(r.problems, ['~/.cmuxterm/claude-settings/off.json sets disableAllHooks, which switches the gate hook off (the next session started with it)']);
+
+  // JSON text on the command line: there is no file; the session is named by its pid
+  r = startSettingsScan({ procs: [{ pid: 77, args: 'claude -p hi --settings {"disableAllHooks":true} --model m' }], readJson, home: HOME });
+  assert.deepEqual(r.problems, ['session 77 was started with settings on its command line that set disableAllHooks, which switches the gate hook off']);
+  r = startSettingsScan({ procs: [{ pid: 78, args: 'claude --settings {"env":{"GATE_NODE":"/x/node"}}' }], readJson, home: HOME });
+  assert.match(r.problems[0], /^session 78 was started with settings on its command line that set GATE_NODE in env/);
+  assert.doesNotMatch(r.problems[0], /\/x\/node/, 'a value is never read into a message');
+
+  // an env block that names one of the hook's variables; a path with a space (quoting lost) still resolves
+  r = startSettingsScan({ procs: [{ pid: 6, args: 'claude --settings /tmp/my file.json --name x' }], readJson, home: HOME });
+  assert.deepEqual(r.problems, ['/tmp/my file.json sets MESH_BOARD in env: the gate hook reads that from its environment, so the file steers the hook (1 running session was started with it)']);
+  // PATH is not on the list (the hook scripts clear it themselves): no problem
+  r = startSettingsScan({ procs: [{ pid: 6, args: 'claude --settings ~/t.json' }], readJson, home: HOME });
+  assert.deepEqual([r.problems, r.notes, r.files], [[], [], ['/h/t.json']]);
+
+  // a relative path is read from the session's own folder, asked for only then
+  const asked = [];
+  r = startSettingsScan({ procs: [...fleet, { pid: 8, args: 'claude --settings ./rel.json' }], readJson, cwdOf: (pid) => { asked.push(pid); return '/repo/a/'; }, home: HOME });
+  assert.deepEqual(asked, [8]);
+  assert.deepEqual(r.problems, ['/repo/a/rel.json sets disableAllHooks, which switches the gate hook off (1 running session was started with it)']);
+
+  // only a relative path needs the session's folder: an absolute path, a home path and JSON text do not
+  assert.deepEqual(needsCwd([...fleet, { pid: 8, args: 'claude --settings ./rel.json' }, { pid: 9, args: 'claude --settings=rel.json -p x' }, { pid: 10, args: 'claude --settings ~/t.json' },
+    { pid: 11, args: 'claude --settings {"env":{}}' }, { pid: 12, args: 'vim --settings rel.json' }, { pid: 13, args: 'claude --name plain' }]), [8, 9]);
+  // a folder not looked up yet (the lookup is spread over polls) reads as "cannot read" for this poll, never as clean
+  r = startSettingsScan({ procs: [{ pid: 8, args: 'claude --settings ./rel.json' }], readJson, cwdOf: () => null, home: HOME });
+  assert.deepEqual([r.problems, r.notes], [[], ['1 session was started with a settings file the board cannot read']]);
+
+  // what the board cannot read is said, never coloured: a missing file, a folder nobody could name, text that is not JSON
+  r = startSettingsScan({ procs: [{ pid: 1, args: 'claude --settings /gone.json' }, { pid: 2, args: 'claude --settings rel.json' }, { pid: 3, args: 'claude --settings {"disableAllHooks": tr' }], readJson, home: HOME });
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual(r.notes, ['2 sessions were started with a settings file the board cannot read', '1 session was started with settings text the board cannot read']);
+
+  // a process that is not a session is not read, whatever its arguments say
+  r = startSettingsScan({ procs: [{ pid: 1, args: 'grep -- --settings {"disableAllHooks":true}' }, { pid: 2, args: '/x/cmux hooks claude --settings {"disableAllHooks":true}' }], readJson, home: HOME });
+  assert.deepEqual([r.problems, r.sessions], [[], 0]);
+  // and the result reaches the card as red
+  const card = integrityCard({ files: { status: 'ok', state: 'current', detail: 'gate files match abc1234 (25 files)' }, registration: ['~/x.json sets disableAllHooks, which switches the gate hook off (the next session started with it)'], notes: ['1 session was started with a settings file the board cannot read'] });
+  assert.equal(card.status, 'down');
+  assert.match(card.detail, /disableAllHooks.*· 1 session was started with a settings file the board cannot read$/);
+});
+
+test('the board wires the start-up settings scan in, and the folder cmux keeps such files in is a guarded path', () => {
+  const server = readFileSync(path.join(ROOT, 'server.mjs'), 'utf8');
+  assert.match(server, /const started = await startSettings\(home\);\s+registration\.push\(\.\.\.started\.problems\);\s+notes\.push\(\.\.\.started\.notes\);/);
+  assert.match(server, /startSettingsScan\(\{ procs, readJson, cwdOf, dirs, home \}\)/);
+  // the folder lookup never runs on the loop that answers gate checks: asynchronous, a few a poll, each with a time limit
+  const scan = server.slice(server.indexOf('async function startSettings('), server.indexOf('let integrityWas'));
+  assert.doesNotMatch(scan, /execFileSync/, 'no synchronous program start in the scan');
+  assert.match(scan, /\.slice\(0, CWD_LOOKUPS\)/);
+  assert.match(scan, /execFile\('lsof', \[[^\]]+\], \{ encoding: 'utf8', timeout: 2000 \}/);
+  assert.ok(DEFAULT_POLICY.lists.guardGate.includes('~/.cmuxterm/claude-settings/**'), 'the shipped policy guards the folder');
+  const example = JSON.parse(readFileSync(path.join(ROOT, 'examples', 'policy.json'), 'utf8'));
+  assert.ok(example.lists.guardGate.includes('~/.cmuxterm/claude-settings/**'), 'the example policy guards the folder');
 });

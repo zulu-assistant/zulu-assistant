@@ -21,18 +21,33 @@ export const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const STATE_FILE = path.join(ROOT, 'data', 'setup-state.json');
 const HOME = process.env.HOME || '';
 
-/** The steps, in wizard order. `required: false` = optional (alerts, residents). */
+/**
+ * The steps, in wizard order. Required (1.3): only what the agent workforce cannot start without:
+ * your GitHub login, an engine, who you are, and the final check. Everything else is optional:
+ * a skipped optional step never keeps the setup card amber.
+ */
 export const STEPS = [
   { id: 'github',    title: 'GitHub account',             required: true },
   { id: 'engines',   title: 'AI engines (Claude / Codex)', required: true },
   { id: 'owner',     title: 'You (owner name + policy)',   required: true },
-  { id: 'watch',     title: 'What to watch on this Mac',   required: true },
+  { id: 'watch',     title: 'What to watch on this Mac',   required: false },
   { id: 'alerts',    title: 'Alerts (email / SMS / dead-man)', required: false },
-  { id: 'vault',     title: 'Obsidian vault (org memory)', required: true },
-  { id: 'brain',     title: 'Graphify + agent memory',     required: true },
-  { id: 'macos',     title: 'macOS permissions + power',   required: true },
+  { id: 'vault',     title: 'Obsidian vault (org memory)', required: false },
+  { id: 'brain',     title: 'Graphify + agent memory',     required: false },
+  { id: 'macos',     title: 'macOS permissions + power',   required: false },
   { id: 'residents', title: 'Resident agents for your repos', required: false },
   { id: 'verify',    title: 'Verify + start Mission Control', required: true },
+];
+
+/**
+ * What a light install (the default `./install.sh`) can add, each with one command, each opt-in.
+ * The board shows these on one info card in place of a setup checklist; install.sh prints the same.
+ */
+export const NEXT_STEPS = [
+  { id: 'guardrails', what: 'Guardrails: hold agents\' irreversible commands for your click (5 minutes)', run: './install.sh --guardrails' },
+  { id: 'full',       what: 'cmux, the agent mesh, Mission Control and scheduled triage (triage costs money)', run: './install.sh --full' },
+  { id: 'brain',      what: 'the brain: skills, Graphify, your vault', run: './install.sh --brain' },
+  { id: 'watch',      what: 'choose what this board watches', run: 'zulu setup --step watch' },
 ];
 
 export async function readState(file = STATE_FILE) {
@@ -46,6 +61,29 @@ export async function writeState(doc, file = STATE_FILE) {
   const tmp = `${file}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(doc, null, 1));
   await rename(tmp, file);
+}
+/**
+ * A light install on which Guardrails has been seen once (a registered hook, or a gate in the ledger) is marked,
+ * so that a hook lost later is shown as missing and not taken for "never installed". Only a light install's state
+ * file is touched, and only once. → true when the mark was written
+ */
+export async function noteGuardrailsSeen(file = STATE_FILE) {
+  const doc = await readState(file);
+  if (!doc || doc.mode !== 'light' || doc.guardrailsSeen) return false;
+  doc.guardrailsSeen = Date.now();
+  await writeState(doc, file);
+  return true;
+}
+/**
+ * The full install was run on what the light install made: the state file stops saying 'light' (install.sh writes
+ * the file only when there is none, so without this a light install stayed light for good). → true when changed
+ */
+export async function leaveLight(file = STATE_FILE) {
+  const doc = await readState(file);
+  if (!doc || doc.mode !== 'light') return false;
+  doc.mode = 'full'; doc.fullAt = Date.now();
+  await writeState(doc, file);
+  return true;
 }
 export async function markStep(id, status, note = '', file = STATE_FILE) {
   const doc = (await readState(file)) || { installedAt: Date.now(), steps: {}, answers: {} };
@@ -72,6 +110,11 @@ export function summarize(doc) {
 export function setupCard(doc) {
   const s = summarize(doc);
   if (!s) return null;
+  // a light install that has not started the guided setup: next steps, info only (never amber: nothing is owed)
+  if (doc.mode === 'light' && s.done === 0) {
+    return { label: 'setup:', name: 'Next steps', domain: 'infra', schedule: 'opt-in', logAvailable: false, status: 'ok',
+      detail: `nothing else is installed. When you want it: ${NEXT_STEPS.map((n) => `${n.what} → ${n.run}`).join(' · ')}` };
+  }
   const status = !s.complete ? 'due' : s.skippedRequired.length ? 'warn' : 'ok';
   const detail = !s.complete ? `setup ${s.done}/${s.total} — run: zulu setup (next: ${s.next})`
     : s.skippedRequired.length ? `setup complete, skipped: ${s.skippedRequired.join(', ')} — zulu setup to finish`

@@ -205,3 +205,15 @@ test('public docs: with no git (a downloaded archive) the file list comes from a
   assert.deepEqual(found.sort(), [...docs].sort(), 'the same docs as with git');
   assert.equal((await publishLayout({ list: () => [] })).has('README.md'), true, 'an empty list falls back too');
 });
+
+// A merge that stopped on a conflict leaves marker lines in the file. Staged that way, the suite
+// used to pass: nothing read the changelog for them (2026-11-10, caught by eye before the push).
+test('no published file holds a merge conflict marker', async () => {
+  const bad = [];
+  for (const [to, from] of layout) {
+    if (!/\.(md|mjs|js|json|sh|tmpl|yml|yaml|css|html|txt|rb)$/.test(from)) continue;
+    const text = await readFile(path.join(ROOT, from), 'utf8').catch(() => '');
+    text.split('\n').forEach((line, i) => { if (/^(<{7} |>{7} |={7}$)/.test(line)) bad.push(`${to}:${i + 1}`); });
+  }
+  assert.deepEqual(bad, [], `conflict markers left in: ${bad.join(', ')}`);
+});

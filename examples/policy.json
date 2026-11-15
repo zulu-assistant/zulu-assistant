@@ -13,7 +13,13 @@
   "checks": {
     "inlineBodies": "observe",
     "renamedBins": "observe",
-    "selfProtect": "observe"
+    "selfProtect": "observe",
+    "mcpDefault": "observe",
+    "remoteWrite": "observe",
+    "desktop": "observe",
+    "paneReach": "observe",
+    "runners": "observe",
+    "engineStart": "observe"
   },
   "classes": [
     {
@@ -121,6 +127,14 @@
       ]
     },
     {
+      "id": "engine-start",
+      "label": "Start an agent session the gate may not see",
+      "rules": [
+        { "bin": "claude", "triggerWords": ["-p", "--print", "--setting", "--bare", "permission"], "when": "engineStart", "check": "engineStart" },
+        { "bin": "codex", "triggerWords": ["exec", "bypass", "yolo", "danger", "-c", "--config", "--sandbox", "-s"], "firstWords": ["e"], "when": "engineStart", "check": "engineStart" }
+      ]
+    },
+    {
       "id": "upgrade",
       "label": "Upgrade or roll back this install",
       "rules": [
@@ -204,7 +218,10 @@
         },
         {
           "tool": "^mcp__.*__(send_message|reply|forward)$"
-        }
+        },
+        { "tool": "^mcp__.*__(.*_)?(send|reply|forward|schedule)(_.*)?$", "check": "mcpDefault" },
+        { "tool": "^mcp__.*__.*post-(create|update)$", "check": "mcpDefault" },
+        { "tool": "^mcp__.*__slack_(add_reaction|create_conversation|complete_file_upload|create_canvas|update_canvas|add_list_record|update_list_record|create_list|update_list)$", "check": "mcpDefault" }
       ]
     },
     {
@@ -213,7 +230,66 @@
       "rules": [
         {
           "tool": "^mcp__.*Shopify__(graphql_mutation|create-.*|update-.*|set-inventory|bulk-.*|add-to-collection|publish-.*|upload-.*)$"
-        }
+        },
+        { "tool": "^mcp__.*Shopify__(switch-shop|upload[-_].*|import-.*|set-.*)$", "check": "mcpDefault" }
+      ]
+    },
+    {
+      "id": "desktop",
+      "label": "Drive the desktop or a browser (click, type, run page script)",
+      "standing": true,
+      "rules": [
+        { "tool": "^mcp__(.*[-_])?computer[-_]use__(?!(screenshot|zoom|cursor_position|list_granted_applications|read_clipboard)$).+$", "check": "desktop" },
+        { "tool": "^mcp__cmux-cua__(click|double_click|right_click|type_text|press_key|hotkey|drag|scroll|launch_app|kill_app|set_value|perform_actions)$", "check": "desktop" },
+        { "tool": "^mcp__claude-in-chrome__(computer|navigate|form_input|javascript_tool|file_upload|browser_batch)$", "check": "desktop" },
+        { "bin": "cmux", "args": ["browser"], "when": "browserAction", "check": "desktop" },
+        { "bin": "osascript", "when": "uiScript", "check": "desktop" },
+        { "bin": "cliclick", "check": "desktop" },
+        { "bin": "open", "mentions": ["--remote-debugging"], "check": "desktop" }
+      ]
+    },
+    {
+      "id": "panes",
+      "label": "Type into another pane, or start a terminal with a command",
+      "rules": [
+        { "bin": "cmux", "argsAny": ["send", "send-key"], "when": "otherPane", "check": "paneReach", "exceptMissionControl": true },
+        { "bin": "cmux", "argsAny": ["new-split", "new-pane", "new-surface", "new-workspace"], "when": "paneCommand", "check": "paneReach", "exceptMissionControl": true },
+        { "bin": "tmux", "argsAny": ["send-keys"], "check": "paneReach", "exceptMissionControl": true }
+      ]
+    },
+    {
+      "id": "remote-write",
+      "label": "Change something in a remote account or service",
+      "rules": [
+        { "tool": "^mcp__.*__(.*[-_])?(create|update|edit|delete|trash|untrash|remove|share|copy|transition|add|apply|mark|unmark|label|unlabel)([-_].*)?$", "check": "mcpDefault" },
+        { "tool": "^mcp__.*__batch$", "check": "mcpDefault" },
+        { "tool": "^mcp__.*__(create|edit|update|delete|remove|transition|add|set|send|post|publish|share|trash)[A-Z].*$", "check": "mcpDefault" },
+        { "bin": "gh", "args": ["api"], "when": "ghApiWrite", "check": "remoteWrite" },
+        { "bin": "curl", "urlAny": ["api.github.com"], "when": "curlWrite", "check": "remoteWrite" },
+        { "bin": "gh", "args": ["workflow", "run"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["workflow", "enable"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["workflow", "disable"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["release", "create"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["release", "delete"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["release", "edit"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["pr", "close"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["pr", "ready"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["issue", "close"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["issue", "delete"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["gist", "create"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["gist", "edit"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["repo", "create"], "flagsAny": ["--public"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["pr", "review"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["pr", "comment"], "when": "ghPublicRepo", "check": "remoteWrite" },
+        { "bin": "gh", "args": ["issue", "comment"], "when": "ghPublicRepo", "check": "remoteWrite" },
+        { "bin": "gh", "args": ["issue", "create"], "when": "ghPublicRepo", "check": "remoteWrite" },
+        { "bin": "gh", "args": ["pr", "create"], "when": "ghPublicRepo", "check": "remoteWrite" },
+        { "bin": "gh", "args": ["pr", "edit"], "when": "ghPublicRepo", "check": "remoteWrite" },
+        { "bin": "gh", "args": ["issue", "edit"], "when": "ghPublicRepo", "check": "remoteWrite" },
+        { "bin": "gh", "args": ["repo", "edit"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["repo", "archive"], "check": "remoteWrite" },
+        { "bin": "gh", "args": ["repo", "rename"], "check": "remoteWrite" },
+        { "sql": "\\b(update\\s+\\S+\\s+set|delete\\s+from|insert\\s+into|alter\\s+(table|schema|database|role|policy))\\b", "check": "remoteWrite" }
       ]
     },
     {
@@ -329,14 +405,17 @@
         },
         { "scriptIn": ["**/install.sh"], "flagsAny": ["--guardrails"], "unlessFlags": ["--dry-run"] },
         { "scriptIn": ["**/install.sh"], "args": ["guardrails"], "unlessFlags": ["--dry-run"] },
-        { "bin": "zulu", "flagsAny": ["--guardrails"], "unlessFlags": ["--dry-run"] },
-        { "bin": "zulu", "args": ["guardrails"], "unlessFlags": ["--dry-run"] },
+        { "bin": "zulu", "flagsAny": ["--guardrails"], "unlessFlags": ["--dry-run"], "nameIsWord": true },
+        { "bin": "zulu", "args": ["guardrails"], "unlessFlags": ["--dry-run"], "nameIsWord": true },
+        { "scriptIn": ["<repo>/install.sh"], "when": "installerWrite" },
+        { "bin": "zulu", "when": "installerWrite", "nameIsWord": true },
+        { "scriptIn": ["<repo>/scripts/bootstrap.sh"], "args": ["install"], "unlessFlags": ["--dry-run"] },
         { "pathGuard": ["@gateCode", "@guardGate"], "check": "selfProtect" },
         { "bin": "git", "args": ["config"], "mentions": ["core.", "alias.", "--global", "--system", "--file", "-f", "--edit", "-e", "remote.", "url.", "branch.", "include", "filter.", "diff.", "merge.", "pager.", "credential.", "http.", "protocol.", "submodule.", "gpg.", "sequence.", "interactive.", "uploadpack.", "receive.", "fetch.", "pull.", "init.", "safe.", "extensions."], "when": "gitConfigWrite", "check": "selfProtect" },
         { "bin": "git", "mentions": ["core.hookspath=", "alias."], "when": "gitDashC", "check": "selfProtect" },
         { "bin": "git", "argsAny": ["update-ref", "symbolic-ref", "fetch", "push"], "mentions": ["refs/remotes/", "refs/heads/main", "refs/heads/master", "refs/heads/origin/", "refs/tags/origin/", "refs/replace/"], "when": "gitRefWrite", "check": "selfProtect" },
         { "bin": "git", "args": ["remote"], "argsAny": ["set-url", "add", "rename", "remove", "rm", "set-head", "set-branches"], "check": "selfProtect" },
-        { "bin": "git", "argsAny": ["pull", "merge", "rebase", "cherry-pick", "revert", "apply", "am", "checkout", "switch", "reset", "stash", "restore", "branch", "rm", "mv", "read-tree", "bisect", "fetch", "tag", "update-ref", "symbolic-ref", "update-index", "checkout-index", "clean", "submodule", "replace"], "when": "liveCheckout", "check": "selfProtect" },
+        { "bin": "git", "argsAny": ["pull", "merge", "rebase", "cherry-pick", "revert", "apply", "am", "checkout", "switch", "reset", "stash", "restore", "branch", "rm", "mv", "read-tree", "bisect", "fetch", "tag", "update-ref", "symbolic-ref", "update-index", "checkout-index", "clean", "submodule", "replace", "sparse-checkout"], "when": "liveCheckout", "check": "selfProtect" },
         { "bin": "kill", "when": "boardProcess", "check": "selfProtect" },
         { "bin": "pkill", "when": "boardProcess", "check": "selfProtect" },
         { "bin": "killall", "when": "boardProcess", "check": "selfProtect" },
@@ -348,7 +427,10 @@
         { "bin": "shutdown", "when": "boardProcess", "check": "selfProtect" },
         { "bin": "halt", "when": "boardProcess", "check": "selfProtect" },
         { "bin": "poweroff", "when": "boardProcess", "check": "selfProtect" },
-        { "bin": "osascript", "mentions": ["restart", "shut down", "shutdown", "log out", "logout"], "when": "boardProcess", "check": "selfProtect" }
+        { "bin": "osascript", "mentions": ["restart", "shut down", "shutdown", "log out", "logout"], "when": "boardProcess", "check": "selfProtect" },
+        { "bin": "gh", "args": ["alias", "set"], "check": "selfProtect" },
+        { "bin": "gh", "args": ["alias", "import"], "check": "selfProtect" },
+        { "bin": "gh", "args": ["repo", "set-default"], "unlessFlags": ["--view", "-v"], "check": "selfProtect" }
       ]
     }
   ],
@@ -356,6 +438,7 @@
     "paidOrOutbound": [],
     "publicRemotes": [],
     "deployOnPush": [],
+    "mcpRead": [],
     "guardedScripts": [],
     "dryFlags": [
       "--dry-run",
@@ -393,7 +476,15 @@
       "<live>/public/**",
       "<live>/src/gate-integrity.mjs",
       "<live>/scripts/gate-config-hook.sh",
-      "<live>/scripts/gate-config-hook.mjs"
+      "<live>/scripts/gate-config-hook.mjs",
+      "<live>/src/receipt-chain.mjs",
+      "<live>/src/row-context.mjs",
+      "<live>/src/private-file.mjs",
+      "<live>/src/secret-text.mjs",
+      "<live>/src/profile.mjs",
+      "<live>/src/completion-packet.mjs",
+      "<live>/src/upgrade.mjs",
+      "<live>/src/worktree.mjs"
     ],
     "guardGate": [
       "<live>/overlay/config/agents.json",
@@ -413,8 +504,10 @@
       "~/.zlogin",
       "~/.bashrc",
       "~/.bash_profile",
+      "~/.bash_login",
       "~/.profile",
       "~/.gitconfig",
+      "**/.config/git/config",
       "**/.git/hooks/**",
       "**/.git/config",
       "<live>/.git/HEAD",
@@ -425,7 +518,8 @@
       "<live>/.gitattributes",
       "~/.config/cmux/**",
       "~/.cmuxterm/claude-hook-sessions.json",
-      "~/.cmuxterm/codex-hook-sessions.json"
+      "~/.cmuxterm/codex-hook-sessions.json",
+      "~/.cmuxterm/claude-settings/**"
     ]
   }
 }

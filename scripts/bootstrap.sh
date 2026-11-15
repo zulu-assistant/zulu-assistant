@@ -23,7 +23,7 @@ cd "$ROOT"
 
 # ---- pins (bump deliberately; the runbook's requirements section explains each) ----
 NODE_MAJOR=22
-CLAUDE_MIN=2.1.280          # claude-opus-5-5 needs >= 2.1.280
+CLAUDE_MIN=2.1.295          # onFailure on a hook entry needs >= 2.1.295 (claude-opus-5-5 needs >= 2.1.280)
 CMUX_SERIES=0.65            # tested 0.65.0 (0.64.x also works); quirks handled in code: password wipe, placeholder anchors, feed tui flag
 GRAPHIFY_PIN=0.9.83
 # VAULT + MC_LABEL_PREFIX come from config/zulu.env (overlay/, else examples/) via scripts/env.sh
@@ -306,6 +306,13 @@ do_install() {
       done
     fi
   else step skip "dead-man Actions secrets (opt in: --deadman)"; fi
+  # 12. these are the full install's steps. A state file the light install wrote (mode 'light') says so from now
+  # on: the board shows its cards as on any full board, and an upgrade runs these steps again, not the plist alone.
+  if [[ -f data/setup-state.json ]] && grep -q '"mode": *"light"' data/setup-state.json; then
+    if ((DRY)); then step would "data/setup-state.json: mode light → full (the full install's steps ran here)"
+    else "$NODE_BIN" -e 'import("./src/setup.mjs").then((m) => m.leaveLight()).then((c) => process.exit(c ? 0 : 1))' \
+      && step done "data/setup-state.json: mode light → full" || step FAIL "data/setup-state.json: could not be marked as a full install"; fi
+  fi
   echo; echo "manual steps (can't be scripted): $DOC_MANUAL"
   ((FAILS == 0))
 }

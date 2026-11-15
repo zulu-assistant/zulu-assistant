@@ -3,7 +3,7 @@
     "PreToolUse": [
       {
         "matcher": "Bash|Read|Edit|Write|MultiEdit|NotebookEdit|mcp__.*",
-        "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-hook.sh'", "timeout": 15 } ]
+        "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-hook.sh'", "timeout": 15, "onFailure": "block" } ]
       }
     ],
     "PostToolUse": [
@@ -14,7 +14,7 @@
     ],
     "ConfigChange": [
       {
-        "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-config-hook.sh'", "timeout": 30 } ]
+        "hooks": [ { "type": "command", "command": "GATE_NODE='__NODE_BIN_DIR__/node' '__REPO__/scripts/gate-config-hook.sh'", "timeout": 30, "onFailure": "block" } ]
       }
     ]
   }

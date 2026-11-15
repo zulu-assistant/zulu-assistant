@@ -263,7 +263,8 @@ function render(data) {
     const d = dir[s.workspaceId];
     // directory: mesh address + owned domains (hover; always shown in ?tv)
     const owns = d?.owns?.length ? d.owns.join(' · ') : (d ? '— needs ownership —' : '');
-    const hover = d ? `@${d.name} (${d.kind})${owns ? '\n' + owns : ''}${d.nameOk === false ? `\nsession name "${d.liveName}" ≠ title` : ''}` : '';
+    const hover = d ? `@${d.name} (${d.kind})${owns ? '\n' + owns : ''}${d.nameOk === false ? `\nsession name "${d.liveName}" ≠ title` : ''}`
+      : s.source === 'claude-registry' ? 'read-only: this session is not in cmux, so the board can show it but not message it' : '';
     const quiet = !s.ctx || s.ctx.band === 'ok' ? 'ctx-quiet' : '';
     // status taxonomy (on): state + source mark (◌ / "?" = low confidence, "screen" = inferred), why in the tooltip
     const sv = s.active && d?.state;
@@ -295,7 +296,7 @@ function render(data) {
   document.querySelectorAll('.share-sep, #share-btn').forEach((el) => el.classList.toggle('hidden', !data.repoUrl));
   maybeStarToast(data.starToast);
   const domains = data.domains?.length ? data.domains : DOMAINS;
-  $('domains').innerHTML = domains.map((d) => {
+  $('domains').innerHTML = BoardDecide.nothingWatchedHtml(data) + domains.map((d) => {
     const list = jobs.filter((j) => j.domain === d.id)
       .sort((a, b) => SEVERITY[a.status] - SEVERITY[b.status]);
     if (!list.length) return '';
@@ -377,6 +378,11 @@ function taskRow(t, opts = {}) {
     ? `${heard}<div class="task-actions">${btn('approve', heard ? H.approve : '✓ APPROVE', 'act-approve')}${btn('decline', '✕ DECLINE', 'act-decline')}${heard ? btn('disown', H.disown, 'act-decline act-disown') : ''}</div>` : '';
   const gates = (t.gates || []).map((g) => gateRow(t, g)).join('');
   const go = t.program_go ? goRow(t) : '';
+  // a request the board could not verify (names enforced): said on the row itself, with the one step that lifts it
+  const unv = t.unverified
+    ? `<div class="gate-meta unverified-row"><span class="chip gate-chip"><span aria-hidden="true">?</span>UNVERIFIED REQUEST</span>
+    filed by a caller the board could not verify as “${esc(t.unverified.who)}” (${esc(t.unverified.why)}). That name has no say on this task until you confirm it.
+    ${btn('confirm-request', '✓ THE REQUEST IS REAL', 'act-approve')}</div>` : '';
   return `<div class="task ${st.cls}">
     <div class="task-top"><span class="task-id">#${t.id}</span><span class="task-title">${esc(t.title)}</span>
       <span class="chip task-chip"><span aria-hidden="true">${st.glyph}</span>${st.label}</span></div>
@@ -384,7 +390,7 @@ function taskRow(t, opts = {}) {
     ${policy}
     ${t.last ? `<div class="task-last">${esc(t.last)}</div>` : ''}
     ${evidenceRow(t.evidence)}
-    ${btns}${go}${gates}
+    ${btns}${go}${unv}${gates}
   </div>`;
 }
 

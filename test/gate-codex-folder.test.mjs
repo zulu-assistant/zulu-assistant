@@ -15,7 +15,7 @@ import { OWNER } from '../src/config.mjs';
 
 // #548: a Codex shell call runs in a folder of its own choosing (exec_command's `workdir`), and Codex gives the hook
 // only `{ command }` with the SESSION's folder as `cwd` (codex-rs 0.162.1, exec_command.rs pre_tool_use_payload; seen
-// in live use: a push dry run that the board described against another repository). Such a call's
+// in live use: a push dry run that the board described and bound against another repository). Such a call's
 // repository is never read from the session folder: what depends on it asks, and the row says it was not read.
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const HOOK = path.join(ROOT, 'scripts', 'gate-hook.sh');
@@ -112,7 +112,11 @@ test('other readings of the repository: a relative delete, gh on a public repo, 
   assert.equal(del.verdict, 'gate'); assert.match(del.why, /on build in a folder Codex did not name/);
   assert.equal(read(codexInput(`cd ${r.priv} && rm -rf build`, r.priv)).verdict, 'clear');
   assert.equal(read(claudeInput('rm -rf build', r.priv)).verdict, 'clear');
-  // (a gh comment on a public repo is read by the remoteWrite check, which 1.2 does not have)
+  // a comment through gh with no repo named (check remoteWrite): on the public list or not cannot be told
+  const rw = { ...withPublic, checks: { ...withPublic.checks, remoteWrite: 'enforce' } };
+  assert.match(read(codexInput('gh pr comment 3 --body hi', r.priv), rw).why, /with no repo named, in a folder Codex did not name.*--repo <owner\/name>/);
+  assert.equal(read(codexInput('gh pr comment 3 --body hi --repo acme/private-app', r.priv), rw).verdict, 'clear');
+  assert.equal(read(claudeInput('gh pr comment 3 --body hi', r.priv), rw).verdict, 'clear');
   // scripts: a relative path in an unread folder is not the session folder's file of that name
   assert.deepEqual(scriptsRun('node tools/x.mjs --commit', '/w', { baseUnread: true }), [{ path: 'tools/x.mjs', cwd: '/w', unread: true }]);
   assert.deepEqual(scriptsRun('node /abs/x.mjs --commit', '/w', { baseUnread: true }), [{ path: '/abs/x.mjs', cwd: '/w' }]);
@@ -160,7 +164,7 @@ test('board: a Codex push the board cannot read is refused unfiled, saying how t
   const again = await s.codex('git -C /work/notes push --dry-run origin HEAD:refs/heads/main');
   assert.equal(again.decision, 'deny'); assert.equal(again.unfiled, undefined, again.reason);
   const [g] = await s.gates();
-  assert.equal(g.cls, 'push'); assert.equal(g.folderUnread, undefined);          // (1.2 binds no approval to the pushed commit)
+  assert.equal(g.cls, 'push'); assert.equal(g.folderUnread, undefined); assert.equal(g.ref?.kind, 'push');
   assert.ok(s.gitCalls.includes('/work/notes'));
 });
 

@@ -4,13 +4,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readdir, writeFile, mkdir } from 'node:fs/promises';
 import { readdirSync, readFileSync, existsSync, symlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import { demoSnapshot, demoDirectory, demoContext, demoBeats, demoHistory, seedDemoLedger, demoTasksDir, DEMO_MARKER, DEMO_DOMAINS, CYCLE_S } from '../src/demo.mjs';
 import { createLedger } from '../src/tasks.mjs';
-import { demoEnv } from './demo-board.mjs';
+import { demoEnv, freePort } from './demo-board.mjs';
 
 test('snapshot has the shape the board renders, every card in a demo domain', () => {
   const s = demoSnapshot();
@@ -89,7 +88,7 @@ test('a demo server never touches the real board\'s data/', { timeout: 30000 }, 
     return out;
   };
   const before = await snap();
-  const port = 39000 + Math.floor(Math.random() * 900);
+  const port = await freePort();
   const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_PORT: String(port) }), stdio: 'ignore' });
   try {
     let status = null;
@@ -171,7 +170,7 @@ test('where a demo board keeps its ledger: data/demo-tasks, or the folder MC_DEM
   assert.match(server, /seedDemoLedger\(demoTasksDir\(ROOT\)\.dir, createLedger, \{ own: demoTasksDir\(ROOT\)\.own, root: ROOT \}\)/);
 });
 
-test('every test that starts a demo board gives it a ledger folder of its own (demoEnv)', () => {
+test('every test that starts a demo board gives it a ledger folder of its own (demoEnv), and no test guesses a port', async () => {
   const bad = [];
   for (const f of readdirSync(HERE).filter((n) => n.endsWith('.test.mjs'))) {
     readFileSync(path.join(HERE, f), 'utf8').split('\n').forEach((line, i) => {
@@ -180,14 +179,21 @@ test('every test that starts a demo board gives it a ledger folder of its own (d
     });
   }
   assert.deepEqual(bad, [], `start the board with env: demoEnv({ MC_PORT: … }) from ./demo-board.mjs — ${bad.join(', ')}`);
+  // and none picks its port at random from a fixed range: two suites at once on one machine collided there (#533)
+  const guessed = [];
+  for (const f of readdirSync(HERE).filter((n) => n.endsWith('.test.mjs'))) {
+    readFileSync(path.join(HERE, f), 'utf8').split('\n').forEach((line, i) => { if (/\bport\w*\s*=\s*[^;]*Math\.random\(\)/i.test(line) && !/^\s*\/\//.test(line)) guessed.push(`${f}:${i + 1}`); });
+  }
+  assert.deepEqual(guessed, [], `ask the system for a port: const port = await freePort() from ./demo-board.mjs — ${guessed.join(', ')}`);
   const env = demoEnv({ MC_PORT: '1' });
   assert.equal(env.MC_DEMO, '1'); assert.equal(env.MC_PORT, '1');
   assert.ok(existsSync(env.MC_DEMO_TASKS) && readdirSync(env.MC_DEMO_TASKS).length === 0, 'a new, empty folder');
   assert.notEqual(demoEnv().MC_DEMO_TASKS, env.MC_DEMO_TASKS, 'a different folder for every board');
+  const ports = await Promise.all([freePort(), freePort(), freePort()]);
+  for (const p of ports) assert.ok(Number.isInteger(p) && p > 1023 && p < 65536, String(p));
 });
 
 test('six demo boards started at the same moment in one checkout all come up (they used to remove each other\'s ledger and die)', { timeout: 40000 }, async () => {
-  const freePort = () => new Promise((resolve) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
   const ports = [];
   for (let i = 0; i < 6; i += 1) ports.push(await freePort());
   const boards = ports.map((port) => {

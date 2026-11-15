@@ -87,10 +87,17 @@ curl -fsSL https://zuluassistant.com/install | bash
 
 Prefer GitHub directly? `curl -fsSL https://raw.githubusercontent.com/zulu-assistant/zulu-assistant/main/get.sh | bash` does the same.
 
-That installs the toolchain (it shows the list and asks once: Homebrew, Node 22, git, gh, uv, cmux,
-Claude Code, the Codex CLI, Graphify and Obsidian; `ZULU_SKIP="codex obsidian graphify"` leaves items
-out), the board, a scheduled triage job, cmux config, the brain and the agent workforce, then starts
-**`zulu setup`**: connect GitHub, choose **Claude Code or
+That checks Node, copies the example config, starts the board as one LaunchAgent and opens it. It
+installs nothing else: no Homebrew packages, nothing in your Claude settings, nothing that costs money.
+The board shows your live Claude Code sessions straight away, read-only, and a **next steps** card with
+the rest, each one command and each your choice: Guardrails (`./install.sh --guardrails`), everything
+(`./install.sh --full`), the brain (`./install.sh --brain`), what to watch (`zulu setup --step watch`).
+
+**Everything at once:** `curl -fsSL https://zuluassistant.com/install | bash -s -- --full` installs the
+toolchain (it shows the list and asks once: Homebrew, Node 22, git, gh, uv, cmux, Claude Code, the
+Codex CLI, Graphify and Obsidian; `ZULU_SKIP="codex obsidian graphify"` leaves items out), cmux config,
+a scheduled triage job (it costs money: a headless model run four times a day), the brain and the agent
+workforce, then starts **`zulu setup`**: connect GitHub, choose **Claude Code or
 Codex** for Mission Control and for workers, pick what to watch from a scan of your Mac, add alert
 channels, create your vault, grant the macOS permissions. Re-run any step later (`zulu setup
 --step engines`); the board shows a setup card until you're done.
@@ -145,9 +152,9 @@ the better choice, are in [docs/WHY-NOT-TMUX.md](docs/WHY-NOT-TMUX.md).
 | macOS | 26 (tested on 26.6, Apple silicon; older versions are untested) |
 | Node | 22 (`nvm install 22` or `brew install node@22`) |
 | [cmux](https://github.com/manaflow-ai/cmux) | 0.65.x, 0.64.x also works (quirks handled in code, see [docs/CMUX-SETUP.md](docs/CMUX-SETUP.md)). Needed for the agent half: session tiles, the mesh, Mission Control. The board's fleet monitoring runs without it. |
-| Claude Code | ≥ 2.1.280 (tested 2.1.296) |
+| Claude Code | ≥ 2.1.295 (tested 2.1.321) |
 | gh | logged in (the dead-man's switch setup and the optional star prompt) |
-| Optional to run | Codex CLI 0.162.x, Docker, Tailscale (phone access), Obsidian + Graphify (the brain). The one-line installer installs the Codex CLI, Graphify and Obsidian unless you leave them out with `ZULU_SKIP`. |
+| Optional to run | Codex CLI 0.162.x, Docker, Tailscale (phone access), Obsidian + Graphify (the brain). The full install (`--full`) installs the Codex CLI, Graphify and Obsidian unless you leave them out with `ZULU_SKIP`; the default one-line install installs none of them. |
 
 Which model runs each role, and how to change it: [docs/MODELS.md](docs/MODELS.md). When something does not work: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
@@ -172,12 +179,15 @@ Config is resolved `overlay/` → core → `examples/`. Adding coverage takes on
 
 ## Roadmap
 
-- Latest release: **1.2.4** ([tested versions](docs/VERSIONS.md), [changelog](CHANGELOG.md)).
+- Latest release: **1.3.0** ([tested versions](docs/VERSIONS.md), [changelog](CHANGELOG.md)).
   It has the board, demo mode, Mission Control, the Agent Mesh, the brain templates, the installer,
-  Slack team-chat intake and Guardrails; and since 1.2: one-click upgrade, a Guardrails-only install,
+  Slack team-chat intake and Guardrails; since 1.2: one-click upgrade, a Guardrails-only install,
   push notices to your phone (a self-hosted ntfy relay), GitHub intake, the evidence panel and the
-  trust work (approvals only you can give, chained receipts, a gate that protects itself).
-- On `main`, for 1.3.0 (the next release): what is listed under Unreleased in the changelog.
+  trust work (approvals only you can give, chained receipts, a gate that protects itself); and
+  since 1.3: approvals bound to the commit and the script content they were given for, a light
+  one-line install, a scheduled triage pass with two tools and a list of exact calls, and more that
+  the gate reads (sessions an agent starts, MCP tools, runners), shipped observing.
+- On `main`, for the next release: what is listed under Unreleased in the changelog.
 - Later: Homebrew tap and an `npx` one-liner, a Linux/systemd collector, more chat transports
   (Discord, Teams, a web form), a hosted heartbeat relay so the dead-man's switch needs no database
   of your own.

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import vm from 'node:vm';
 import os from 'node:os';
@@ -91,7 +91,31 @@ test('the real hook script, board down: the unsure form is denied, the sure form
   const env = { ...process.env, GATE_NODE: process.execPath, MESH_BOARD: 'http://127.0.0.1:9', GATE_TIMEOUT_MS: '300', CMUX_WORKSPACE_ID: '', CMUX_AGENT_LAUNCH_KIND: '' };
   const run = (obj) => { const o = spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify(obj), env, encoding: 'utf8' }); return o.stdout ? JSON.parse(o.stdout).hookSpecificOutput.permissionDecision : 'pass'; };
   assert.equal(run(claudeInput(`cd ${P} ; git push origin HEAD`, onMain)), 'deny');     // if the cd fails, HEAD is main
-  assert.equal(run(claudeInput(`cd ${P} && git push origin HEAD`, onMain)), 'pass');
+  // The pass needs every git read the hook makes to answer inside the hook's own limit of one second. On a
+  // loaded machine one git start can take longer; the hook then has no reading and holds the call (fail
+  // closed, the designed direction, pinned by the next test). Seen once in CI (#565). So the pass form gets
+  // up to three tries: one pass proves the path, and a deny on all three is a real failure.
+  const tries = [];
+  while (tries.length < 3 && tries.at(-1)?.answer !== 'pass') { const t0 = Date.now(); tries.push({ answer: run(claudeInput(`cd ${P} && git push origin HEAD`, onMain)), ms: Date.now() - t0 }); }
+  assert.equal(tries.at(-1).answer, 'pass', `the sure form never passed: ${JSON.stringify(tries)}`);
+});
+
+test('the real hook script, board down: a repository whose reads do not answer is held, never passed', { skip: process.platform === 'win32' }, async () => {
+  const { priv: P } = await repos();
+  const onMain = path.join(path.dirname(P), 'on-main');
+  execFileSync('git', ['init', '-q', '-b', 'main', onMain], { stdio: 'ignore' });
+  for (const d of [P, onMain]) execFileSync('git', ['-C', d, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'x'], { stdio: 'ignore' });
+  // the repository's own settings file becomes a pipe nobody writes to: every git read of it waits until the hook gives up on it
+  const config = path.join(P, '.git', 'config');
+  await rm(config); execFileSync('mkfifo', [config]);
+  const env = { ...process.env, GATE_NODE: process.execPath, MESH_BOARD: 'http://127.0.0.1:9', GATE_TIMEOUT_MS: '300', CMUX_WORKSPACE_ID: '', CMUX_AGENT_LAUNCH_KIND: '' };
+  const t0 = Date.now();
+  const o = spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify(claudeInput(`cd ${P} && git push origin HEAD`, onMain)), env, encoding: 'utf8', timeout: 30_000 });
+  const ms = Date.now() - t0;
+  assert.equal(o.stdout ? JSON.parse(o.stdout).hookSpecificOutput.permissionDecision : 'pass', 'deny', `after ${ms} ms`);
+  // measured on macOS (about 2.2 s: two reads of one second each). Elsewhere git may refuse the pipe at once, which is the same answer sooner.
+  if (process.platform === 'darwin') assert.ok(ms >= 900, `the hook waited for a read (${ms} ms)`);
+  assert.ok(ms < 11_000, `and answered well inside its own deadline of 12 s (${ms} ms)`);
 });
 
 test('board: an unsure folder reads no repository; the row names every folder the call may run in', async () => {
@@ -110,9 +134,8 @@ test('board: an unsure folder reads no repository; the row names every folder th
   const d = await svc.check({ ...hookInput(claudeInput('cd /work/app; git push origin feature', '/work/pub'), {}), workspaceId: 'W1' });
   assert.equal(d.decision, 'deny');
   const [g] = (await ledger.get(task.id)).gates;
-  assert.deepEqual(g.folderUnsure, ['/work/app', '/work/pub']);
-  // (1.2 binds no approval to a commit: the row's reason is the reading, with the folder it came from)
-  assert.match(g.why, /push to public remote acme\/public-app \(if a folder change in the call did not apply, it runs in \/work\/pub\)/);
+  assert.deepEqual(g.folderUnsure, ['/work/app', '/work/pub']); assert.equal(g.ref, null);
+  assert.match(g.why, /push to public remote acme\/public-app .*not bound to a commit \(repository not read\)/);
   const ctx = {}; vm.runInNewContext(await readFile(path.join(ROOT, 'public', 'decide.js'), 'utf8'), { globalThis: ctx });
   const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   assert.match(ctx.BoardDecide.gateRowHtml(g, { key: '1:g1', esc, age: '1m', open: false, actions: '' }), /runs in \/work\/app or \/work\/pub \(a folder change may not apply\): repository not read/);

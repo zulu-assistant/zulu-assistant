@@ -153,7 +153,7 @@ test('write targets: the destination of a copy is a write, its source is not', (
   const t = (c) => writeTargets(parseCommand(c).cmds[0]);
   assert.deepEqual(t('cp a b'), ['b', 'b/a']); assert.deepEqual(t('cp -r a b dir'), ['dir', 'dir/a', 'dir/b']);
   assert.deepEqual(t('mv a b'), ['a', 'b', 'b/a']); assert.deepEqual(t('tee -a x y'), ['x', 'y']);
-  assert.deepEqual(t('sed -n 1p x'), []); assert.deepEqual(t("sed -i '' s/a/b/ x"), ['', 's/a/b/', 'x']);
+  assert.deepEqual(t('sed -n 1p x'), []); assert.deepEqual(t("sed -i '' s/a/b/ x"), ['x']); assert.deepEqual(t('sed -i.bak -e s/a/b/ x y'), ['x', 'y']); assert.deepEqual(t('plutil -replace K -string v x.plist'), ['x.plist']); assert.deepEqual(t('plutil -p x.plist'), []);
   assert.deepEqual(t('curl -s -o out https://example.com'), ['out']); assert.deepEqual(t('dd if=a of=b'), ['b']); assert.deepEqual(t('cat x'), []);
 });
 

@@ -302,6 +302,8 @@ export function nameVerdict(ev, declared, { isOwner = () => false, ownerToken = 
  *                      disagree, it carries no workspace id, or its chain no longer reaches the
  *                      app). Calling that "unregistered" would turn an enforced agent into an
  *                      observed one by breaking the lookup.
+ * This answers WHO; whether the call is held is the gate service's, and there the declared name
+ * counts too: a call is enforced when either name is (evidence adds a hold, never takes one away).
  * → { agent, force, basis }
  */
 export function hookIdentity(ev, { declared, folder, headlessWs = () => null, okJob = () => false } = {}) {

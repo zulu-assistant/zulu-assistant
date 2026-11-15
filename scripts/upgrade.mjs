@@ -12,11 +12,12 @@
 // overlay/ and every migrated file restored, install, restart, health again. The ledger and other
 // data/ written meanwhile are never rolled back.
 import { readFile, writeFile, mkdir, cp, rm, open, copyFile, unlink } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { sh } from '../src/worktree.mjs';
+import { lightInstall } from './guardrails-profile.mjs';
 import { upgradeConfig, releaseInstall, fetchReleases, fetchTagCommit, pickRelease, readStateSync, writeState, cmpSemver, labelPrefix } from '../src/upgrade.mjs';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,6 +34,42 @@ const runCmd = (cmd, args, { cwd, timeoutMs = 600000, env } = {}) => new Promise
     ok: !e, out: String(out || '').trim(), err: String(err || e?.message || '').trim(),
   }));
 });
+
+const readJsonQuiet = async (f) => { try { return JSON.parse(await readFile(f, 'utf8')); } catch { return null; } };
+
+/**
+ * What kind of install is this? → 'light' | 'guardrails' | 'full'.
+ * light: `./install.sh` made it (data/setup-state.json says mode 'light') and no agent is registered in a mesh.
+ * guardrails: the Guardrails-only profile (overlay/config/local.json). Anything else is the full install.
+ */
+export async function installKind(root, overlay = process.env.MC_OVERLAY || path.join(root, 'overlay')) {
+  const local = await readJsonQuiet(path.join(overlay, 'config', 'local.json'));
+  if (local?.settings?.profile === 'guardrails') return 'guardrails';
+  return (await lightInstall({ overlay, root }).catch(() => false)) ? 'light' : 'full';
+}
+
+/**
+ * The install step of a light or Guardrails-only install: the board's plist, rendered again, and nothing else.
+ * Those installs promised no cmux config, no secrets file and no toolchain; the full bootstrap wrote all three
+ * (seen in the 1.3.0 rehearsal). The plist is replaced only when it differs (the old one is kept beside it);
+ * launchd is not touched here, the restart step follows. → { ok, detail }
+ */
+export async function boardPlistOnly(root, kind, { home = process.env.HOME || '', run = runCmd } = {}) {
+  const label = `${labelPrefix(root)}.master-console`;
+  const plist = path.join(home, 'Library', 'LaunchAgents', `${label}.plist`);
+  const tmp = path.join(root, 'data', `upgrade-${label}.plist.tmp`);
+  const r = await run('/bin/bash', [path.join(root, 'scripts', 'render-tmpl.sh'), 'system/launchd/master-console.plist.tmpl', tmp], { cwd: root });
+  if (!r.ok) return { ok: false, detail: `the board's plist could not be rendered: ${r.err.split('\n').slice(-1)[0]}` };
+  try {
+    const next = await readFile(tmp, 'utf8');
+    const have = await readFile(plist, 'utf8').catch(() => null);
+    if (have === next) return { ok: true, detail: `${kind} install: the board's plist is up to date (no other install step)` };
+    await mkdir(path.dirname(plist), { recursive: true });
+    if (have != null) await copyFile(plist, `${plist}.bak-${stamp()}`);
+    await writeFile(plist, next);
+    return { ok: true, detail: `${kind} install: the board's plist written again (no other install step)` };
+  } finally { await unlink(tmp).catch(() => {}); }
+}
 
 /** The real side effects; tests replace any of them. Each returns { ok, detail }. */
 export function defaultSteps(root) {
@@ -66,6 +103,9 @@ export function defaultSteps(root) {
       return { ok: true, detail: `tests ${pass || '?'}/${pass || '?'}` };
     },
     async install() {
+      // a light or a Guardrails-only install gets its own install step, not the full bootstrap
+      const kind = await installKind(root);
+      if (kind !== 'full') return boardPlistOnly(root, kind);
       const s = path.join(root, 'scripts', 'bootstrap.sh');
       if (!existsSync(s)) return { ok: true, detail: 'no bootstrap.sh (skipped)' };
       const r = await runCmd('/bin/bash', [s, 'install'], { cwd: root });
@@ -272,4 +312,6 @@ async function main() {
   process.exit(r.ok ? 0 : 1);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(`upgrade: ${e.message}`); process.exit(1); });
+// The path as typed, resolved through links: import.meta.url is the real path, and under a linked folder a
+// plain comparison skipped main() and the command ended at exit 0 having done nothing (#485).
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main().catch((e) => { console.error(`upgrade: ${e.message}`); process.exit(1); });

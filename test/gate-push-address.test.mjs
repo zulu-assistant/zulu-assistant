@@ -139,7 +139,7 @@ test('B: an address inside a flag\'s value does not name the repository; a landi
   const named = await s.codex('gh pr merge https://github.com/acme/app/pull/5 --squash');
   assert.equal(named.unfiled, undefined);
   const [g] = await s.gates();
-  assert.match(g.why, /PR #5 "T"/); assert.equal(s.prCalls.length, 1);                     // read once; the row shows the PR it lands (1.2 records no head)
+  assert.equal(g.ref?.head, 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'); assert.equal(s.prCalls.length, 1);   // read once, bound
   // named, but the PR cannot be read: refused, never a row bound to nothing
   const t = await service(null);
   const d = await t.codex('gh pr merge 5 --squash -R acme/app');

@@ -100,7 +100,7 @@ const DO = {
     for (const rel of ['POLICY.md', 'MISSION-CONTROL.md', 'config/TRIAGE.md']) {
       const f = path.join(OVERLAY, rel);
       const t = await readFile(f, 'utf8').catch(() => null);
-      if (t && t.includes('<OWNER>')) { await writeFile(f, t.replaceAll('<OWNER>', name)); say('done', `filled your name into overlay/${rel}`); }
+      if (t && t.includes('<OWNER>')) { await writeFile(f, t.replaceAll('<OWNER>', name).replaceAll('<UID>', String(process.getuid()))); say('done', `filled your name into overlay/${rel}`); }
     }
     await restartBoard();
     say('info', `overlay/POLICY.md decides what agents may do without you (paid / outward / destructive always escalate).`);

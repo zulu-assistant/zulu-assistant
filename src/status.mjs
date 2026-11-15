@@ -29,10 +29,22 @@ export function readGateCardSync(file = GATE_CARD) { try { return JSON.parse(rea
  * gate file differs from what landed, the hook is no longer registered as installed, or a landed
  * change has not been running here for too long; amber while the checkout is merely behind.
  */
-export function gateCard(c, now = Date.now()) {
+/** A light install that has not been taken further: its state file says mode 'light'. No state file (a full or hand-built board) = false. */
+export const lightNotInstalled = (setup) => setup?.mode === 'light';
+/** The cmux bridge card is left out on a light install with no cmux: that install never promised cmux (pure). */
+export const showsBridgeCard = (setup, cmuxPresent) => cmuxPresent || !lightNotInstalled(setup);
+export function gateCard(c, now = Date.now(), setup = null) {
   if (!c) return null;
   const stale = now - (c.at || 0) > 10 * 60e3;
   const integ = c.integrity && typeof c.integrity === 'object' ? c.integrity : null;
+  // A light install (`./install.sh`, setup-state mode 'light') on which Guardrails was NEVER installed: no card, in
+  // place of an amber "hook MISSING" for something the owner did not ask for. The next-steps card names Guardrails
+  // and its command. "Never" is kept by a mark: once the board has seen a registered hook or a gate it writes
+  // `guardrailsSeen` into the state file (src/setup.mjs), and from then on the card is today's card, so a hook that
+  // is lost later reads MISSING as on any board. A gate on a live task, an invalid rules file or a red integrity
+  // check show the card too. Any other install: unchanged.
+  if (lightNotInstalled(setup) && !setup.guardrailsSeen && c.hook === false && !c.pending && !c.gates
+    && !/policy invalid/.test(c.detail || '') && integ?.status !== 'down') return null;
   const red = (c.status === 'failed' && /policy invalid/.test(c.detail || '')) || integ?.status === 'down';
   const status = stale ? 'stale' : red ? 'failed' : c.status === 'ok' && integ?.status !== 'warn' ? 'ok' : 'warn';
   // what is wrong comes first: the row is read from the left
@@ -453,7 +465,9 @@ export async function snapshot() {
   });
 
   const bridge = collect.cmuxBridgeStatus();
-  jobs.push({
+  const setupDoc = readStateSync();
+  // a light install with no cmux has no such card (it never promised cmux; the next-steps card names the full install)
+  if (showsBridgeCard(setupDoc, CMUX_PRESENT)) jobs.push({
     label: 'cmux:bridge', name: 'cmux bridge (dispatch + notify)', domain: 'infra',
     schedule: 'socket check', logAvailable: false,
     // no cmux on this Mac: say so (amber, off the alert ladder). Never "socket auth OK" for a program that is not there.
@@ -464,7 +478,7 @@ export async function snapshot() {
   });
 
   // installs made by install.sh carry data/setup-state.json: one card until `zulu setup` is done
-  const setup = setupCard(readStateSync());
+  const setup = setupCard(setupDoc);
   if (setup) jobs.push(setup);
   // GitHub stats (SETTINGS.repoStats): informational cards, fetched by server.mjs
   jobs.push(...repoCards(readStatsSync(), SETTINGS.repoStats, now));
@@ -487,7 +501,7 @@ export async function snapshot() {
   const reading = readingCard(readReadingSync(), SETTINGS.operatingReading);
   if (reading) jobs.push(reading);
   // guardrails (docs/GUARDRAILS.md): pending gates, hook installed, policy health — written by the server each poll
-  const gate = gateCard(readGateCardSync(), now.getTime());
+  const gate = gateCard(readGateCardSync(), now.getTime(), setupDoc);
   if (gate) jobs.push(gate);
   // database views (SETTINGS.viewWatch): amber only, never on the alert ladder
   jobs.push(...viewCards(readViewSync(), SETTINGS.viewWatch, now.getTime()));

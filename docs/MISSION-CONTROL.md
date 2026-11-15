@@ -127,7 +127,7 @@ Each role runs on the engine you pick in `zulu setup --step engines`, stored in
 |---|---|---|
 | Mission Control | contract via `--append-system-prompt-file`, a fixed tool allowlist | contract as its first instruction (plus `~/.codex/AGENTS.md`), workspace-write sandbox, on-request approvals |
 | Workers / residents | `--permission-mode auto` / `acceptEdits`, `--name` = mesh address | workspace-write sandbox, on-request approvals; the address comes from the workspace title |
-| Scheduled triage | `claude -p` with four tools (`--tools`), no MCP servers or skills, and `--allowedTools` for its shell commands | `codex exec` in the workspace-write sandbox (writes only inside the repo), no approvals |
+| Scheduled triage | `claude -p` with two tools (`--tools`), no MCP servers or skills, default permission mode, and `--allowedTools` for its calls and its one folder for new files | `codex exec` in the workspace-write sandbox (writes only inside the repo), no approvals |
 | Models | `master` / `worker` / `workerFallback` (probed daily) | `codex.model` / `codex.workerModel`, or Codex's own default |
 
 **The bounds are not identical.** Claude enforces a per-tool allowlist. Codex has no per-tool
@@ -162,26 +162,65 @@ A LaunchAgent runs `scripts/triage.sh` four times a day (the template schedule
 is 08:30, 12:30, 16:30 and 20:30). Triage is a headless `claude -p` pass that
 follows `config/TRIAGE.md`
 ([example](../examples/config/TRIAGE.md)). It is **bounded by its start
-line**: `--tools "Bash,Read,Write,Edit"` gives it those four tools and no
-others, `--strict-mcp-config` loads no MCP server, `--disable-slash-commands`
-loads no skills, and `--allowedTools` names the shell commands it may run.
-An allow list alone is not a bound: it answers permission asks, and tools that
-need no permission (a helper agent, messages, schedules, web reads) would stay
-available. Nor does the list cover everything in the shell: Claude Code runs
-read-only commands (such as `cat` or `jq` on a file in the checkout) without
-asking, and the pass may write files inside the checkout. A Claude Code that
-does not list all three flags in `claude --help` starts the pass with the allow
-list alone, and the job's log says so.
+line**: `--tools "Bash,Write"` gives it those two tools and no others,
+`--strict-mcp-config` loads no MCP server, `--disable-slash-commands` loads no
+skills, `--permission-mode default` refuses whatever the list does not allow
+(a headless run has nobody to answer), `--setting-sources user` reads only your
+user settings (a headless run would otherwise also apply the allow rules saved in
+the checkout's own `.claude/settings.local.json`; your gate hook lives in the user
+settings and still runs), and `--allowedTools` names the only calls it may make.
+An allow list alone is not a bound: it answers permission asks, and
+tools that need no permission (a helper agent, messages, schedules, web reads)
+would stay available.
+
+The allow list is built when the pass starts (`scripts/triage-allow.mjs`), and
+`scripts/triage.sh --print-allowed` prints it. The pass can:
+- read one summary from the board and post one line to its ticker, both through
+  `scripts/triage-board.sh` (there is no `curl` on the list, so it cannot call any
+  other address);
+- show one desktop notice;
+- write new files named `data/handoffs/triage-*`, its report, its ticker line
+  and a worker prompt, and nothing else. With no Read tool it cannot write over
+  any file that already exists, its own scripts included;
+- restart exactly the jobs and containers your registry lists, except the jobs
+  your policy lists as paid or outbound (`lists.paidOrOutbound`). Each restart is
+  its own exact entry, and the procedure it is handed names the same ones. A
+  restart is `launchctl kickstart` without `-k`: it starts a job that is not
+  running and leaves a running one alone. An amber card (`due`, `warn`, `amber`,
+  `unknown`, `info`) is reported, never acted on: a `due` job is inside its grace
+  and may still be running. The pass gets no project
+  instructions, so every rule it needs is in the procedure and the reading;
+- ask for a diagnostic worker for a red card. It files one low task to Mission
+  Control (`scripts/triage-board.sh ask`), and Mission Control decides whether a
+  worker starts. The board checks the card is on its own reading, the prompt
+  file's place and size, and at most one ask per card per day and two per pass.
+  This is the shipped setting since 1.3 (`SETTINGS.triage.dispatch: 'ask'` in the
+  example registry). With `'spawn'`, or with the key absent, as in a registry
+  made before 1.3, the pass starts the worker itself (`scripts/agent-spawn.sh`):
+  the one way from an unattended pass to a session with every tool, through a
+  prompt file the pass itself writes. To change an older install, add
+  `triage: { dispatch: 'ask' }` to `SETTINGS` in `overlay/config/jobs.mjs`; the
+  spawn then leaves the list.
+
+One thing the list does not bound yet: Claude Code runs read-only shell commands
+(such as `cat` of a file in the checkout) without asking. If the list cannot be
+built, the pass does not start. A Claude Code that does not list all three
+flags in `claude --help` starts the pass without them, and the job's log says
+so.
 
 Each pass:
 
-- reads `/api/status` and `/api/tasks/summary`. If everything is green, it
-  prints `all green` and stops, with no files and no notifications;
-- for each red card, applies only policy-safe fixes (`launchctl kickstart` of
-  non-paid, non-outbound jobs, `docker restart`), or dispatches **one**
-  diagnostic worker. It never runs more than 2 dispatches per pass;
-- keeps a 12h cooldown per label in `data/triage-state.json`;
-- writes `data/handoffs/triage-<timestamp>.md` with a Work section from the
+- reads `/api/triage`: the cards that are not ok, the agents waiting for
+  input, the counts and the ledger lists, capped so the answer can be read in
+  one call (a task from outside the board shows where it came from, not its
+  title). If everything is green, it prints `all green` and stops, with no
+  files and no notifications;
+- for each red card, applies only policy-safe fixes (the exact restarts on its
+  list), or asks for or starts **one** diagnostic worker, never more than 2 per
+  pass;
+- keeps a 12h cooldown per label in `data/triage-state.json`, written by the
+  board script;
+- writes `data/handoffs/triage-<timestamp>.md` (the time in UTC) with a Work section from the
   ledger, then sends a `cmux notify` and a ticker line.
 
 Triage never deletes, never changes config, and never claims, closes or

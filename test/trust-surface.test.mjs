@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
-import { mkdtemp, writeFile, readFile, mkdir, copyFile, symlink } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, copyFile, symlink, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,7 +17,7 @@ import { createGateService } from '../src/gate-service.mjs';
 import { hookInput, localVerdict } from '../scripts/gate-hook.mjs';
 import { renderPolicy } from '../scripts/policy-render.mjs';
 import { OWNER, isOwner } from '../src/config.mjs';
-import { demoEnv } from './demo-board.mjs';
+import { demoEnv, freePort } from './demo-board.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -281,7 +282,7 @@ function rawRequest(port, { method = 'POST', pathname, headers = {}, body = '' }
 }
 
 test('a running board: card actions need the owner\'s token; cross-site, wrong-host and non-JSON writes are refused; the CLI and the page still work', { timeout: 40000 }, async () => {
-  const port = 39900 + Math.floor(Math.random() * 90);
+  const port = await freePort();
   const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: demoEnv({ MC_PORT: String(port) }), stdio: 'ignore' });
   const J = { 'content-type': 'application/json' };
   const H = `127.0.0.1:${port}`;
@@ -478,10 +479,37 @@ test('the real hook holds an agent\'s signed call (hook JSON as sent, board down
 });
 
 test('triage in a fresh install logs its ticker line with the JSON header', async () => {
-  for (const f of ['examples/config/TRIAGE.md']) {
-    const text = await readFile(path.join(ROOT, f), 'utf8');
-    const i = text.indexOf('/api/event');
-    assert.ok(i > 0);
-    assert.match(text.slice(i - 40, i + 120), /curl -s -X POST localhost:3210\/api\/event -H 'content-type: application\/json'/);
+  // since #588 the pass sends the event file through scripts/triage-board.sh, which declares the body as JSON
+  const text = await readFile(path.join(ROOT, 'examples/config/TRIAGE.md'), 'utf8');
+  assert.match(text, /`scripts\/triage-board\.sh event data\/handoffs\/triage-<STAMP>\.event\.json`/);
+  const script = await readFile(path.join(ROOT, 'scripts/triage-board.mjs'), 'utf8');
+  assert.match(script, /'\/api\/event', \{ method: 'POST', headers: \{ 'content-type': 'application\/json' \}/);
+});
+
+test('the example triage pass is told the call shapes its tool list allows, and shows none it refuses', async () => {
+  const text = await readFile(path.join(ROOT, 'examples/config/TRIAGE.md'), 'utf8');
+  assert.match(text, /How to call tools/);
+  // every backticked command the pass is shown must be one its --allowedTools list (scripts/triage-allow.mjs, #588) lets run;
+  // the restarts are exact entries written into the procedure at <ALLOWED_CALLS> (test/triage-board.test.mjs)
+  const { FIXED_HEAD, SPAWN } = await import('../scripts/triage-allow.mjs');
+  const prefixes = [...FIXED_HEAD, SPAWN].map((e) => e.match(/^Bash\((.*):\*\)$/)?.[1]).filter(Boolean);
+  const shown = [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((c) => prefixes.some((p) => c.startsWith(p.split(' ')[0] + ' ')));
+  assert.ok(shown.length >= 5, `found ${shown.length} commands`);
+  for (const c of shown) {
+    assert.ok(prefixes.some((p) => c === p || c.startsWith(p + ' ')), `not on the list: ${c}`);
+    // a $(…) is refused even inside double quotes; ;, && and | only outside quotes
+    assert.doesNotMatch(c.replace(/'[^']*'/g, "''"), /\$\(/, `refused by the list: ${c}`);
+    assert.doesNotMatch(c.replace(/'[^']*'|"[^"]*"/g, "''"), /&&|;|\|/, `refused by the list: ${c}`);
   }
+});
+
+test('triage.sh writes the user id into the procedure it hands the engine, for the placeholder and the older substitution', { skip: !existsSync('/bin/zsh') && 'no zsh' }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'triage-uid-'));
+  await mkdir(path.join(dir, 'config'));
+  await writeFile(path.join(dir, 'config/TRIAGE.md'), 'a `launchctl kickstart -k gui/$(id -u)/x`\nb `launchctl kickstart -k gui/<UID>/y`\n');
+  const r = spawnSync('/bin/zsh', [path.join(ROOT, 'scripts/triage.sh'), '--print-prompt'], { encoding: 'utf8', env: { ...process.env, MC_OVERLAY: dir } });
+  assert.equal(r.status, 0, r.stderr);
+  const uid = process.getuid();
+  assert.equal(r.stdout, `a \`launchctl kickstart -k gui/${uid}/x\`\nb \`launchctl kickstart -k gui/${uid}/y\`\n`);
+  await rm(dir, { recursive: true, force: true });
 });

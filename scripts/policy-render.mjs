@@ -28,7 +28,7 @@ const ruleText = (r) => {
   if (r.when === 'pushProtected') bits.push(`to ${(r.protectedRefs || []).map((x) => `\`${x}\``).join('/')}, forced, tags, ref deletes, any push to @publicRemotes or @deployOnPush (free: ${(r.allowRefs || []).map((x) => `\`${x}\``).join(', ') || 'other branches'} and feature branches)`);
   if (r.when === 'outsideRepo') bits.push('outside the working tree (or on a glob/variable path)');
   if (r.tool) bits.push(`MCP tool \`${r.tool}\``);
-  if (r.sql) bits.push('SQL that drops or truncates a table/schema/database');
+  if (r.sql) bits.push(r.check ? 'SQL that updates, deletes, inserts or alters' : 'SQL that drops or truncates a table/schema/database');
   if (r.pathAny) bits.push(`reading or writing ${r.pathAny.join(', ')}`);
   if (r.pathWrite) bits.push(`writing ${r.pathWrite}`);
   if (r.textAny) bits.push(`a command containing ${r.textAny.map((t) => `\`${t}\``).join(' / ')}`);
@@ -39,6 +39,13 @@ const ruleText = (r) => {
   if (r.when === 'gitRefWrite') bits.push('(moving the local copy of a remote branch)');
   if (r.when === 'liveCheckout') bits.push('in the live checkout, when it can leave a gate file holding something that has not landed (free: a fast-forward of the default branch from origin, a stash, a restore from the index)');
   if (r.when === 'boardProcess') bits.push('aimed at the board');
+  if (r.when === 'curlWrite') bits.push('with a write method or a body');
+  if (r.when === 'ghApiWrite') bits.push('with a write method, fields, or a graphql mutation');
+  if (r.when === 'browserAction') bits.push('that clicks, types or runs script in a browser panel, or points one at this board (reading a panel is free)');
+  if (r.when === 'otherPane') bits.push('aimed at a pane other than the caller\'s own');
+  if (r.when === 'paneCommand') bits.push('with a command to run');
+  if (r.exceptMissionControl) bits.push('(not Mission Control)');
+  if (r.when === 'uiScript') bits.push('that scripts the interface (System Events) or runs script in a browser page');
   if (r.check) bits.push(`· *check \`${r.check}\`*`);
   return bits.join(' ');
 };
@@ -57,6 +64,11 @@ export function renderPolicy(p) {
   }
   const lists = Object.entries(p.lists || {}).filter(([, v]) => v.length);
   if (lists.length) { lines.push('', 'Lists:'); for (const [k, v] of lists) lines.push(`- @${k}: ${v.map((x) => `\`${x}\``).join(', ')}`); }
+  // #598: a script's own dry flags (its flagless run is not a dry run)
+  if (Array.isArray(p.dryForms) && p.dryForms.length) {
+    lines.push('', 'Dry forms (the dry run a write form asks for adds these flags):');
+    for (const e of p.dryForms) lines.push(`- a script in ${items(e.scriptIn)}: ${items(e.flags || [])}`);
+  }
   lines.push('', 'Anything that would need a gate but cannot be read with certainty is gated as **opaque**.',
     'A **program go** (the owner\'s approval of a task\'s plan, kind `program`) approves the *standing* classes on that task only — merges only into private repos outside @publicRemotes/@deployOnPush — until it is revoked (`task.sh revoke-go N`) or the task closes. Every other class asks per action.', '', END);
   return lines.join('\n');

@@ -69,6 +69,15 @@ chain counts, so a child you start is still you.
   - Your words are never dropped. A comment, a message or a new task still
     goes out, marked `UNVERIFIED`, and the ledger records it under the board's
     name with the reason.
+  - A task filed under a name the board could not verify says so in a field
+    of its own (`task.sh show` prints it, the WORK row shows it, every wake
+    about it carries it). That name has no requester standing on the task
+    and gets no requester wakes until the owner confirms the request on the
+    board, or Mission Control does: `task.sh confirm-request <id> ["why"]`.
+    If you are the agent named and you did not file it, tell Mission Control.
+  - `mesh-cli.mjs outbox drop <agent>` needs your name too: you drop what is
+    queued for yourself, or what you sent; everything queued for another
+    agent is Mission Control's or the owner's to drop.
   - A command you leave running after its shell has exited (`cmd &`) has no
     session behind it, so it is nobody. Keep ledger calls in the foreground.
   - The gate hook is judged the same way: a child session is the session that
@@ -340,7 +349,7 @@ reason, and that draft is never probed again.
 ## API (board, localhost + Tailscale source guard)
 `GET /api/agents` · `POST /api/mesh/send` (localhost) · `POST /api/mesh/outbox/drop` (localhost) ·
 `GET /api/tasks?owner=&status=` (`status=live` = all non-terminal) ·
-`GET /api/tasks/summary` · `POST /api/tasks` · `GET|PATCH /api/tasks/:id` ·
+`GET /api/tasks/summary` · `GET /api/triage` (the scheduled triage pass's one capped reading: non-ok cards, agents waiting, counts, ledger lists; no title for an outside-sourced task) · `POST /api/triage/ask` (localhost; the pass asks Mission Control for a worker under `SETTINGS.triage.dispatch: 'ask'`: the board checks the card label against its own reading, the prompt file `data/handoffs/triage-fix-*.md` (plain, ≤ 8 KB), one per label per UTC day and two per 30 minutes, then files one low task under its own name naming the file; 409 with the reason otherwise) · `POST /api/tasks` · `GET|PATCH /api/tasks/:id` ·
 `GET /api/attention` · `POST /api/attention/snooze|unsnooze` (decision token, no agent identity; see Attention ring)
 (PATCH ops: claim, start, assign, comment, block, unblock, answer (chat intake token only), plan (owner; plan-first tasks only: needs_approval kind "plan", close refused until approved), request_approval,
 record_decision (owner/MC; also on done tasks; an approve is a proposal under `SETTINGS.paneAnswers` 'confirm', the default), gate_record (MC only; the same rule for a gate),

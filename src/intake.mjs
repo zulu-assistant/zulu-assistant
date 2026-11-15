@@ -37,6 +37,9 @@ export function channelsFrom(doc) {
     priority: ['low', 'normal', 'high', 'urgent'].includes(c.priority) ? c.priority : 'normal',
     // requests the default owner can't take yet (e.g. video) park with this agent, tagged needsScoping
     videoOwner: c.videoOwner ? String(c.videoOwner) : null,
+    // a channel where people also just talk (#563): requests are filed and get the eyes reaction, but the intake posts
+    // no "Filed as" reply and no status line for a task closed as chatter (cancelled)
+    quiet: c.quiet === true,
     fields: (Array.isArray(c.fields) ? c.fields : []).filter((f) => f && f.name && f.kind)
       .map((f) => ({ name: String(f.name), kind: String(f.kind), required: f.required === true, values: Array.isArray(f.values) ? f.values.map(String) : [] })),
   })).filter((c) => /^[a-z0-9][a-z0-9._-]{0,79}$/.test(c.name));
@@ -308,6 +311,36 @@ const STATUS_WORD = {
   done: 'done', cancelled: 'cancelled', open: 'open',
 };
 
+/** Is this a publisher line for a cancelled task (the form publishLines writes)? A quiet channel drops it. */
+export const cancelLine = (text) => /^#\d+ cancelled( \(|$)/.test(String(text || ''));
+
+/**
+ * Writes that must land in the order they were asked for: each gets its own snapshot and waits for the one before.
+ * (#563: on the first frame the intake wrote 'frame' and then 'connected' at once; the older snapshot finished last
+ * and the status file read 'connecting' while the link was up, so the card counted down time.)
+ */
+export function serialWriter(write) {
+  let last = Promise.resolve();
+  return (value) => (last = last.then(() => write(value)).catch(() => {}));
+}
+
+/**
+ * A history read that fails for one channel only: the bot is not in it (yet), or it is gone. The sweep skips that
+ * channel and goes on (#563: the general channel was routed before the bot was invited, every sweep failed, the
+ * link card would have gone red). Any other error still fails the sweep.
+ */
+export const sweepSkips = (err) => ['not_in_channel', 'channel_not_found', 'is_archived'].includes(err?.error);
+
+/**
+ * The cursor to write for a channel the sweep skipped, or null (#563, MC's read). Only a channel with no cursor, and
+ * only on an ordinary sweep: then `oldest` is the start of reading (now), so an invite later reads from the skip
+ * on, never further back. A manual window (`since`) must never become a skipped channel's cursor: it reaches up
+ * to 7 days back, and the invite would then file that week.
+ */
+export function skippedCursor({ cursor, since = null, oldest }) {
+  return cursor || since != null || !oldest ? null : oldest;
+}
+
 /**
  * Lines for a chat-originated task's thread after one ledger change (prev → next).
  * Only tasks with a chat thread (source.channel + ts): other sources (e.g. the board's own
@@ -514,9 +547,13 @@ export function linkHealth(status, { now = Date.now(), warnMin = 10, redMin = 60
   const worst = Math.max(down, quiet);
   const fmt = (m) => (m === Infinity ? 'never' : m < 90 ? `${Math.round(m)}m ago` : `${Math.round(m / 60)}h ago`);
   const why = `${status.state}${status.state !== 'connected' && down ? ` for ${Math.round(down)}m` : ''} · last frame ${fmt(frame)} · last sweep ${fmt(sweep)}` +
-    (status.reconnects ? ` · ${status.reconnects} reconnect(s)` : '');
+    (status.reconnects ? ` · ${status.reconnects} reconnect(s)` : '') +
+    // a routed channel the bot cannot read (not invited, gone): the sweep skips it, the card names it
+    (Array.isArray(status.sweepSkipped) && status.sweepSkipped.length ? ` · not readable: ${status.sweepSkipped.map((n) => `#${n}`).join(', ')} (invite the bot)` : '');
   if (worst >= redMin) return { level: 'down', why };
   if (worst >= warnMin) return { level: 'warn', why };
+  // a routed channel nobody can read: requests posted there go unfiled until the bot is invited (#563)
+  if (Array.isArray(status.sweepSkipped) && status.sweepSkipped.length) return { level: 'warn', why };
   return { level: 'ok', why };
 }
 

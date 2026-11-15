@@ -14,6 +14,9 @@ const HOOK = path.join(ROOT, 'scripts', 'gate-hook.sh');
 const env = { ...process.env, GATE_NODE: process.execPath, MESH_BOARD: 'http://127.0.0.1:9', GATE_TIMEOUT_MS: '300', CMUX_WORKSPACE_ID: '' };
 const call = (obj, extra = {}) => spawnSync('sh', [HOOK, '--env-board'], { input: JSON.stringify(obj), env: { ...env, ...extra }, encoding: 'utf8' });
 const bash = (command, ev = 'PreToolUse') => ({ hook_event_name: ev, tool_name: 'Bash', tool_input: { command }, cwd: ROOT, session_id: 's1' });
+// a call that must hit no trigger is made from a folder whose path has no trigger word in it: the shell reads the
+// whole input, folder included, and this suite also runs in checkouts whose own path holds such a word (#541)
+const elsewhere = (command) => ({ ...bash(command), cwd: '/srv/work' });
 
 test('the shipped default trigger file is exactly the default policy\'s trigger lines', () => {
   assert.deepEqual(readFileSync(path.join(ROOT, 'scripts', 'gate-triggers.default'), 'utf8').trim().split('\n'), triggerLines(DEFAULT_POLICY));
@@ -36,7 +39,7 @@ test('grep -iE and the JS twins agree on every sample (the shell and the board d
 });
 
 test('fast path: a call with no trigger prints nothing, exits 0, well inside the 50 ms budget', () => {
-  const input = JSON.stringify(bash('git status && ls -la src && node --version'));
+  const input = JSON.stringify(elsewhere('git status && ls -la src && node --version'));
   const times = [];
   for (let i = 0; i < 60; i++) {
     const t0 = process.hrtime.bigint();
@@ -76,7 +79,7 @@ test('fast path never starts Node: GATE_NODE is a marker shim that a no-trigger 
   const marker = path.join(dir, 'ran');
   const shim = path.join(dir, 'node');
   writeFileSync(shim, `#!/bin/sh\n: > "${marker}"\nexec "${process.execPath}" "$@"\n`, { mode: 0o755 });
-  const r = call(bash('git status && ls -la src && node --version'), { GATE_NODE: shim });
+  const r = call(elsewhere('git status && ls -la src && node --version'), { GATE_NODE: shim });
   assert.equal(r.status, 0); assert.equal(r.stdout, '');
   assert.equal(readdirSync(dir).includes('ran'), false, 'the fast path started Node');
   // the shim itself works: a trigger hit does reach Node through it

@@ -21,15 +21,15 @@ const run = (command, policy = shipped) => classify({ tool: 'Bash', command, cwd
 const HELD = [
   // rules that name a script
   ['node < scripts/upgrade.mjs', 'upgrade'], ['node --input-type=module < scripts/upgrade.mjs', 'upgrade'], ['cat scripts/upgrade.mjs | node', 'upgrade'],
-  ['cat install.sh | bash -s upgrade', 'upgrade'], ['cat install.sh | bash -s -- rollback', 'upgrade'],
-  ['bash -s upgrade < install.sh', 'upgrade'], ['bash -s -- rollback < install.sh', 'upgrade'],
+  ['bash < install.sh', 'self'], ['bash -s -- --yes < install.sh', 'self'], ['cat install.sh | bash', 'self'], ['cat install.sh | bash -s -- --yes', 'self'],
+  ['bash -s upgrade < install.sh', 'upgrade'], ['bash -s -- rollback < install.sh', 'upgrade'], ['bash -s -- install < scripts/bootstrap.sh', 'self'],
   ['sh -s -- gate 5 g1 approve < scripts/task.sh', 'self'], ['bash - gate 5 g1 approve < scripts/task.sh', 'self'], ['cat scripts/task.sh | sh -s -- gate 5 g1 approve', 'self'],
   ['cat scripts/mesh-cli.mjs | node - task gate 5 g1 approve', 'self'], ['node -r ./pre.cjs < scripts/upgrade.mjs', 'upgrade'],
   // rules on a flag
   ['node - --commit < scripts/rename.mjs', 'write'], ['cat scripts/rename.mjs | node - --commit', 'write'], ['python3 - --apply < tools/sync.py', 'write'],
   ['bash -s -- --apply < tools/sync.sh', 'write'], ['bash -s -- --apply <<< "$(cat tools/sync.sh)"', 'write'], ['bash -s -- --apply < <(cat tools/sync.sh)', 'write'],
   // a here-string that is one file's content
-  ['bash -s upgrade <<< "$(cat install.sh)"', 'upgrade'], ['bash -s -- rollback <<< "$(< install.sh)"', 'upgrade'], ['sh -s -- gate 5 g1 approve <<< "$(cat scripts/task.sh)"', 'self'], ['cd tools && bash -s -- --commit < sync.sh', 'write'],
+  ['bash <<< "$(cat install.sh)"', 'self'], ['bash <<< "$(< install.sh)"', 'self'], ['sh -s -- gate 5 g1 approve <<< "$(cat scripts/task.sh)"', 'self'], ['cd tools && bash -s -- --commit < sync.sh', 'write'],
 ];
 const FREE = [
   // the call names its own script or program: the input is data
@@ -53,13 +53,6 @@ test('a script on the input of an interpreter or a shell is a run of it: rules t
 
 test('what stays free: input that is data, scripts no rule holds, readers of the same files, text', () => {
   for (const c of FREE) for (const p of [shipped, allOn]) { const r = run(c, p); assert.equal(r.verdict, 'clear', `${c} → ${r.cls}: ${r.why}`); }
-});
-
-test('an input form reads as its plain form does: in 1.2 the bare installer and bootstrap install are not held, by either form', () => {
-  for (const [input, plain] of [['bash < install.sh', 'bash install.sh'], ['cat install.sh | bash -s -- --yes', 'bash install.sh --yes'], ['bash <<< "$(cat install.sh)"', 'bash install.sh'],
-    ['bash -s -- install < scripts/bootstrap.sh', 'bash scripts/bootstrap.sh install']]) {
-    for (const p of [shipped, allOn]) assert.equal(run(input, p).verdict, run(plain, p).verdict, `${input} / ${plain}`);
-  }
 });
 
 test('the dry form of a held flag call is the plain run without the flag', () => {
@@ -88,8 +81,8 @@ test('real hook JSON, board down: the input forms are denied, the free forms pas
   const env = { ...process.env, HOME: home, GATE_NODE: process.execPath, MESH_BOARD: 'http://127.0.0.1:9', GATE_TIMEOUT_MS: '300', CMUX_WORKSPACE_ID: '', MESH_GATE_IDENTITY: '', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
   const hook = (command) => { const out = spawnSync('sh', [path.join(dir, 'scripts', 'gate-hook.sh'), '--env-board'], { input: JSON.stringify({ session_id: 's', transcript_path: '/t.jsonl', cwd: dir, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command, description: 'x' } }), env, encoding: 'utf8' }).stdout;
     return out ? JSON.parse(out).hookSpecificOutput.permissionDecision : 'pass'; };
-  for (const c of ['node < scripts/upgrade.mjs', 'bash -s -- rollback < install.sh', 'cat install.sh | bash -s upgrade', 'sh -s -- gate 5 g1 approve < scripts/task.sh', 'cat scripts/task.sh | sh -s -- gate 5 g1 approve', 'node - --commit < scripts/rename.mjs',
-    'sh -s -- gate 5 g1 approve <<< "$(cat scripts/task.sh)"', 'bash -s upgrade <<< "$(cat install.sh)"'])
+  for (const c of ['node < scripts/upgrade.mjs', 'bash -s -- --yes < install.sh', 'cat install.sh | bash', 'sh -s -- gate 5 g1 approve < scripts/task.sh', 'cat scripts/task.sh | sh -s -- gate 5 g1 approve', 'node - --commit < scripts/rename.mjs',
+    'sh -s -- gate 5 g1 approve <<< "$(cat scripts/task.sh)"', 'bash <<< "$(cat install.sh)"'])
     assert.equal(hook(c), 'deny', c);
   for (const c of ['wc -l < install.sh', 'cat scripts/task.sh | grep gate', 'sh -s -- show 5 < scripts/task.sh', 'bash -s check < install.sh', 'node scripts/x.mjs < data/in.json']) assert.equal(hook(c), 'pass', c);
 });

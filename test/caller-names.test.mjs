@@ -25,7 +25,7 @@ import { auditRows, pendingGates, proposalWhat } from '../src/gate-ledger.mjs';
 import { enqueue, drainOutbox, readOutbox, NEVER_SUPERSEDED, HOLD_KIND } from '../src/mesh.mjs';
 import { DEFAULT_POLICY } from '../src/gates.mjs';
 import { OWNER } from '../src/config.mjs';
-import { demoEnv } from './demo-board.mjs';
+import { demoEnv, freePort } from './demo-board.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const iso = (ms) => new Date(ms).toISOString();
@@ -153,8 +153,14 @@ test('gate check, names enforced: a hook that declares an observed agent\'s work
   const line = (await b.lines()).pop();
   assert.equal(line.agent, 'builder'); assert.equal(line.declared, 'helper'); assert.equal(line.caller, 'builder'); assert.equal(line.callerMismatch, true);
   assert.ok(b.events.some((e) => /\[caller mismatch\] gate check: the hook declared helper, but the call came from builder's session — judged as builder/.test(e)));
-  // the other way round: declaring the enforced agent does not make an observed session enforced
-  assert.deepEqual(await b.svc.check(b.input('gh pr merge 8', { workspaceId: 'W1' }), says(session('helper', { workspaceId: 'w2' }))), { decision: 'pass', observed: true });
+  // the other way round: an observed agent's session whose hook declares the ENFORCED agent's workspace.
+  // Evidence adds a hold and never takes one away: the call is held, under the session it really came from
+  const other = await b.svc.check(b.input('gh pr merge 8', { workspaceId: 'W1' }), says(session('helper', { workspaceId: 'w2' })));
+  assert.equal(other.decision, 'deny'); assert.equal((await b.gateOf(other)).agent, 'helper');
+  const kept = (await b.lines()).pop();
+  assert.deepEqual([kept.agent, kept.declared, kept.enforcedUnknown], ['helper', 'builder', true]);
+  // an observed session that declares nothing enforced stays observed
+  assert.deepEqual(await b.svc.check(b.input('gh pr merge 9', { workspaceId: 'W2' }), says(session('helper', { workspaceId: 'w2' }))), { decision: 'pass', observed: true });
   // a plain pass never looks the caller up, names or not
   let asked = 0;
   assert.deepEqual(await b.svc.check(b.input('git status', { workspaceId: 'W2' }), { names: true, evidence: async () => { asked += 1; return session('builder'); } }), { decision: 'pass' });
@@ -175,11 +181,21 @@ test('gate check, names enforced: a failed lookup or an unnameable cmux session 
     if (opts === never) assert.match(line.callerNotRead, /took longer than 40 ms/);
   }
   assert.equal(b.svc.callerReadings().notRead, 1, 'counted once: the note does not wait for the same lookup again');
-  // an agent session that does not run under cmux, declaring the enforced builder: it is nobody the directory knows
+  // An agent session that does not run under cmux, or no agent in the chain at all, declaring the
+  // enforced builder. Before names were enforced the declared workspace alone decided and this call
+  // was held; the evidence finds nobody the directory knows, and that may not take the hold away
+  // (Mission Control's review of slice 2b, rows N6 and N7): held as the declared name.
   for (const ev of [OUTSIDE, NOBODY]) {
-    assert.deepEqual(await b.svc.check(b.input(`gh pr merge ${n += 1}`, { workspaceId: 'W1' }), says(ev)), { decision: 'pass', observed: true });
+    const r = await b.svc.check(b.input(`gh pr merge ${n += 1}`, { workspaceId: 'W1' }), says(ev));
+    assert.equal(r.decision, 'deny'); assert.equal((await b.gateOf(r)).agent, 'builder');
     const line = (await b.lines()).pop();
-    assert.equal(line.agent, 'unregistered:app'); assert.equal(line.declared, 'builder'); assert.equal(line.enforcedUnknown, undefined);
+    assert.equal(line.agent, 'builder'); assert.equal(line.enforcedUnknown, true); assert.equal(line.declared, undefined);
+  }
+  // the same evidence with an observed name declared, or none: nobody the directory knows, observed as before
+  for (const ev of [OUTSIDE, NOBODY]) {
+    assert.deepEqual(await b.svc.check(b.input(`gh pr merge ${n += 1}`, { workspaceId: 'W2' }), says(ev)), { decision: 'pass', observed: true });
+    assert.deepEqual(await b.svc.check(b.input(`gh pr merge ${n += 1}`), says(ev)), { decision: 'pass', observed: true });
+    assert.equal((await b.lines()).pop().agent, 'unregistered:app');
   }
 });
 
@@ -189,8 +205,11 @@ test('gate check, names enforced: a headless run is named by its launchd job or 
   // observe (before): the launcher's variable names the run, and any session without a workspace can set it
   const declared = await b.svc.check(b.input('gh pr merge 21', { identity: 'triage' }));
   assert.equal(declared.decision, 'deny'); assert.equal((await b.gateOf(declared)).agent, 'headless:triage');
-  // names enforced: the same variable from an observed agent's session changes nothing
-  assert.deepEqual(await b.svc.check(b.input('gh pr merge 22', { identity: 'triage' }), says(session('helper', { workspaceId: 'w2' }))), { decision: 'pass', observed: true });
+  // names enforced: the variable no longer NAMES the run. From an observed agent's session the call is
+  // still held, because the declared role is an enforced one and evidence never takes a hold away,
+  // but it is held under the session it really came from, not on Mission Control's task
+  const borrowed = await b.svc.check(b.input('gh pr merge 22', { identity: 'triage' }), says(session('helper', { workspaceId: 'w2' })));
+  assert.equal(borrowed.decision, 'deny'); assert.equal((await b.gateOf(borrowed)).agent, 'helper');
   // …and the real triage job needs no variable: the board asked launchd whose process it is
   const triage = await b.svc.check(b.input('gh pr merge 23'), says(job('headless:triage')));
   assert.equal(triage.decision, 'deny'); assert.equal((await b.gateOf(triage)).agent, 'headless:triage');
@@ -408,8 +427,8 @@ const has = (bin) => spawnSync('sh', ['-c', `command -v ${bin}`], { encoding: 'u
 const HAS_LSOF = has('lsof');
 const HAS_CURL = has('curl');
 const J = { 'content-type': 'application/json' };
-async function demoBoard(caller, portBase) {
-  const port = portBase + Math.floor(Math.random() * 40);
+async function demoBoard(caller) {
+  const port = await freePort();
   // the shipped policy (every registered agent enforced), whatever policy this checkout's overlay holds
   const overlay = await mkdtemp(path.join(os.tmpdir(), 'caller overlay-'));
   await writeFile(path.join(overlay, 'policy.json'), JSON.stringify(DEFAULT_POLICY));
@@ -424,7 +443,7 @@ async function demoBoard(caller, portBase) {
 }
 
 test('a running board, names enforced: a name this test process declares is not backed by it — its words go out marked, the name\'s standing is refused', { skip: !HAS_LSOF && 'lsof is not installed', timeout: 60000 }, async () => {
-  const b = await demoBoard('on,agent', 39800);
+  const b = await demoBoard('on,agent');
   try {
     assert.ok(b.status?.demo, 'demo board answered');
     assert.equal(b.status.caller.mode, 'on'); assert.equal(b.status.caller.tripwire, 'agent');
@@ -432,7 +451,7 @@ test('a running board, names enforced: a name this test process declares is not 
     const mc = agents.find((a) => a.kind === 'mission-control');
     const worker = agents.find((a) => a.kind !== 'mission-control' && a.status !== 'closed' && a.workspaceId);
     // a new task: filed, never dropped — and it says, where its owner reads it, that the requester was not verified
-    const created = await b.post('/api/tasks', { title: 'names check', requester: mc.name, owner: worker.name });
+    const created = await b.post('/api/tasks', { title: 'names check', requester: mc.name, owner: worker.name, unverified: { why: 'trust me', confirmed: { by: 'me' } } });
     assert.equal(created.status, 201);
     const c = await created.json();
     assert.equal(c.unverifiedSender, true); assert.match(c.note, /could not verify the name/);
@@ -440,6 +459,9 @@ test('a running board, names enforced: a name this test process declares is not 
     let t = await b.get(`/api/tasks/${id}`);
     assert.equal(t.requester, mc.name);
     assert.ok(t.comments.some((x) => x.who === 'board' && x.text.startsWith(`filed by an UNVERIFIED caller calling itself "${mc.name}" (`)));
+    // the mark is a field of the task, set by the board: what the caller sent under that key is gone
+    assert.equal(t.unverified.who, mc.name); assert.notEqual(t.unverified.why, 'trust me'); assert.ok(t.unverified.why.length > 5); assert.equal(t.unverified.confirmed, undefined);
+    assert.equal(c.task.unverified.who, mc.name);
     // a comment: recorded under the board's name, marked, with the reason
     const said = await b.patch(id, { op: 'comment', actor: worker.name, text: 'on it' });
     assert.equal(said.status, 200);
@@ -449,7 +471,7 @@ test('a running board, names enforced: a name this test process declares is not 
     assert.equal(last.who, 'board');
     assert.ok(last.text.startsWith(`comment from an UNVERIFIED caller calling itself "${worker.name}" (`)); assert.ok(last.text.endsWith('): on it'));
     // anything that needs the name's standing is refused, and says what to do instead
-    for (const body of [{ op: 'claim', actor: worker.name }, { op: 'start', actor: worker.name }, { op: 'cancel', actor: mc.name, text: 'no' }, { op: 'gate_record', actor: mc.name, gate: 'g1', decision: 'approve', text: 'said yes' }]) {
+    for (const body of [{ op: 'claim', actor: worker.name }, { op: 'start', actor: worker.name }, { op: 'cancel', actor: mc.name, text: 'no' }, { op: 'request_confirm', actor: mc.name }, { op: 'gate_record', actor: mc.name, gate: 'g1', decision: 'approve', text: 'said yes' }]) {
       const r = await b.patch(id, body);
       assert.equal(r.status, 403, body.op);
       assert.match((await r.json()).msg, /^the board could not verify that you are ".+" \(.+\), so ".+" on task #\d+ is refused\. Run it from .+'s own pane, without --as /);
@@ -463,19 +485,20 @@ test('a running board, names enforced: a name this test process declares is not 
     assert.equal(sent.status, 200); assert.equal((await sent.json()).unverifiedSender, true);
     t = await b.get(`/api/tasks/${id}`);
     assert.ok(t.comments.some((x) => x.who === 'board' && x.text.includes(`from an UNVERIFIED sender calling itself "${mc.name}": please start`)));
+    // dropping what is queued for an agent (a queued message can be a gate decision): with names
+    // enforced it needs a name, and one the calling process backs
+    let drop = await b.post('/api/mesh/outbox/drop', { to: worker.name });
+    assert.equal(drop.status, 403); assert.match((await drop.json()).msg, /dropping queued messages needs your name/);
+    drop = await b.post('/api/mesh/outbox/drop', { to: worker.name, actor: mc.name });
+    assert.equal(drop.status, 403); assert.match((await drop.json()).msg, /could not verify that you are ".+" \(.+\), so dropping the messages queued for /);
     // the board's own count: one per name it could not verify
     const caller = (await b.get('/api/status')).caller;
-    assert.equal(caller.unverified, 8); assert.equal(caller.lastUnverified.declared, mc.name); assert.equal(caller.lastUnverified.what, 'a mesh message');
-    // the gate hook: the workspace id it declares names nobody. Who runs this suite decides what the
-    // board saw: a session it cannot name is enforced as declared, anyone else is not the agent declared.
-    const why = caller.lastUnverified.why;
+    assert.equal(caller.unverified, 10); assert.equal(caller.lastUnverified.declared, mc.name); assert.match(caller.lastUnverified.what, /^an outbox drop for /);
+    // the gate hook: this process declares an enforced agent's workspace id and is not that agent.
+    // Whatever the board saw of the caller (nobody it knows, a session it cannot name, a failed
+    // lookup), the declared name is enforced, and evidence never takes a hold away: the call is held.
     const check = await (await b.post('/api/gates/check', { event: 'pre', engine: 'claude', tool: 'Bash', command: 'gh secret set DEMO_KEY', cwd: os.tmpdir(), workspaceId: worker.workspaceId })).json();
-    if (/unregistered session|no agent session is behind/.test(why)) {
-      assert.deepEqual(check, { decision: 'pass', observed: true }, 'the declared workspace id did not make this caller the agent');
-      const { gates } = await b.get('/api/gates?status=all');
-      assert.ok(!gates.some((g) => g.agent === worker.name && /DEMO_KEY/.test(g.command)));
-    } else if (/could not be looked up/.test(why)) assert.equal(check.decision, 'deny', 'a failed lookup is enforced');
-    else assert.ok(['pass', 'deny'].includes(check.decision));
+    assert.equal(check.decision, 'deny', JSON.stringify(check));
   } finally { b.child.kill(); }
 });
 
@@ -497,7 +520,7 @@ async function detached(url, token, body) {
 }
 
 test('a running board, tripwire "browser": an approval typed in a terminal becomes a row to confirm; a typed decline is refused; nothing runs', { skip: (!HAS_LSOF || !HAS_CURL) && 'lsof or curl is not installed', timeout: 90000 }, async () => {
-  const b = await demoBoard('observe,browser', 39845);
+  const b = await demoBoard('observe,browser');
   try {
     assert.ok(b.status?.demo, 'demo board answered');
     assert.equal(b.status.caller.mode, 'observe'); assert.equal(b.status.caller.tripwire, 'browser');

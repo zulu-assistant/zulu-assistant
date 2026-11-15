@@ -9,7 +9,7 @@
 //   - overlay/ is the owner's: a migration may only ADD a missing key with a default (ctx.addDefault),
 //     never change or delete a value the owner set. ctx.writeJson refuses any overlay/ path.
 import { readFile, writeFile, mkdir, readdir, copyFile, rename } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -125,7 +125,8 @@ export async function migrate({ root = HERE, backup = null, dryRun = false, dir 
   return { ran, log, version };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Resolved through links, as in scripts/upgrade.mjs (#485): a path typed under a linked folder is still this file.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const a = process.argv.slice(2);
   const opt = (k) => { const i = a.indexOf(k); return i >= 0 ? a[i + 1] : null; };
   const r = await migrate({ root: opt('--root') || HERE, backup: opt('--backup'), dryRun: a.includes('--dry-run') })

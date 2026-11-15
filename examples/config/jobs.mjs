@@ -128,6 +128,11 @@ export const SETTINGS = {
   // Turn it on after installing the daily job (scripts/state-backup-install.sh):
   //   backupWatch: { maxAgeHours: 36 },
   backupWatch: null,
+  // How the scheduled triage pass gets a diagnostic worker for a red card. 'ask' (shipped since 1.3): it files
+  // one low task to Mission Control (scripts/triage-board.sh ask; at most one per card per day and two per pass),
+  // which decides, and the worker spawn is not on the pass's list. 'spawn', or the key absent (a registry made
+  // before 1.3): the pass starts the worker itself (scripts/agent-spawn.sh).
+  triage: { dispatch: 'ask' },
   // extra host names this board answers to for writes (src/request-guard.mjs). localhost, tailnet
   // addresses, *.ts.net names and this machine's hostname are always accepted. Hostnames only, no port.
   allowedHosts: [],
@@ -238,7 +243,9 @@ export const SETTINGS = {
   // checkout with what has landed on the remote's default branch (a release install: with its tag),
   // and check that the hook is still registered exactly as installed. The result is part of the
   // guardrails card: red when a gate file differs or the hook is dropped, amber while the checkout
-  // is behind. It only reads. 'off' until you turn it on:
+  // is behind. It also reads the settings each running Claude Code session was started with
+  // (`--settings`) and every file in `startSettingsDirs` (default ['~/.cmuxterm/claude-settings'],
+  // where cmux keeps its own). It only reads. 'off' until you turn it on:
   //   gateIntegrity: { mode: 'on', behindMinutes: 0 },   // 0 = being behind stays amber, never red
   gateIntegrity: { mode: 'off' },
   // status taxonomy (src/agent-state.mjs): each agent tile says what the agent is doing (working / input /

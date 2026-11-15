@@ -100,12 +100,14 @@
   /** What a button says after the first click. `p` = the record the row carries, if any. */
   function armedLabel(decision, what, p) {
     if (decision === 'disown') return `CLICK AGAIN: ${p && p.kind === 'typed' ? 'I DID NOT TYPE THIS' : 'NOT WHAT I SAID'} (${what})`;
+    if (decision === 'confirm-request') return `CLICK AGAIN: THE REQUEST IS REAL (${what})`;
     return `CLICK AGAIN TO ${String(decision).toUpperCase()} ${what}`;
   }
 
   /** The request body for a decision click. `disown` rejects the recorded pane answer and decides nothing. */
   function decisionBody(decision, gate, revoke) {
     if (revoke) return { op: 'revoke_go' };
+    if (decision === 'confirm-request') return { op: 'request_confirm' };   // an unverified request: the owner says it is real
     if (decision === 'disown') return gate ? { op: 'proposal_reject', gate } : { op: 'proposal_reject' };
     return gate ? { op: 'gate_decide', gate, decision } : { op: 'decide', decision };
   }
@@ -120,7 +122,9 @@
       ? `<button class="gate-cmd-toggle" data-cmd-toggle="${esc(o.key)}" aria-expanded="${!!o.open}">${o.open ? '▾ fold command' : `▸ show full command (${size})`}</button>` : '';
     // the dry-run time links to the task's receipts when the page has somewhere to send it (o.receiptHref)
     const dryAt = g.dryRun?.seen_at ? `completed ${esc(String(g.dryRun.seen_at).slice(11, 16))}Z` : '';
-    const dry = g.dryRun?.required ? `<div class="gate-meta">dry run: ${dryAt ? (o.receiptHref ? `<a class="gate-receipt" href="${esc(o.receiptHref)}" target="_blank" rel="noopener">${dryAt}</a>` : dryAt) : 'missing'}</div>` : '';
+    // #598: no dry run was asked for, because its form is held too (it would pay, send or write): none ran
+    const notAsked = g.dryRun?.notAsked ? `NONE: not asked, that form is held too (${esc(g.dryRun.notAsked.label || g.dryRun.notAsked.cls || 'another class')})` : '';
+    const dry = g.dryRun?.required ? `<div class="gate-meta">dry run: ${notAsked || (dryAt ? (o.receiptHref ? `<a class="gate-receipt" href="${esc(o.receiptHref)}" target="_blank" rel="noopener">${dryAt}</a>` : dryAt) : 'missing')}</div>` : '';
     const head = g.ref?.kind === 'pr' && /^[0-9a-f]{7,40}$/i.test(String(g.ref.head || '')) ? ` · head ${esc(String(g.ref.head).slice(0, 7))}` : '';
     const words = g.agentReason ? `<div class="gate-meta gate-words"><span class="gate-words-label">agent's words:</span> “${esc(g.agentReason)}”</div>` : '';
     return `<div class="gate">
@@ -137,7 +141,13 @@
   </div>`;
   }
 
-  const api = { ARM_MS, CMD_LINES, CMD_CHARS, armClick, decisionOutcome, staleBoot, decisionsState, dockLayout, foldCommand, gateRowHtml, proposalHtml, HEARD_LABELS, heardLabels, armedLabel, decisionBody, CHIP_TEXT, contextTexts, contextChips };
+  /** A new install watches nothing yet: say so, with the one command that changes it ('' otherwise). */
+  function nothingWatchedHtml(data) {
+    if (!data || data.demo || data.profile === 'guardrails' || data.watching !== 0) return '';
+    return '<div class="nothing-watched">nothing watched yet. Pick LaunchAgents, containers, cron lines and endpoints from a scan of this Mac: <code>zulu setup --step watch</code></div>';
+  }
+
+  const api = { nothingWatchedHtml, ARM_MS, CMD_LINES, CMD_CHARS, armClick, decisionOutcome, staleBoot, decisionsState, dockLayout, foldCommand, gateRowHtml, proposalHtml, HEARD_LABELS, heardLabels, armedLabel, decisionBody, CHIP_TEXT, contextTexts, contextChips };
   root.BoardDecide = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

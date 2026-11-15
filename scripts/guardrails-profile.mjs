@@ -6,6 +6,9 @@
 //   --switch   needed with --apply on an install that already runs the FULL board (see runsFullBoard):
 //              switching stops the fleet cards, the mesh and the session heals at the next restart, so
 //              it is never done by a plain yes. Without it the write form prints what would change and stops.
+// On a LIGHT install (the default `./install.sh`, see lightInstall) the profile is left as it is: the
+// board keeps the sessions and cards it shows, and only step 2 below is done. Nothing stops, so no
+// --switch is asked for.
 //
 // 1. overlay/config/local.json  settings.profile = "guardrails"
 //    The board then runs the ledger, the gate and the waiting rows: no fleet collector, no mesh, no heal.
@@ -21,6 +24,21 @@ import { realpathSync } from 'node:fs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = async (f) => { try { return JSON.parse(await readFile(f, 'utf8')); } catch (e) { return e.code === 'ENOENT' ? null : (() => { throw new Error(`${f} does not parse: ${e.message}`); })(); } };
 
+// the shipped example directory has placeholder ids (00000000-0000-4000-8000-…): those are not registered agents
+async function registeredAgents(overlay) {
+  const dir = await readJson(path.join(overlay, 'config', 'agents.json')).catch(() => null);
+  return (dir?.agents || []).filter((a) => a && a.workspaceId && a.status !== 'closed' && !/^00000000-0000-4000-8000-/.test(String(a.workspaceId)));
+}
+
+/**
+ * Is this the light install (the default `./install.sh`)? Its state file says so, and no agent is
+ * registered in a mesh. Once agents are registered it is a full board, whatever the state file says.
+ */
+export async function lightInstall({ overlay, root = ROOT } = {}) {
+  const state = await readJson(path.join(root, 'data', 'setup-state.json')).catch(() => null);
+  return state?.mode === 'light' && (await registeredAgents(overlay)).length === 0;
+}
+
 /**
  * Does this checkout already run the full board? → [reasons] (empty = no).
  * The profile is not guardrails AND (the owner's overlay has a mesh directory with registered agents,
@@ -30,9 +48,7 @@ export async function runsFullBoard({ overlay, root = ROOT, home = process.env.H
   const local = (await readJson(path.join(overlay, 'config', 'local.json')).catch(() => null)) || {};
   if (local.settings?.profile === 'guardrails') return [];
   const why = [];
-  const dir = await readJson(path.join(overlay, 'config', 'agents.json')).catch(() => null);
-  // the shipped example directory has placeholder ids (00000000-0000-4000-8000-…): those are not registered agents
-  const live = (dir?.agents || []).filter((a) => a && a.workspaceId && a.status !== 'closed' && !/^00000000-0000-4000-8000-/.test(String(a.workspaceId)));
+  const live = await registeredAgents(overlay);
   if (live.length) why.push(`the mesh directory has ${live.length} registered agent${live.length === 1 ? '' : 's'}`);
   try {
     const la = path.join(home, 'Library', 'LaunchAgents');
@@ -44,18 +60,27 @@ export async function runsFullBoard({ overlay, root = ROOT, home = process.env.H
   return why;
 }
 
-/** Apply the profile under `overlay`. → [{ file, change, written }] */
-export async function setProfile({ overlay, profile = 'guardrails', apply = false } = {}) {
+/**
+ * Apply the profile under `overlay`. → [{ file, change, written }]
+ * `keepProfile` (a light install): settings.profile is not touched, only the policy line is added.
+ */
+export async function setProfile({ overlay, profile = 'guardrails', apply = false, keepProfile = false } = {}) {
   const out = [];
   const localFile = path.join(overlay, 'config', 'local.json');
-  const local = (await readJson(localFile)) || {};
+  const onDisk = await readJson(localFile);
+  const local = onDisk || {};
   const have = local.settings?.profile || 'full';
-  if (have === profile) out.push({ file: localFile, change: `profile is already "${profile}"`, written: false, same: true });
+  if (keepProfile && profile === 'guardrails') out.push({ file: localFile, change: `profile stays "${have}" (a light install: the board keeps what it shows, the gate is added to it)`, written: false, same: true });
+  else if (have === profile) out.push({ file: localFile, change: `profile is already "${profile}"`, written: false, same: true });
   else {
     const next = { ...local, settings: { ...(local.settings || {}), profile } };
     if (profile === 'full') delete next.settings.profile;
+    // A file this script CREATES also drops the example registry entries, as the light install does: the profile
+    // hides their tiles, and the page counted them as watched. A file that exists is the owner's: left as it is.
+    const drops = profile === 'guardrails' && onDisk == null;
+    if (drops) next.dropExamples = true;
     if (apply) { await mkdir(path.dirname(localFile), { recursive: true }); await writeFile(localFile, JSON.stringify(next, null, 2) + '\n'); }
-    out.push({ file: localFile, change: `settings.profile: "${have}" → "${profile}"`, written: apply });
+    out.push({ file: localFile, change: `settings.profile: "${have}" → "${profile}"${drops ? '; dropExamples: true (a new file: the example entries are not watched)' : ''}`, written: apply });
   }
   if (profile !== 'guardrails') return out;
   const policyFile = path.join(overlay, 'policy.json');
@@ -79,11 +104,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   let apply = a.includes('--apply');
   const overlay = process.env.MC_OVERLAY || path.join(ROOT, 'overlay');
   const toGuardrails = !a.includes('--full');
-  const full = toGuardrails ? await runsFullBoard({ overlay }) : [];
+  const light = toGuardrails && await lightInstall({ overlay });
+  const full = toGuardrails && !light ? await runsFullBoard({ overlay }) : [];
   if (a.includes('--is-full')) { for (const w of full) console.log(w); process.exit(full.length ? 0 : 1); }
   const refused = apply && full.length > 0 && !a.includes('--switch');
   if (refused) apply = false;
-  const res = await setProfile({ overlay, profile: a.includes('--full') ? 'full' : 'guardrails', apply }).catch((e) => { console.error(`refused: ${e.message}`); process.exit(1); });
+  const res = await setProfile({ overlay, profile: a.includes('--full') ? 'full' : 'guardrails', apply, keepProfile: light }).catch((e) => { console.error(`refused: ${e.message}`); process.exit(1); });
   for (const r of res) console.log(`${r.written ? 'done  ' : r.missing ? 'note  ' : r.same ? 'skip  ' : 'would '} ${path.relative(ROOT, r.file)}: ${r.change}`);
   if (refused) {
     console.error(`refused: this install already runs the full board (${full.join('; ')}).`);

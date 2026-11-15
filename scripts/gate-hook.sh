@@ -25,7 +25,28 @@ printf '%s' "$in" | sed -e 's/\\[nt]/ /g' -e 's/["`\\]//g' -e "s/'//g" -e 's#/\(
 rc=$?
 # 1 = no trigger: pass silently. 0 = a hit. Anything else (grep itself failed) is treated as a hit,
 # so a broken fast path can only cost latency, never let a gated call through.
-[ $rc -eq 1 ] && exit 0
+if [ $rc -eq 1 ]; then
+  # MCP default (1.3). While that check is on, the board keeps data/guardrails/mcp-allow: one "tool source"
+  # line per tool that may pass without a check. Such a call ends here; any other MCP call goes on to the
+  # Node step. No file means the check is off and nothing changes. Shell only until an MCP call is seen.
+  case "$in" in *'"mcp__'*) ;; *) exit 0 ;; esac
+  A="$DIR/data/guardrails/mcp-allow"
+  [ -r "$A" ] || exit 0
+  # The name and the source are taken from the text only when each key stands in it exactly once: a second
+  # "tool_name" or "mcp_server" (a key inside the tool's own input, a quoted copy in a text field) would let
+  # the call pick the name it is judged by. Anything else goes to the Node step, which parses the input.
+  # No event test here either: the Node step knows the event from the parsed input.
+  # (one awk pass counts the three keys: "name,server,source")
+  AWK=/usr/bin/awk; [ -x "$AWK" ] || AWK=awk
+  n=$(printf '%s' "$in" | "$AWK" '{ a += gsub(/tool_name/, "&"); b += gsub(/mcp_server/, "&"); c += gsub(/"source"/, "&") } END { print a+0 "," b+0 "," c+0 }')
+  ok=; case "$n" in 1,0,*|1,1,1) ok=1 ;; esac
+  if [ -n "$ok" ]; then
+    tool=$(printf '%s' "$in" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\(mcp__[^"]*\)".*/\1/p' | head -1)
+    src=$(printf '%s' "$in" | sed -n 's/.*"mcp_server"[[:space:]]*:[[:space:]]*{[^}]*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$tool" ] || exit 0          # the one tool name in the input is not an MCP tool: not an MCP call
+    "$G" -qxF -- "$tool ${src:--}" "$A" && exit 0
+  fi
+fi
 # The Node step, under a deadline of this script's own. A hook that answers after its registered
 # time limit (15 s) lets the call RUN (seen live), so this script must have answered before that:
 # the Node step gives up on the board after 8 s, and whatever keeps it past 12 s is answered here

@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { classify, isShellTool, isEnforced, DEFAULT_POLICY } from '../src/gates.mjs';
+import { classify, isShellTool, isEnforced, checkMode, mcpParts, mcpAllowKey, MCP_UNLISTED, DEFAULT_POLICY } from '../src/gates.mjs';
 import { parseProcTable, chainOf, looksLikeAgent, workspaceInEnv } from '../src/caller.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,12 +58,19 @@ export function hookInput(j, env = process.env) {
     // a headless run the board itself started (triage, a dispatched fix session): the launcher exports its role.
     // The board resolves it only when no registered workspace answers; offline it is ignored (unknown = enforced).
     identity: env.MESH_GATE_IDENTITY || null,
+    // gh acts on this repo when the command names none: the board must read the same PR the command will merge
+    ...(env.GH_REPO ? { ghRepo: String(env.GH_REPO).slice(0, 200) } : {}),
+    // an MCP call: which server the tool belongs to and where that server was configured (1.3, MCP default)
+    ...(j.mcp_server && typeof j.mcp_server === 'object' ? { mcpServer: { name: String(j.mcp_server.name || ''), source: String(j.mcp_server.source || '') } } : {}),
   };
 }
 
-export function hookOutput(decision, reason, event = 'pre') {
+export function hookOutput(decision, reason, event = 'pre', updatedInput = null) {
   if (event === 'post' || !['allow', 'deny'].includes(decision)) return '';
-  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason } });
+  // updatedInput (an allow only): the call runs with this input instead — how an approved merge is pinned to
+  // the head the owner saw (`--match-head-commit`). Honoured in auto mode too (checked on 2.1.321).
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason,
+    ...(decision === 'allow' && updatedInput ? { updatedInput } : {}) } });
 }
 
 /** host:port of an address, for a message: never a path, a query or a name and password. */
@@ -134,7 +141,19 @@ export function localVerdict(input, { root = ROOT, home = os.homedir(), sessionW
   const git = (cwd, args) => { try { return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; } };
   const command = Array.isArray(input.command) ? input.command.join(' ') : String(input.command ?? '');
   const tool = isShellTool(input.tool) ? 'Bash' : input.tool;
-  return classify({ tool, command, filePath: input.filePath, cwd: input.cwd, ...(input.folderUnread ? { folderUnread: true } : {}) }, policy, { home, boardRoot: root, git, repoRoot: (d) => git(d, ['rev-parse', '--show-toplevel']) });
+  const r = classify({ tool, command, filePath: input.filePath, cwd: input.cwd, ...(input.folderUnread ? { folderUnread: true } : {}), mcpServer: input.mcpServer, workspaceId: input.workspaceId }, policy, { home, boardRoot: root, git, repoRoot: (d) => git(d, ['rev-parse', '--show-toplevel']) });
+  // An MCP tool that reads as a read by its name, while the board cannot be asked: the board's list of
+  // seen tools is what pins a tool to the source it was first seen from, and that list is not here. Its
+  // allow file is: one line per tool and source the board lets pass. With the MCP check at enforce, a
+  // pair that is not on that file is held until the board answers again (no file = the check never ran
+  // here, and the name decides as before).
+  if (r.verdict === 'clear' && mcpParts(tool) && checkMode(policy, 'mcpDefault') === 'enforce') {
+    let allow = null;
+    try { allow = readFileSync(path.join(root, 'data', 'guardrails', 'mcp-allow'), 'utf8'); } catch { /* no file */ }
+    if (allow != null && !allow.split('\n').includes(mcpAllowKey(tool, input.mcpServer?.source)))
+      return { verdict: 'gate', cls: MCP_UNLISTED.id, label: MCP_UNLISTED.label, check: 'mcpDefault', why: 'the board cannot be asked, and this MCP tool from this source is not on its allow file' };
+  }
+  return r;
 }
 
 /** How long this step waits for the board. gate-hook.sh answers "deny" itself at 12 s, and Claude Code lets a call run when a hook answers after its registered limit, so the wait has a ceiling. */
@@ -146,7 +165,8 @@ export function boardWait(env = process.env) {
 }
 
 async function main() {
-  const input = hookInput(JSON.parse(readFileSync(0, 'utf8') || '{}'));
+  const raw = JSON.parse(readFileSync(0, 'utf8') || '{}');
+  const input = hookInput(raw);
   let r;
   const timeout = boardWait();
   const board = boardAddress();
@@ -172,7 +192,9 @@ async function main() {
       : board.named ? { decision: 'deny', reason: `GATE: this session's environment names another board (${board.named}), and the gate hook only asks its own (${hostPort(board.own)}) — gated command not run (fail closed). Tell the owner: MESH_BOARD or MC_PORT is set by a settings file's env block or a shell profile.` }
         : { decision: 'deny', reason: 'GATE: board unreachable — gated command not run (fail closed). Retry when the board is up.' };
   }
-  const out = hookOutput(r.decision, r.reason, input.event);
+  // only a plain string command is rewritten (Claude Code's Bash input); the board falls back to re-reading for anything else
+  const updated = r.decision === 'allow' && typeof r.updatedCommand === 'string' && typeof raw.tool_input?.command === 'string' ? { ...raw.tool_input, command: r.updatedCommand } : null;
+  const out = hookOutput(r.decision, r.reason, input.event, updated);
   if (!out) process.exit(EXIT_PASS);
   process.stdout.write(out);
 }

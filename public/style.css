@@ -166,6 +166,9 @@ a.tile { text-decoration: none; color: inherit; }
 .gate-meta.gate-again { color: var(--status-warning); }   /* "you approved this before; it expired" */
 /* a pane answer an agent recorded: amber, and marked off, because it is the agent's record and not yet a decision */
 .gate-meta.gate-heard { color: var(--status-warning); border-left: 2px solid var(--status-warning); padding-left: 6px; margin: 2px 0; }
+/* a new install with an empty registry */
+.nothing-watched { font-size: 11px; color: var(--ink-2); border: 1px dashed #0d5f0d; border-radius: 3px; padding: 8px 10px; margin-bottom: 10px; }
+.nothing-watched code { color: var(--ink-bright); }
 /* Guardrails-only install (SETTINGS.profile 'guardrails'): what is not running is not drawn */
 body.profile-guardrails #timeline-row, body.profile-guardrails #agents-row,
 body.profile-guardrails #tile-docker, body.profile-guardrails #tile-agents, body.profile-guardrails .spark-wrap { display: none; }

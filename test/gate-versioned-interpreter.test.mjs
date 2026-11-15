@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classify, parseCommand, isScript, scriptPath, progName, CHECKS, DEFAULT_POLICY } from '../src/gates.mjs';
 
-// The interpreter and shell sets were exact names, so `python3.13`,
+// Task #612 (found in review of a live row): the interpreter and shell sets were exact names, so `python3.13`,
 // `pypy3`, `node22`, `nodejs`, `ruby3.3`, `perl5.36`, `php8.3`, `bash5` and `ksh93` were not read as what they are.
 // A write form run by one passed, a program text handed to one passed, and by absolute path the row was bound to
 // the interpreter instead of the script. Now one reading of the name (progName) is used wherever the sets are
@@ -70,7 +70,7 @@ test('with every check at enforce the answers still agree', () => {
   }
 });
 
-test('the row is bound to the script, not to the interpreter file', () => {
+test('the row is bound to the script, not to the interpreter file (seen live)', () => {
   for (const [command, script] of [
     ['/opt/homebrew/opt/python@3.13/bin/python3.13 -I tools/apply.py --commit', 'tools/apply.py'],
     ['python3.13 -X importtime tools/apply.py --commit', 'tools/apply.py'],
@@ -83,33 +83,43 @@ test('the row is bound to the script, not to the interpreter file', () => {
   }
 });
 
-// A versioned name was an unknown program before, and `renamedBins` at enforce read it so. Only the names literally on
-// the two lists skip that reading, so the fix frees nothing (adds holds only).
-test('a versioned name keeps the unknown program\'s reading at enforce (nothing is freed)', () => {
+// MC's read of the first head: a versioned name was an unknown program before, and `runners` / `renamedBins` at enforce
+// read it so. Only the names literally on the two lists skip those readings, so the fix frees nothing (adds holds only).
+test('a versioned name keeps the unknown program\'s readings at enforce (nothing is freed)', () => {
   for (const n of ['python3.13', 'pypy3', 'node22', 'nodejs', 'ruby3.3', 'perl5.34', 'php8.3', 'tcsh']) {
-    assert.notEqual(said(run(`${n} pr merge 5`, allOn)), 'clear', n);
+    for (const command of [`${n} --run "gh pr merge 5 --squash"`, `${n} gh pr merge 5 --squash`, `${n} git push origin main`, `${n} pr merge 5`]) {
+      assert.notEqual(said(run(command, allOn)), 'clear', command);
+    }
   }
+  for (const n of ['node22', 'ruby3.3', 'php8.3']) assert.notEqual(said(run(`${n} -c "gh pr merge 5 --squash"`, allOn)), 'clear', n);
 });
 
-// A ruled program that is itself a script (vercel and shopify are node scripts, bin/zulu is a bash script), handed to
-// an interpreter or a shell by its file, was clear everywhere. It is now also read as that program by the `bin` rules.
+// The second gap of MC's read: a ruled program that is itself a script (vercel and shopify are node scripts, bin/zulu
+// is a bash script), handed to an interpreter or a shell by its file, was clear everywhere. It is now also read as
+// that program by the `bin` rules.
 test('a ruled program handed to its interpreter or a shell by its file is held as the program is', () => {
   for (const [plain, through] of [
     ['vercel deploy --prod', ['node /opt/homebrew/bin/vercel deploy --prod', 'node node_modules/.bin/vercel deploy --prod', 'node22 /opt/homebrew/bin/vercel --prod']],
-    ['zulu upgrade', ['bash bin/zulu upgrade', 'sh /opt/zulu/bin/zulu upgrade', 'bash zulu upgrade', 'bash -x zulu upgrade', 'bash -- zulu upgrade', 'bash5 ./bin/zulu upgrade --to v9', '. bin/zulu upgrade', 'source ./bin/zulu upgrade']],
-    ['zulu rollback', ['sh bin/zulu rollback', 'tcsh bin/zulu rollback']],
-    ['zulu guardrails', ['bash bin/zulu guardrails', 'zsh ./bin/zulu guardrails']],
+    ['zulu upgrade', ['bash bin/zulu upgrade', 'sh /opt/zulu/bin/zulu upgrade', 'bash zulu upgrade', 'bash -x zulu upgrade', 'bash -- zulu upgrade', 'bash5 ./bin/zulu upgrade --to v9']],
+    ['zulu rollback', ['sh bin/zulu rollback']],
+    ['zulu init', ['bash bin/zulu init', 'zsh ./bin/zulu init', 'sh /opt/zulu/bin/zulu init', 'tcsh bin/zulu init']],
+    ['zulu guardrails', ['bash bin/zulu guardrails']],
     ['crontab -r', ['bash /usr/bin/crontab -r']],
   ]) {
     const want = said(run(plain));
     assert.notEqual(want, 'clear', plain);
     for (const t of through) { assert.equal(said(run(t)), want, t); assert.equal(said(run(t, allOn)), want, `${t} (all checks)`); }
   }
-  // on the input: a pipe into `bash -s -- upgrade` (`bash -s upgrade < bin/zulu` is not routed by this release's trigger lines)
-  assert.notEqual(said(run('cat bin/zulu | bash -s -- upgrade')), 'clear', 'cat | bash -s -- upgrade');
-  // a flag-looking word after the script is the script's own word: held as the plain program with the same words.
-  // A shell's syntax check of the program's file is held too: no exemption (a flag's value, `-n +n`, defeated each
-  // reading of one); a held syntax check is the cheaper error.
+  // on the input: `bash < bin/zulu` (the light install) and a pipe into `bash -s -- init`
+  assert.equal(said(run('bash < bin/zulu')), said(run('zulu')));
+  assert.equal(said(run('cat bin/zulu | bash -s -- init')), said(run('zulu init')));
+  // the free forms of the program stay free, and so does another script, a command string, a module run
+  // a program word that is a variable with one fixed value is read by that value (MC's second read)
+  assert.equal(said(run('I=sh; $I ./bin/zulu init')), said(run('zulu init')));
+  assert.notEqual(said(run('PY=python3; $PY - <<\'EOF\'\nimport os; os.system("gh pr merge 5 --squash")\nEOF')), 'clear');
+  // a flag-looking word after the script is the script's own word: held as the plain program with the same words
+  // (MC's third read). A shell's syntax check of the program's file is held too: no exemption (MC's fourth read: a
+  // flag's value, `-n +n`, defeated each reading of one), a held syntax check is the cheaper error.
   for (const [through, plain] of [['sh bin/zulu upgrade -n', 'zulu upgrade -n'], ['zsh ./bin/zulu guardrails -n', 'zulu guardrails -n'],
     ['bash bin/zulu rollback -version', 'zulu rollback -version'], ['bash bin/zulu upgrade --to v9 -n', 'zulu upgrade --to v9 -n'],
     ['bash -x bin/zulu upgrade -xn', 'zulu upgrade -xn'], ['bash -- bin/zulu upgrade -n', 'zulu upgrade -n']]) {

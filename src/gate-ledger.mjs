@@ -1,7 +1,7 @@
 // Guardrails: the gate records on a ledger task (pure) — gates[], decisions, the
 // close check — plus the small stores the gate service keeps under data/guardrails/
 // (grants, dry runs, watched scripts, focus, observe log). docs/GUARDRAILS.md.
-import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, stat, rm } from 'node:fs/promises';
 import { writePrivate, makePrivate } from './private-file.mjs';
 import { randomBytes } from 'node:crypto';
 import { cleanContext, MAX_WORDS } from './row-context.mjs';
@@ -33,13 +33,18 @@ export function addGate(t, g, iso) {
     ...(Array.isArray(g.folderUnsure) ? { folderUnsure: g.folderUnsure.slice(0, 4).map((d) => String(d).slice(0, 400)) } : {}),
     agent: String(g.agent || '').slice(0, 80), session: g.session ? String(g.session).slice(0, 80) : null,
     cmdHash: String(g.cmdHash || ''), hashVersion: g.hashVersion ? String(g.hashVersion).slice(0, 20) : null, requested_at: iso, ttlMinutes: Number(g.ttlMinutes) || 120,
-    dryRun: g.dryRun ? { required: !!g.dryRun.required, seen_at: g.dryRun.seen_at || null, dryHash: g.dryRun.dryHash || null, command: g.dryRun.command ? String(g.dryRun.command).slice(0, MAX_CMD) : null } : { required: false, seen_at: null, dryHash: null },
+    // notAsked (#598): a dry run was required, but its form is held by another class, so none was asked for and none ran
+    dryRun: g.dryRun ? { required: !!g.dryRun.required, seen_at: g.dryRun.seen_at || null, dryHash: g.dryRun.dryHash || null, command: g.dryRun.command ? String(g.dryRun.command).slice(0, MAX_CMD) : null,
+      ...(g.dryRun.notAsked ? { notAsked: { cls: String(g.dryRun.notAsked.cls || '').slice(0, 40), label: String(g.dryRun.notAsked.label || '').slice(0, 120) } } : {}) } : { required: false, seen_at: null, dryHash: null },
     // the same call was approved before and expired unused (shown on the row; never re-armed)
     previously: g.previously ? { gate: String(g.previously.gate || ''), task: Number(g.previously.task) || null, at: g.previously.at || null } : null,
     // row context (src/row-context.mjs): chip ids from a fixed table, and the agent's own description of the call
     context: cleanContext(g.context), agentReason: g.agentReason ? String(g.agentReason).slice(0, MAX_WORDS) : null,
     status, decision: null, decided_by: null, decided_at: null, via: null, reason: null, recorded_by: null,
     expires_at: null, executed_at: null, attempts: 1, rerunsAfterDecline: 0,
+    // what the approval refers to (1.3): the PR and its head commit, or the pushed ref and its commit, as read at filing
+    ref: g.ref && ['pr', 'push'].includes(g.ref.kind) ? { kind: g.ref.kind, repo: g.ref.repo ? String(g.ref.repo).slice(0, 140) : null, number: Number(g.ref.number) || null,
+      name: g.ref.name ? String(g.ref.name).slice(0, 200) : null, head: String(g.ref.head || '').slice(0, 64) } : null,
   };
   // standing approval: the task's program go approves this class (the gate service checked eligibility)
   if (g.auto?.go && t.program_go?.id === g.auto.go && !t.program_go.revoked_at && !t.program_go.ended_at) {
@@ -147,16 +152,23 @@ export function decideGate(t, { gate, decision, reason }, { iso, via, by, record
   return g;
 }
 
-/** When no gate is pending any more, the task leaves needs_approval (unless another approval waits). */
+/**
+ * When no gate is pending any more, the task leaves needs_approval (unless another approval waits).
+ * Only the gates' own wait on the owner is removed (#566): `t.gate_wait` says the gates put the owner on
+ * blocked_on. Without the mark (a gate requested before it existed, or the owner already waited on), the
+ * owner stays when the task goes back to blocked. A task never reads blocked with nobody named.
+ */
 export function settleAfterGates(t, ownerId) {
   if ((t.gates || []).some((g) => g.status === 'pending')) return;
   const otherApproval = t.approval && t.approval.requested_at && !t.approval.decision;
   if (otherApproval) return;
-  t.blocked_on = (t.blocked_on || []).filter((x) => x !== ownerId);
-  if (t.status === 'needs_approval') {
-    const prev = [...(t.gates || [])].reverse().find((g) => g.prev_status)?.prev_status;
-    t.status = prev && !['needs_approval', 'done', 'cancelled'].includes(prev) ? prev : 'in_progress';
-  }
+  const prev = [...(t.gates || [])].reverse().find((g) => g.prev_status)?.prev_status;
+  const next = t.status !== 'needs_approval' ? t.status
+    : prev && !['needs_approval', 'done', 'cancelled'].includes(prev) ? prev : 'in_progress';
+  const ownerWaitOfItsOwn = t.gate_wait !== true && next === 'blocked';
+  if (!ownerWaitOfItsOwn) t.blocked_on = (t.blocked_on || []).filter((x) => x !== ownerId);
+  delete t.gate_wait;
+  t.status = next === 'blocked' && !(t.blocked_on || []).length ? 'in_progress' : next;
 }
 
 /**
@@ -177,6 +189,12 @@ export function gateEvent(t, { gate, event, at, note }, iso) {
   if (note != null) g.note = String(note).slice(0, 200);
   return g;
 }
+
+/**
+ * An approval whose time is over: status approved, and its `expires_at` is not ahead of `now` (#498).
+ * An approval with no readable time counts as run out: the board never writes one.
+ */
+export const runOut = (g, now = Date.now()) => g?.status === 'approved' && !(Date.parse(g.expires_at) > now);
 
 /** Close check: nothing pending, nothing re-run after a decline. */
 export function gatesResolved(t) {
@@ -204,7 +222,7 @@ export function auditRows(t) {
     if (g.decided_at) rows.push({ at: g.decided_at, gate: g.id, event: g.via === 'standing' ? 'auto-approved' : g.decision === 'approve' ? 'approved' : 'declined', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.decided_by, via: g.via === 'standing' ? `program go ${g.go}` : g.via + (g.surfaces?.length && g.surfaces.join('+') !== g.via ? ` · ${g.surfaces.join('+')}` : '') + (g.recorded_by ? ` (recorded by ${g.recorded_by})` : '') + (g.proposal?.confirmed_at ? ` · confirming ${proposalWhat(g.proposal)}` : ''), surface: g.surface || null, reason: g.reason });
     if (g.executed_at) rows.push({ at: g.executed_at, gate: g.id, event: 'released (run once)', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: g.note ? `single-use grant · ${g.note}` : 'single-use grant' });
     if (g.status === 'disputed') rows.push({ at: g.disputed_at, gate: g.id, event: 'DISPUTED: a grant with no approval in the receipt chain (not run)', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: '' });
-    if (g.status === 'expired') rows.push({ at: g.expires_at, gate: g.id, event: 'expired', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: '' });
+    if (g.status === 'expired') rows.push({ at: g.expires_at, gate: g.id, event: 'expired', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: g.note || '' });
     if (g.rerunsAfterDecline) rows.push({ at: g.decided_at, gate: g.id, event: `re-attempted ×${g.rerunsAfterDecline} after decline`, cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: '' });
   }
   return rows.sort((a, b) => String(a.at).localeCompare(String(b.at)));
@@ -307,6 +325,21 @@ export function createGateStore(dir) {
           const lines = text.trim().split('\n');
           await writePrivate(file, lines.slice(Math.floor(lines.length / 2)).join('\n') + '\n');
         }
+      });
+    },
+    // MCP tools the hook has shown the board (1.3): name → { server, source, firstSeen, lastSeen, count, agents, verdict }
+    async mcpSeen() { return readJson(f('mcp-seen.json'), {}); },
+    saveMcpSeen(map) { return serial(() => writeAtomic(f('mcp-seen.json'), map)); },
+    /** The allow file as it is on disk (null when there is none). */
+    async readMcpAllow() { try { return await readFile(f('mcp-allow'), 'utf8'); } catch { return null; } },
+    /** The hook's allow file: one "tool source" key per line. null removes it (the MCP check is off). */
+    writeMcpAllow(keys) {
+      return serial(async () => {
+        if (keys == null) { await rm(f('mcp-allow'), { force: true }); return; }
+        await mkdir(dir, { recursive: true, mode: 0o700 });
+        const tmp = `${f('mcp-allow')}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
+        await writeFile(tmp, keys.join('\n') + (keys.length ? '\n' : ''), { mode: 0o644 });   // tool names only; the hook reads it
+        await rename(tmp, f('mcp-allow'));
       });
     },
     // serialized + a unique tmp name: two first checks after a policy change used to race on one

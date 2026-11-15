@@ -23,9 +23,10 @@ Or straight from GitHub:
 curl -fsSL https://raw.githubusercontent.com/zulu-assistant/zulu-assistant/main/get.sh | bash
 ```
 
-The installer shows the list of tools it will add and asks once. Then it puts the board, the
-cmux configuration, the agent memory and the Mission Control files in place, and offers
-`zulu setup`.
+That starts the board and nothing else (the light install). For this test we want the full one:
+add `-s -- --full` after `bash`, or run `./install.sh --full` from the clone. The full installer shows
+the list of tools it will add and asks once. Then it puts the board, the cmux configuration, the agent
+memory and the Mission Control files in place, and offers `zulu setup`.
 
 ## 2. zulu setup (the part we most want feedback on)
 Say yes when the installer offers it, or run `zulu setup` later. Please try:

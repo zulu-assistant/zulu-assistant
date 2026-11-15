@@ -2,8 +2,11 @@
 # One-command install:  curl -fsSL https://raw.githubusercontent.com/zulu-assistant/zulu-assistant/main/get.sh | bash
 #
 # Clones the repo to ~/zulu-assistant (ZULU_HOME) — or updates it — and runs
-# ./install.sh, which installs the toolchain (asking once), the agent OS, and
-# then walks you through `zulu setup` to connect your own accounts.
+# ./install.sh: a Node check, your config, the board as one LaunchAgent, and the
+# board opens. Nothing paid, nothing in your Claude settings, no Homebrew packages.
+# Everything else is one command each, later (the board lists them). To install
+# all of it now (toolchain, cmux, Mission Control, the brain, the guided setup):
+#   curl -fsSL …/get.sh | bash -s -- --full
 # A private repo (e.g. a beta) is cloned through your gh login:
 #   ZULU_REPO=<owner>/<repo> bash get.sh
 set -euo pipefail
@@ -11,7 +14,7 @@ REPO="${ZULU_REPO:-zulu-assistant/zulu-assistant}"
 DEST="${ZULU_HOME:-$HOME/zulu-assistant}"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-[[ "$(uname -s)" == Darwin ]] || { echo "Zulu Assistant runs on macOS (launchd + cmux)."; exit 1; }
+[[ "$(uname -s)" == Darwin ]] || { echo "Zulu Assistant runs on macOS (the board is a LaunchAgent)."; exit 1; }
 if ! xcode-select -p >/dev/null 2>&1; then
   echo "Apple's Command Line Tools are needed (git). A dialog opens — install them, then run this again."
   xcode-select --install 2>/dev/null || true; exit 1

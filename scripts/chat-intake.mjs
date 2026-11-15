@@ -19,7 +19,7 @@ import {
   loadChannels, routeEvent, plainText, parseContract, requestBody, replyBody, withheldBody, titleFor,
   ownerFor, safeFileName, renderMentions, coalesce, openSeen, openThreads, openInbox, writeAtomic, chatFileProblem,
   catchupOldest, parseSince, seenFloor, historyEvents, missedByLink, linkHealth, linkStatePatch, readJson, publishBackoff,
-  unmappedChannels,
+  unmappedChannels, cancelLine, sweepSkips, serialWriter, skippedCursor,
 } from '../src/intake.mjs';
 import { slackApi, listChannels, userNames, mentionedIds, downloadFile, socketMode, uploadToThread } from '../src/intake-slack.mjs';
 
@@ -29,9 +29,11 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let status = { state: 'starting', since: new Date().toISOString(), lastEventAt: null, lastError: null, channels: [] };
-const setStatus = async (patch) => {
+// in order: a later state is never overwritten by an earlier snapshot finishing last (#563)
+const writeStatus = serialWriter((snap) => writeAtomic(path.join(STATE_DIR, 'status.json'), snap));
+const setStatus = (patch) => {
   status = { ...status, ...patch, at: new Date().toISOString() };
-  await writeAtomic(path.join(STATE_DIR, 'status.json'), status).catch(() => {});
+  return writeStatus(status);
 };
 
 async function intakeToken() {
@@ -155,8 +157,11 @@ async function run(secrets, { check = false, ...opts } = {}) {
       const link = cfg.boardUrl ? ` · ${cfg.boardUrl}` : '';
       const ask = contract.missing.length ? ` They will ask here for: ${contract.missing.join(', ')}.` : '';
       const planNote = task.plan_first ? ` Planning only until ${OWNER_NAME} reviews the plan.` : '';
-      await post(ev.channel, `Filed as task #${task.id} → ${task.owner || 'unassigned'}.${planNote}${ask}${link}`
-        + (withheld ? '\nYour text was withheld: it looked like a password or key. Please re-post it without that part.' : ''), ev.ts).catch((e) => log(`[chat-intake] reply failed: ${e.message}`));
+      const withheldNote = 'Your text was withheld: it looked like a password or key. Please re-post it without that part.';
+      // a quiet channel (#563): the eyes reaction is the receipt; only the withheld warning is still said
+      if (channel.quiet) { if (withheld) await post(ev.channel, withheldNote, ev.ts).catch((e) => log(`[chat-intake] reply failed: ${e.message}`)); }
+      else await post(ev.channel, `Filed as task #${task.id} → ${task.owner || 'unassigned'}.${planNote}${ask}${link}`
+        + (withheld ? `\n${withheldNote}` : ''), ev.ts).catch((e) => log(`[chat-intake] reply failed: ${e.message}`));
       const extra = [];
       if (overflow) {
         await mkdir(filesDir(task.id), { recursive: true, mode: 0o700 });
@@ -235,6 +240,8 @@ async function run(secrets, { check = false, ...opts } = {}) {
     for (const it of coalesce(items)) {
       if ((failures.get(it.id)?.nextAt || 0) > Date.now()) break;   // backing off; keep the order
       if (!it.channel || !it.thread_ts) { log(`[chat-intake] publish #${it.taskId}: no chat thread — dropped`); sent.push(it.id); continue; }
+      // a quiet channel (#563): a task closed as chatter is closed without a word, in the thread and in #status
+      if (cfg.channels.find((c) => c.name === it.channel_name)?.quiet && cancelLine(it.text)) { sent.push(it.id); continue; }
       try {
         if (it.file) {
           // a file an agent made for the requester (task.sh chat-file); re-checked here, the board checked it too
@@ -293,6 +300,7 @@ async function run(secrets, { check = false, ...opts } = {}) {
   const cursorFile = path.join(STATE_DIR, 'cursor.json');
   const cursors = await readJson(cursorFile, {});
   let sweeping = false;
+  const sweepSkipped = new Set();
   async function sweep(why, since = null) {
     if (sweeping) return false;
     sweeping = true;
@@ -301,9 +309,17 @@ async function run(secrets, { check = false, ...opts } = {}) {
       const connectedMs = status.state === 'connected' && status.connectedAt ? Date.parse(status.connectedAt) : null;
       for (const id of channelById.keys()) {
         const oldest = catchupOldest({ cursor: cursors[id], since });
-        let newest = oldest; let page;
+        let newest = oldest; let page; let skipped = false;
         do {
-          const j = await slackApi(bot, 'conversations.history', { channel: id, oldest, limit: 200, cursor: page });
+          let j;
+          try { j = await slackApi(bot, 'conversations.history', { channel: id, oldest, limit: 200, cursor: page }); }
+          catch (e) {
+            if (!sweepSkips(e)) throw e;
+            // read again on the next sweep: an invite is picked up without a restart; said once per process
+            if (!sweepSkipped.has(id)) { sweepSkipped.add(id); log(`[chat-intake] history sweep: #${channelById.get(id).name} skipped (${e.error})`); }
+            skipped = true; break;
+          }
+          sweepSkipped.delete(id);
           for (const ev of historyEvents(j.messages, id, oldest)) {
             if (connectedMs && Number(ev.ts) * 1000 > connectedMs && missedByLink(ev, (k) => seen.has(k))
               && routeEvent(ev, { botUserId: auth.user_id, channelById, threads: threads.map, principals: PRINCIPALS }).kind === 'request') missed++;
@@ -313,10 +329,16 @@ async function run(secrets, { check = false, ...opts } = {}) {
           for (const m of j.messages || []) if (Number(m.ts) > Number(newest)) newest = m.ts;
           page = j.has_more ? j.response_metadata?.next_cursor : null;
         } while (page);
+        if (skipped) {
+          // never from a manual window: an invite must not file the week that window reached back to
+          const c = skippedCursor({ cursor: cursors[id], since, oldest });
+          if (c) { cursors[id] = c; await writeAtomic(cursorFile, cursors); }
+          continue;
+        }
         // the cursor only moves forward (a manual window reads further back without rewinding it)
         if (!cursors[id] || Number(newest) > Number(cursors[id])) { cursors[id] = newest; await writeAtomic(cursorFile, cursors); }
       }
-      await setStatus({ lastSweepOkAt: new Date().toISOString() });
+      await setStatus({ lastSweepOkAt: new Date().toISOString(), sweepSkipped: [...sweepSkipped].map((id) => channelById.get(id)?.name).filter(Boolean) });
       if (since != null) log(`[chat-intake] manual sweep since ${new Date(since).toISOString()} done`);
       if (missed) { log(`[chat-intake] history sweep (${why}): the socket missed ${missed} request(s) — filed now`); sock.kick('socket missed messages'); }
     } catch (e) { log(`[chat-intake] history sweep (${why}): ${e.message}`); return false; }

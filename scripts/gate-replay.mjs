@@ -6,6 +6,7 @@
 //   node scripts/gate-replay.mjs [--since 7d] [--check <name>] [--samples 5] [--json]
 //   node scripts/gate-replay.mjs --mentions settings.json,policy.json   (how often recorded calls name a word)
 //   node scripts/gate-replay.mjs --mentions <word> --list   (each matching check: time, agent, event, tool, answer; never the call's text)
+//   node scripts/gate-replay.mjs --lines-before <trigger file>   (routing: how many recorded calls an older trigger file sent to the Node step and today's lines do not)
 //                                [--file <checks.jsonl>] [--policy <policy.json>] [--root <checkout>]
 //
 // What it cannot see: a call the shell fast path passed left no line, so a call that only the new
@@ -15,7 +16,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { classify, compileTriggers, isShellTool, CHECKS, DEFAULT_POLICY } from '../src/gates.mjs';
+import { classify, compileTriggers, triggerLines, ereToJs, normalizeForTriggers, isShellTool, CHECKS, DEFAULT_POLICY } from '../src/gates.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** A reading the classifier takes without a switch (a parser fix): shown apart from the checks. */
@@ -65,10 +66,13 @@ export function replay(entries, policy, { checks = CHECKS, home = os.homedir(), 
     if (before.verdict !== 'clear') continue;        // held already: not new
     const now = fixed.verdict === 'gate' ? { ...fixed, check: FIXED } : after.verdict === 'gate' ? after : null;
     if (!now) continue;
-    held.push({ at: e.at, agent: e.agent || '?', check: now.check || '?', cls: now.cls, why: now.why, command: text.replace(/\s+/g, ' ').slice(0, 200), cut: wasCut });
+    // the form: the runner's own name, or for a parser fix the first word of the call
+    const first = (text.trim().split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) || '?').split('/').pop();
+    const form = now.check === 'runners' && now.cmd?.bin ? now.cmd.bin : first;
+    held.push({ at: e.at, agent: e.agent || '?', check: now.check || '?', cls: now.cls, why: now.why, form, command: text.replace(/\s+/g, ' ').slice(0, 200), cut: wasCut });
   }
   const count = (key) => held.reduce((m, h) => { m[h[key]] = (m[h[key]] || 0) + 1; return m; }, {});
-  return { total: entries.length, cut, range: entries.length ? [entries[0].at, entries[entries.length - 1].at] : null, held, byCheck: count('check'), byAgent: count('agent') };
+  return { total: entries.length, cut, range: entries.length ? [entries[0].at, entries[entries.length - 1].at] : null, held, byCheck: count('check'), byAgent: count('agent'), byForm: count('form') };
 }
 
 /** How many recorded checks name each word (case ignored): a rough measure of what a bare-name trigger line would send. */
@@ -89,6 +93,47 @@ export function mentionRows(entries, word) {
     .map((e) => ({ at: e.at, agent: e.agent || '?', event: e.event || 'pre', tool: e.tool || '?', decision: e.decision || '?', ...(e.observed ? { observed: true } : {}), ...(e.task ? { task: e.task } : {}), ...(e.gate ? { gate: e.gate } : {}) }));
 }
 
+/**
+ * Routing under two sets of trigger lines: which recorded calls matched a line before and match none now
+ * (they stop reaching the Node step), and the other way round. The text is what the shell step reads: tool,
+ * call and, where the record has it, the folder. For the calls that stop, the words the dropped lines
+ * matched are counted (a word, never the call's text).
+ */
+export function routing(entries, beforeLines, nowLines) {
+  const comp = (ls) => ls.filter((l) => l && l.trim()).map((l) => { try { return ereToJs(l); } catch { return null; } }).filter(Boolean);
+  const B = comp(beforeLines); const N = comp(nowLines); const dropped = comp(beforeLines.filter((l) => !nowLines.includes(l)));
+  const r = { total: entries.length, withFolder: 0, before: 0, now: 0, stopped: 0, started: 0, byAgent: {}, words: {},
+    days: entries.length ? Math.max(1 / 24, (Date.parse(entries[entries.length - 1].at) - Date.parse(entries[0].at)) / 86400e3) : 0 };
+  for (const e of entries) {
+    if (e.cwd) r.withFolder++;
+    const text = normalizeForTriggers(`tool_name:${e.tool || 'Bash'} ${typeof e.full === 'string' ? e.full : e.command} ${e.cwd || ''}`).replace(/[\n\r\t]+/g, ' ');
+    const b = B.some((re) => re.test(text)); const n = N.some((re) => re.test(text));
+    if (b) r.before++; if (n) r.now++;
+    if (!b && n) r.started++;
+    if (!b || n) continue;
+    r.stopped++; r.byAgent[e.agent || '?'] = (r.byAgent[e.agent || '?'] || 0) + 1;
+    const seen = new Set();
+    for (const re of dropped) {
+      const m = re.exec(text); if (!m) continue;
+      let i = m.index; let j = m.index + m[0].length;
+      while (i > 0 && /[A-Za-z0-9_.-]/.test(text[i - 1])) i--;
+      while (j < text.length && /[A-Za-z0-9_.-]/.test(text[j])) j++;
+      seen.add(text.slice(i, j).toLowerCase().slice(0, 60));
+    }
+    for (const w of seen) r.words[w] = (r.words[w] || 0) + 1;
+  }
+  return r;
+}
+export function renderRouting(r) {
+  if (!r.total) return 'gate replay: no recorded checks to read';
+  const top = (o, k) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, k).map(([a, n]) => `${a} ${n}`).join(' · ');
+  return [`routing over ${r.total} recorded checks (${r.days.toFixed(1)} days; ${r.withFolder} carry the call's folder)`,
+    `  matched a line before: ${r.before} · match a line now: ${r.now}`,
+    `  stop reaching the Node step: ${r.stopped} (${(r.stopped / r.days).toFixed(1)} a day) · newly reach it: ${r.started}`,
+    ...(r.stopped ? [`  words the dropped lines matched: ${top(r.words, 15)}`, `  by agent: ${top(r.byAgent, 10)}`] : []),
+    'counted: only calls that reached the board under its own lines; a call the fast path passed left no line'].join('\n');
+}
+
 export function render(r, { samples = 5, policyName = 'policy' } = {}) {
   const out = [];
   if (!r.total) return 'gate replay: no recorded checks to read';
@@ -104,6 +149,8 @@ export function render(r, { samples = 5, policyName = 'policy' } = {}) {
   }
   const agents = Object.entries(r.byAgent).sort((a, b) => b[1] - a[1]);
   if (agents.length) out.push(`by agent: ${agents.map(([a, n]) => `${a} ${n}`).join(' · ')}`);
+  const forms = Object.entries(r.byForm || {}).sort((a, b) => b[1] - a[1]).slice(0, 12);
+  if (forms.length) out.push(`by first word: ${forms.map(([a, n]) => `${a} ${n}`).join(' · ')}`);
   return out.join('\n');
 }
 
@@ -136,6 +183,12 @@ function main(argv) {
     return;
   }
   const { policy, name } = loadPolicy(root, arg('--policy'));
+  if (arg('--lines-before')) {
+    let old; try { old = readFileSync(arg('--lines-before'), 'utf8').split('\n'); } catch { throw new Error(`cannot read the trigger file ${arg('--lines-before')}`); }
+    const r = routing(readChecks(text, { since }), old, triggerLines(policy));
+    console.log(argv.includes('--json') ? JSON.stringify(r, null, 1) : `${renderRouting(r)}\n(today's lines: ${name}, with no checkout named, as in the shipped trigger file)`);
+    return;
+  }
   const r = replay(readChecks(text, { since }), policy, { checks: only ? [only] : CHECKS, root });
   console.log(argv.includes('--json') ? JSON.stringify(r, null, 1) : render(r, { samples: Number(arg('--samples')) || 5, policyName: name }));
 }

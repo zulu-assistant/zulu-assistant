@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   channelsFrom, routeEvent, plainText, parseContract, requestBody, replyBody, titleFor, ownerFor, safeFileName,
-  publishLines, renderMentions, coalesce, openSeen, openThreads, openInbox, findDate, chatFileProblem,
+  publishLines, renderMentions, coalesce, openSeen, openThreads, openInbox, findDate, chatFileProblem, cancelLine, sweepSkips, serialWriter, skippedCursor,
 } from '../src/intake.mjs';
 import { downloadFile, socketMode, uploadToThread } from '../src/intake-slack.mjs';
 import { applyPatch, newTask, createLedger, MeshError, CHECKLIST, wakeMessage } from '../src/tasks.mjs';
@@ -358,4 +358,82 @@ test('plan-first: a planFirst person\'s request waits for the owner\'s review on
   const plain = applyPatch(newTask({ title: 'x', requester: 'owner', owner: 'books-agent' }, { id: 10, now: 0 }), { op: 'claim', actor: 'books-agent' }).task;
   assert.throws(() => applyPatch(plain, { op: 'plan', actor: 'books-agent', text: 'p' }), /not plan-first/);
   assert.equal(applyPatch(plain, close).task.status, 'done');
+});
+
+// #607: an assign after the owner approved the plan said PLAN FIRST (seen live: an agent that followed it would have
+// posted a second plan and put the task back on the owner). The wake says the plan is approved until a new plan waits.
+test('plan-first: the assign wake says PLAN FIRST before the review and "plan approved" after it', () => {
+  let t = newTask({ title: 'new banner', requester: 'teammate', owner: 'books-agent', plan_first: true, source: { via: 'chat', key: 'k7', channel: 'C1', ts: '1.7' } }, { id: 11, now: 0 });
+  t = applyPatch(t, { op: 'claim', actor: 'books-agent' }).task;
+  t = applyPatch(t, { op: 'plan', actor: 'books-agent', text: '1. draft' }).task;
+  assert.match(wakeMessage(t, 'assigned'), /PLAN FIRST: no work until/, 'waiting for the review');
+  const ok = applyPatch(t, { op: 'decide', actor: OWNER.id, decision: 'approve' }, { decider: true }).task;
+  const w = wakeMessage(ok, 'assigned');
+  assert.doesNotMatch(w, /PLAN FIRST|task\.sh plan/, w);
+  assert.match(w, /^Task #11 assigned \(chat intake\) — read it from the ledger.* — plan approved by .+: work to it$/, w);
+  // a later approval of another kind keeps the plan approved
+  const later = applyPatch(ok, { op: 'request_approval', actor: 'books-agent', policy_item: 'a paid step' }).task;
+  assert.match(wakeMessage(later, 'assigned'), /plan approved by/);
+  // a second plan posted after the approval waits again, and a declined one too
+  const again = applyPatch(ok, { op: 'plan', actor: 'books-agent', text: 'v2' }).task;
+  assert.match(wakeMessage(again, 'assigned'), /PLAN FIRST/);
+  const no = applyPatch(again, { op: 'decide', actor: OWNER.id, decision: 'decline' }, { decider: true }).task;
+  assert.match(wakeMessage(no, 'assigned'), /PLAN FIRST/);
+  // a declined first plan: PLAN FIRST; not plan-first: no clause at all
+  assert.match(wakeMessage(applyPatch(t, { op: 'decide', actor: OWNER.id, decision: 'decline' }, { decider: true }).task, 'assigned'), /PLAN FIRST/);
+  assert.equal(wakeMessage(newTask({ title: 'x', requester: 'owner', owner: 'books-agent' }, { id: 12, now: 0 }), 'assigned'), 'Task #12 assigned: x');
+});
+
+// #563: a quiet channel (people also just talk there) files and reacts, but posts no "Filed as" reply and no line
+// for a task closed as chatter. The transport recognises that line by the form publishLines writes: pinned here.
+test('quiet channel: parsed per channel, off by default; the cancel line is recognised exactly', async () => {
+  const cfg = channelsFrom({ channels: [{ name: 'general-chat', owner: 'mc', quiet: true }, { name: 'requests', owner: 'mc' }, { name: 'odd', owner: 'mc', quiet: 'yes' }] });
+  assert.deepEqual(cfg.channels.map((c) => [c.name, c.quiet]), [['general-chat', true], ['requests', false], ['odd', false]]);
+  const opts = { ownerName: 'Owner', isPerson: () => false, isOwnerId: () => false };
+  const cancel = publishLines(S({ status: 'open' }), S({ status: 'cancelled' }), opts);
+  assert.equal(cancel.length, 1); assert.equal(cancelLine(cancel[0].text), true, cancel[0].text);
+  assert.equal(cancelLine(publishLines(S({ status: 'open' }), S({ status: 'cancelled', owner: null }), opts)[0].text), true);
+  for (const next of [{ status: 'in_progress' }, { status: 'done' }, { status: 'blocked', blocked_on: [] }])
+    assert.equal(cancelLine(publishLines(S({ status: 'open' }), S(next), opts)[0].text), false, next.status);
+  assert.equal(cancelLine('#5 cancelled-ish talk'), false);
+  // the transport: a quiet channel's filed request gets no "Filed as" reply, and its cancel line is dropped, thread and #status
+  const src = await readFile(new URL('../scripts/chat-intake.mjs', import.meta.url), 'utf8');
+  assert.match(src, /if \(channel\.quiet\) \{ if \(withheld\)/);
+  assert.match(src, /\?\.quiet && cancelLine\(it\.text\)\) \{ sent\.push\(it\.id\); continue; \}/);
+});
+
+// #563 follow-up: a routed channel the bot is not in (yet) failed every history sweep, so the link card would have
+// gone red. Such a channel is skipped and the sweep goes on; anything else still fails it.
+test('history sweep: a channel the bot cannot read is skipped, other errors still fail the sweep', async () => {
+  const { SlackError } = await import('../src/intake-slack.mjs');
+  for (const code of ['not_in_channel', 'channel_not_found', 'is_archived']) assert.equal(sweepSkips(new SlackError('conversations.history', code)), true, code);
+  for (const code of ['invalid_auth', 'ratelimited', 'fatal_error']) assert.equal(sweepSkips(new SlackError('conversations.history', code)), false, code);
+  assert.equal(sweepSkips(new Error('fetch failed')), false);
+  const src = await readFile(new URL('../scripts/chat-intake.mjs', import.meta.url), 'utf8');
+  assert.match(src, /catch \(e\) \{\n\s*if \(!sweepSkips\(e\)\) throw e;/);
+});
+
+test('status writes land in the order asked for (a frame write never overwrites the connected state); the card names a skipped channel', async () => {
+  const landed = [];
+  // the first write is slow, the second fast: unordered, the older snapshot would land last
+  const write = serialWriter(async (v) => { await new Promise((r) => setTimeout(r, v.slow ? 40 : 1)); landed.push(v.state); });
+  write({ state: 'connecting', slow: true }); await write({ state: 'connected' });
+  assert.deepEqual(landed, ['connecting', 'connected']);
+  const failing = serialWriter(async (v) => { if (v === 1) throw new Error('disk'); landed.push(v); });
+  failing(1); await failing(2);                      // one failed write does not stop the next
+  assert.equal(landed.at(-1), 2);
+  const { linkHealth } = await import('../src/intake.mjs');
+  const now = Date.parse('2026-01-01T10:00:00Z'); const at = '2026-01-01T09:59:00.000Z';
+  const st = { state: 'connected', connectedAt: at, lastFrameAt: at, lastSweepOkAt: at };
+  assert.doesNotMatch(linkHealth(st, { now }).why, /not readable/);
+  const h = linkHealth({ ...st, sweepSkipped: ['general'] }, { now });
+  assert.equal(h.level, 'warn'); assert.match(h.why, / · not readable: #general \(invite the bot\)$/);   // amber while a routed channel cannot be read
+});
+
+test("a skipped channel's cursor: only when it has none, and never from a manual window", () => {
+  const now = '1762869600.000000'; const weekBack = '1762264800.000000';
+  assert.equal(skippedCursor({ cursor: undefined, since: null, oldest: now }), now);            // first skip on an ordinary sweep
+  assert.equal(skippedCursor({ cursor: '1762860000.000000', since: null, oldest: now }), null); // it has one: never moved
+  assert.equal(skippedCursor({ cursor: undefined, since: Date.parse('2026-11-04T00:00:00Z'), oldest: weekBack }), null);   // a manual window
+  assert.equal(skippedCursor({ cursor: undefined, since: null, oldest: undefined }), null);
 });

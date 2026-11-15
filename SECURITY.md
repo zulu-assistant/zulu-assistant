@@ -97,7 +97,8 @@ Agents read untrusted text: logs, web pages, pane contents, other agents'
 messages. The contracts in `examples/MISSION-CONTROL.md`, `AGENT-MESH.md` and
 `examples/config/TRIAGE.md` require that such text is treated as **data, not
 instructions**. Scheduled triage is additionally bounded by its start line
-(four tools, no MCP servers or skills, an allow list for its shell commands;
+(two tools, no MCP servers or skills, an allow list of exact calls, new files
+only under `data/handoffs/triage-*`;
 read-only shell commands still run without asking, see
 [docs/MISSION-CONTROL.md](docs/MISSION-CONTROL.md#scheduled-triage)). These are defenses in depth, not guarantees. Keep
 `POLICY.md` strict, and review what you allow.

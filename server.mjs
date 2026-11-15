@@ -5,11 +5,13 @@ import http from 'node:http';
 import os from 'node:os';
 import { execFile, execFileSync } from 'node:child_process';
 import { readFile, writeFile, mkdir, stat as fsStat } from 'node:fs/promises';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, CONTEXT, SETTINGS, DOMAINS, OWNER, isOwner, isPrincipal, resolve as resolveConfig, loadSecrets, REGISTRY_FILE, PRINCIPALS, writePrivate, PROFILE, CMUX_PRESENT } from './src/config.mjs';
+import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, ENDPOINTS, CONTEXT, SETTINGS, DOMAINS, OWNER, isOwner, isPrincipal, resolve as resolveConfig, loadSecrets, REGISTRY_FILE, PRINCIPALS, writePrivate, PROFILE, CMUX_PRESENT } from './src/config.mjs';
 import { publishLines, chatFileProblem, loadChannels, isChatTask } from './src/intake.mjs';
 import { snapshot, logPathsFor } from './src/status.mjs';
+import { noteGuardrailsSeen } from './src/setup.mjs';
 import { tailFile, getAgentFeed } from './src/collect.mjs';
 import { processAlerts, sendDigest, notify as realNotify, cmuxPassword } from './src/alerts.mjs';
 import { maybeRemediate } from './src/remediate.mjs';
@@ -32,8 +34,10 @@ import { allowedSource, localOnly } from './src/guard.mjs';
 import { isWrite, writeRefusal, senderTrust } from './src/request-guard.mjs';
 import { createCallerEvidence, callerSettings, doorVerdict, isLocalSource, nameVerdict } from './src/caller.mjs';
 import { createLedger, MeshError, summarize, wakeMessage, outsideTask, sourceLabel, holdOpen } from './src/tasks.mjs';
+import { triageReading } from './src/triage-reading.mjs';
+import { planAsk } from './src/triage-ask.mjs';
 import { createGateService } from './src/gate-service.mjs';
-import { createGateIntegrity, integritySettings, gatePaths, remoteTarget, readRemoteRef, registrationProblems, portProblem, integrityCard, settingsProblem, PROJECT_SETTINGS, OWN_FILES, isHookCommand, hookEntries, CONFIG_HOOK } from './src/gate-integrity.mjs';
+import { createGateIntegrity, integritySettings, gatePaths, remoteTarget, readRemoteRef, registrationProblems, portProblem, integrityCard, settingsProblem, settingsNote, PROJECT_SETTINGS, startSettingsScan, needsCwd, failOpenEntries, OWN_FILES, isHookCommand, hookEntries, CONFIG_HOOK } from './src/gate-integrity.mjs';
 import { DEFAULT_POLICY as GATE_DEFAULT_POLICY, repoSlug as gateRepoSlug } from './src/gates.mjs';
 import { decisionSurface } from './src/gate-ledger.mjs';
 import {
@@ -144,6 +148,31 @@ const integrity = INTEGRITY.mode !== 'on' ? null : createGateIntegrity({
     return readRemoteRef({ target, slug: /github\.com/i.test(target.url) ? gateRepoSlug(target.url) : null, run: readOnly, remote: INTEGRITY.remote, root: LIVE });
   },
 });
+const sessionCwd = new Map();             // pid → folder | null: a session started with a RELATIVE settings path (lsof, asked once per process)
+const CWD_LOOKUPS = 4;                    // new lookups per poll; the rest wait for the next one (a note says so until then)
+async function startSettings(home) {
+  // (its own call: the listing is about half a megabyte on a busy machine, more than readOnly's default buffer allows before long)
+  const ps = await new Promise((resolve) => { execFile('ps', ['-axww', '-o', 'pid=,args='], { encoding: 'utf8', timeout: 5000, maxBuffer: 32 * 1024 * 1024 }, (err, out) => resolve({ ok: !err, out: String(out || '') })); });
+  if (!ps.ok) return { problems: [], notes: ['running sessions\' command lines could not be read (ps)'], files: [], sessions: 0 };
+  const procs = ps.out.split('\n').map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((x) => ({ pid: Number(x[1]), args: x[2] }));
+  const seen = new Map();                 // one read per file per poll, however many sessions share it
+  const readJson = (f) => { if (!seen.has(f)) { let j = null; try { j = JSON.parse(readFileSync(f, 'utf8')); } catch { j = null; } seen.set(f, j); } return seen.get(f); };
+  // A relative path is read from the session's own folder, which only lsof knows (about 0.4 s a call
+  // here). Never on this loop, which also answers gate checks: asynchronous, a few new processes a
+  // poll, side by side, 2 s at most. A process not looked up yet reads as "cannot read" for this poll.
+  const need = needsCwd(procs);
+  for (const pid of [...sessionCwd.keys()]) if (!need.includes(pid)) sessionCwd.delete(pid);
+  await Promise.all(need.filter((pid) => !sessionCwd.has(pid)).slice(0, CWD_LOOKUPS).map((pid) => new Promise((resolve) => {
+    execFile('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 2000 }, (err, out) => { sessionCwd.set(pid, /^n(\/.*)$/m.exec(String(out || ''))?.[1] || null); resolve(); });
+  })));
+  const cwdOf = (pid) => sessionCwd.get(pid) ?? null;
+  const dirs = INTEGRITY.startSettingsDirs.map((d) => path.resolve(d.replace(/^~(?=\/|$)/, home))).map((dir) => {
+    let files = [];
+    try { files = readdirSync(dir).filter((n) => n.endsWith('.json')).slice(0, 50); } catch { files = []; }
+    return { dir, files };
+  });
+  return startSettingsScan({ procs, readJson, cwdOf, dirs, home });
+}
 let integrityWas = null;                  // the last state put on the ticker (a line per change, not per poll)
 async function gateIntegrityCard() {
   const files = await integrity.check();
@@ -154,6 +183,9 @@ async function gateIntegrityCard() {
   // the settings-change hook ships with 1.3: until the installer has been run again it is not there.
   // Said on the card, not coloured: installing a hook is the owner's step.
   const notes = hookEntries(userSettings).some((e) => e.event === 'ConfigChange' && isHookCommand(e.command, LIVE, CONFIG_HOOK)) ? [] : ['settings-change hook not installed (scripts/guardrails-install.sh)'];
+  // an entry of ours that does not fail closed (registered before the field existed): said, not coloured; the installer refreshes it
+  const open = failOpenEntries(userSettings, { repo: LIVE });
+  if (open.length) notes.push(`${open.join(' and ')} ${open.length === 1 ? 'is' : 'are'} registered without onFailure: "block", so a hook that cannot start would let calls run (scripts/guardrails-install.sh)`);
   // Codex: only where its hook was installed at all (the card already says "codex MISSING" where it never was)
   const codex = await json(path.join(home, '.codex', 'hooks.json'));
   if (codex && JSON.stringify(codex).includes('gate-hook.sh')) registration.push(...registrationProblems(codex, { repo: LIVE, codex: true }).problems.map((x) => `Codex: ${x}`));
@@ -161,16 +193,35 @@ async function gateIntegrityCard() {
   // session in that repo, mid-session; one whose env block names a variable the hook reads steers
   // it (both seen live). So: the repos the registered agents work in.
   const repos = [...new Set(dirCache.filter((a) => a.status !== 'closed' && typeof a.repo === 'string' && a.repo).map((a) => path.resolve(a.repo.replace(/^~(?=\/|$)/, home))))];
+  // git's own variables in an env block reach the shell every call runs in: the strict names are a problem
+  // above, the softer ones (a key, a proxy, another settings file) a note (#572)
+  const userNote = settingsNote(userSettings);
+  if (userNote) notes.push(`the user settings file ${userNote}`);
   for (const repo of repos) for (const f of PROJECT_SETTINGS) {
-    const why = settingsProblem(await json(path.join(repo, f)));
+    const j = await json(path.join(repo, f));
+    const why = settingsProblem(j);
     if (why) registration.push(`${path.join(repo, f).replace(home, '~')} ${why} (for every session in that repo)`);
+    const note = settingsNote(j);
+    if (note) notes.push(`${path.join(repo, f).replace(home, '~')} ${note}`);
   }
+  // The settings a session is STARTED with (`claude --settings <file or JSON>`, how cmux starts every
+  // session): one more source above all of those, and no settings-change event fires for it. Read from
+  // the running sessions' own command lines, plus the folders that hold such files for the next start.
+  const started = await startSettings(home);
+  registration.push(...started.problems);
+  notes.push(...started.notes);
   const port = portProblem(await readFile(path.join(ROOT, 'data', 'local.env'), 'utf8').catch(() => ''), SETTINGS.port);
   // the fast path's own file: rewritten at once when it is not what the policy generates, and said for this poll
   const trig = await gates.verifyTriggers().catch(() => ({ ok: true }));
   if (!trig.ok) {
     console.log(`${new Date().toISOString()} [integrity] the triggers file was ${trig.missing ? 'missing' : 'changed outside the board'}: rewritten from the policy`);
     registration.push(`the hook's triggers file was ${trig.missing ? 'missing' : 'changed outside the board'} (rewritten)`);
+  }
+  // …and the hook's MCP allow file the same way (every line in it is a tool the board is never asked about)
+  const allow = await gates.verifyMcpAllow().catch(() => ({ ok: true }));
+  if (!allow.ok) {
+    console.log(`${new Date().toISOString()} [integrity] the MCP allow file was ${allow.missing ? 'missing' : 'changed outside the board'}: rewritten from the board's list`);
+    registration.push(`the hook's MCP allow file was ${allow.missing ? 'missing' : `changed outside the board (${allow.foreign} foreign line(s))`} (rewritten)`);
   }
   const card = integrityCard({ files, registration, port, notes });
   const key = `${card.status}|${card.state}|${card.changed.join(',')}|${card.problems.join(',')}`;
@@ -780,10 +831,33 @@ function maybeDigest(snap, now) {
   }
 }
 
+const FIRST_CARD_WAIT_MS = 3000;
+/** Compute the gate card (with the integrity reading where that check is on) and write the file the snapshot reads. */
+// A light install on which the gate is seen once (a registered hook, or a gate) is marked in its state file: from
+// then on its card is the usual one, and a hook lost later reads MISSING (src/status.mjs gateCard). Tried until the
+// state file has been read once without error; a demo board has no state file of its own to mark.
+let guardrailsNoted = false;
+async function markGuardrailsSeen(c) {
+  if (DEMO || guardrailsNoted || !(c.hook || c.gates)) return;
+  guardrailsNoted = await noteGuardrailsSeen().then(() => true).catch(() => false);
+}
+async function writeGateCard() {
+  // an approval that ran out since the last poll is marked expired first (#498); a failure here never costs the card
+  await gates.expireRunOut().catch((e) => console.error('[guardrails] expiry', e.message));
+  const c = await gates.card(await ledger.list({ status: 'live' }));
+  await markGuardrailsSeen(c);
+  // the integrity check never fails the card: if it cannot run, the card says so
+  const integ = integrity ? await gateIntegrityCard().catch((e) => ({ status: 'unknown', state: 'unread', detail: `gate files not checked: ${String(e.message).slice(0, 80)}`, changed: [], behind: [], problems: [] })) : null;
+  await writeFile(GATE_CARD_FILE, JSON.stringify({ ...c, ...(integ ? { integrity: integ } : {}), at: Date.now() }));
+}
+
 async function poll() {
   try {
-    // Guardrails-only: the gate card is the page's one card, so it is computed before the snapshot reads it
-    if (GUARDRAILS_ONLY) await stages.run('guardrails-card', async () => { const c = await gates.card(await ledger.list({ status: 'live' })); await writeFile(GATE_CARD_FILE, JSON.stringify({ ...c, at: Date.now() })); });
+    // The snapshot reads the gate card from its file. Guardrails-only: it is the page's one card, so it
+    // is computed before every snapshot. Full profile: at the END of each poll, so that it never
+    // holds up the fleet's cards; the page is then one poll behind (and a new process's first card is
+    // computed before it starts listening, at the bottom of this file).
+    if (GUARDRAILS_ONLY) await stages.run('guardrails-card', writeGateCard);
     // 'board-cards' = the Guardrails-only profile's snapshot: the board's own cards, no collector
     const snap = GUARDRAILS_ONLY
       ? await stages.run('board-cards', async () => snapshot())
@@ -904,12 +978,7 @@ async function poll() {
       owner: resolveTarget('mission-control', dirCache).agent?.name || null, record: (k, t) => recordEvent(k, t).catch(() => {}),
       afterCreate: (t) => afterTaskChange(t, { wake: t.owner && !isOwner(t.owner) ? [t.owner] : [] }, 'board') })
       .catch((e) => console.error('[channel discovery]', e.message));
-    stages.run('guardrails-card', async () => {
-      const c = await gates.card(await ledger.list({ status: 'live' }));
-      // the integrity check never fails the card: if it cannot run, the card says so
-      const integ = integrity ? await gateIntegrityCard().catch((e) => ({ status: 'unknown', state: 'unread', detail: `gate files not checked: ${String(e.message).slice(0, 80)}`, changed: [], behind: [], problems: [] })) : null;
-      await writeFile(GATE_CARD_FILE, JSON.stringify({ ...c, ...(integ ? { integrity: integ } : {}), at: Date.now() }));
-    });
+    stages.run('guardrails-card', writeGateCard);
     const payload = JSON.stringify(payloadFor());
     for (const res of sseClients) res.write(`data: ${payload}\n\n`);
   } catch (err) {
@@ -923,7 +992,9 @@ function payloadFor() {
   return {
     ...current,
     bootId: BOOT_ID,
-    profile: DEMO ? 'full' : PROFILE,       // 'guardrails' = the page shows the waiting rows and the ledger only
+    profile: DEMO ? 'full' : PROFILE,
+    watching: DEMO ? 1 : JOBS.length + DOCKER_CONTAINERS.length + PROCESSES.length + CRON.length + ENDPOINTS.length,   // 0 = the page says "nothing watched yet"
+       // 'guardrails' = the page shows the waiting rows and the ledger only
     brand: SETTINGS.brand || 'Zulu Assistant',
     repoUrl: SETTINGS.repoUrl || '',
     domains: DEMO ? DEMO_DOMAINS : DOMAINS,
@@ -938,7 +1009,7 @@ function payloadFor() {
     // caller evidence (src/caller.mjs): the switches, lookups and failures, and what the decision door did
     caller: { mode: CALLER.mode, tripwire: CALLER.tripwire, ...callerEvidence.stats, ...callerStats, ...gates.callerReadings() },
     ...(snoozeMode(SETTINGS.attention) === 'on' ? { attention: attentionView() } : {}),
-    sessions: (current.sessions || []).map((s) => ({ ...s, ctx: contextCache.get(s.workspaceId) || null })),
+    sessions: (current.sessions || []).map((s) => ({ ...s, ctx: contextCache.get(s.workspaceId) || s.ctx || null })),   // s.ctx: a session with no cmux workspace carries its own gauge
     directory: Object.fromEntries(dirCache.filter((a) => a.workspaceId).map((a) => [a.workspaceId, {
       name: a.name, kind: a.kind, vendor: a.vendor, owns: a.owns || [], status: a.status,
       liveName: a.live?.liveName || null, nameOk: a.live ? a.live.nameOk : null,
@@ -1137,9 +1208,27 @@ const server = http.createServer(async (req, res) => {
       // cancel queued (undelivered) messages for one target — localhost only
       if (!localOnly(req)) return sendJson(res, 403, { ok: false, msg: 'localhost only' });
       const b = await readBody(req);
-      const gone = await dropFromOutbox((m) => m.to === b.to);
-      recordEvent('sys', `mesh: dropped ${gone.length} queued message(s) for ${b.to}`).catch(() => {});
-      return sendJson(res, 200, { ok: true, dropped: gone.length });
+      // Who is dropping, and may they? A queued message can be a gate decision or a "not approved
+      // yet" notice, which the queue itself never replaces. With names enforced the caller must be
+      // who it says, and be the addressee, Mission Control or the owner (everything queued for that
+      // target), or the sender (its own messages only). In every mode the line says who and what.
+      let who = 'a caller that gave no name';
+      let mine = null;                                   // a sender's name: only its own messages go
+      if (CALLER.mode === 'on' && !b.actor) throw new MeshError(403, 'dropping queued messages needs your name: run it from your own pane (mesh-cli.mjs outbox drop <agent>)');
+      if (b.actor) {
+        const me = await identify(b.actor);
+        const what = `an outbox drop for ${String(b.to).slice(0, 60)}`;
+        await noteCaller(req, me.name, what);
+        const named = await nameCheck(req, me.name, what);
+        if (!named.proven) throw unprovenRefusal(me.name, named.why, `dropping the messages queued for ${String(b.to).slice(0, 60)}`);
+        who = CALLER.mode === 'on' ? me.name : `${me.name} (name not checked)`;
+        if (CALLER.mode === 'on' && !(me.mc || isOwner(me.name) || me.name === b.to)) mine = me.name;
+      }
+      const gone = await dropFromOutbox((m) => m.to === b.to && (mine === null || m.from === mine));
+      const kinds = Object.entries(gone.reduce((o, m) => { const k = m.kind || 'message'; o[k] = (o[k] || 0) + 1; return o; }, {})).map(([k, n]) => `${k} ×${n}`).join(', ');
+      console.log(`${new Date().toISOString()} [mesh] outbox drop for ${b.to} by ${who}: ${gone.length} message(s)${kinds ? ` (${kinds})` : ''}${mine ? ' — its own only' : ''}`);
+      recordEvent('sys', `mesh: ${who} dropped ${gone.length} queued message(s) for ${b.to}${kinds ? ` (${kinds})` : ''}`).catch(() => {});
+      return sendJson(res, 200, { ok: true, dropped: gone.length, ...(mine ? { ownOnly: true } : {}) });
     }
     if (url.pathname === '/api/tasks' && req.method === 'GET') {
       const q = Object.fromEntries(url.searchParams);
@@ -1174,6 +1263,27 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/tasks/summary' && req.method === 'GET') {
       return sendJson(res, 200, await ledger.summary());
     }
+    // the scheduled triage pass's one reading (#586): small enough to read whole in one allowed call
+    if (url.pathname === '/api/triage' && req.method === 'GET') {
+      return sendJson(res, 200, triageReading(payloadFor(), await ledger.list()));
+    }
+    // the triage pass asks Mission Control for a worker instead of starting one (#588, SETTINGS.triage.dispatch 'ask'):
+    // this machine only; the board checks the label against its own reading and files the task under its own name
+    if (url.pathname === '/api/triage/ask' && req.method === 'POST') {
+      if (!localOnly(req)) return sendJson(res, 403, { ok: false, msg: 'localhost only' });
+      const b = await readBody(req);
+      const tasks = await ledger.list();
+      const mc = resolveTarget('mission-control', dirCache).agent;
+      const plan = planAsk({ label: b.label, file: b.file }, { cards: triageReading(payloadFor(), tasks).cards, tasks, root: ROOT, owner: mc?.name, settings: SETTINGS });
+      if (plan.refused) {
+        recordEvent('sys', `triage: ask refused (${String(plan.refused).slice(0, 120)})`).catch(() => {});
+        return sendJson(res, 409, { ok: false, refused: plan.refused });
+      }
+      const task = await ledger.create({ ...plan.input, owner_ws: mc?.workspaceId || null });
+      if (task?.owner) await afterTaskChange(task, { wake: [task.owner] }, 'board');
+      recordEvent('sys', `triage: asked Mission Control for a worker (#${task.id}, ${b.label})`).catch(() => {});
+      return sendJson(res, 200, { ok: true, id: task.id });
+    }
     if (url.pathname === '/api/tasks' && req.method === 'POST') {
       const b = await readBody(req);
       const intake = isIntake(req);
@@ -1194,6 +1304,10 @@ const server = http.createServer(async (req, res) => {
         named = await nameCheck(req, me.name, 'a new task');
         b.requester = me.name; b.requester_ws = named.proven ? me.ws : null;
       }
+      // the unverified mark is the board's to set, never the caller's: a field on the task itself, so it
+      // outlives the comment below and every later comment
+      delete b.unverified;
+      if (!named.proven) b.unverified = { why: named.why };
       if (b.owner) {
         const t = resolveTarget(b.owner, await refreshDir());
         if (!t.agent && !isOwner(b.owner)) return sendJson(res, 400, { ok: false, msg: `owner: ${t.error}`, candidates: t.candidates });
@@ -1303,18 +1417,19 @@ const server = http.createServer(async (req, res) => {
       const intake = isIntake(req);
       // board decisions carry the decision token; a revoke_go without it goes the normal (owner/MC) path
       // proposal_reject ("not what I said", a recorded pane answer thrown out) is the owner's too
-      const deciding = b.op === 'decide' || b.op === 'gate_decide' || b.op === 'proposal_reject' || (b.op === 'revoke_go' && !!req.headers['x-mesh-decision']);
+      // request_confirm with the token is the owner saying an unverified request is real; without it, Mission Control's path
+      const deciding = b.op === 'decide' || b.op === 'gate_decide' || b.op === 'proposal_reject' || ((b.op === 'revoke_go' || b.op === 'request_confirm') && !!req.headers['x-mesh-decision']);
       // condition H: a gate decision never carries an agent or intake identity, token or not
-      if ((b.op === 'gate_decide' || b.op === 'proposal_reject') && (intake || b.actor || req.headers['x-mesh-intake'] || req.headers['x-mesh-agent']))
+      if ((b.op === 'gate_decide' || b.op === 'proposal_reject' || (b.op === 'request_confirm' && deciding)) && (intake || b.actor || req.headers['x-mesh-intake'] || req.headers['x-mesh-agent']))
         throw new MeshError(403, 'gates are decided from the owner\'s board only (no agent or intake identity)');
       // the decision door first: a request an agent session is behind is refused and named, token or not.
       // `typed`: an approval of one gate that came from a terminal on this machine, not the board page
       // (tripwire 'browser'). It is kept as a row the owner confirms; the ledger decides nothing.
       let typed = false;
-      if (deciding) typed = (await decisionDoor(req, `task #${tm[1]} ${b.op === 'proposal_reject' ? 'pane-answer rejection' : b.op === 'revoke_go' ? 'revoke go' : `${b.decision || 'decision'}${b.gate ? ` of gate ${String(b.gate).slice(0, 8)}` : ''}`}`,
+      if (deciding) typed = (await decisionDoor(req, `task #${tm[1]} ${b.op === 'proposal_reject' ? 'pane-answer rejection' : b.op === 'revoke_go' ? 'revoke go' : b.op === 'request_confirm' ? 'request confirmation' : `${b.decision || 'decision'}${b.gate ? ` of gate ${String(b.gate).slice(0, 8)}` : ''}`}`,
         { typedApproval: b.op === 'gate_decide' && b.decision === 'approve' })).typed;
       const decider = !intake && deciding && isDecider(req);
-      const decisionWord = b.op === 'proposal_reject' ? 'pane-answer-rejected' : b.decision;
+      const decisionWord = b.op === 'proposal_reject' ? 'pane-answer-rejected' : b.op === 'request_confirm' ? 'request-confirmed' : b.decision;
       if (deciding) {
         // every panel decision attempt leaves a trace (two clicks left none)
         const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -1533,6 +1648,15 @@ const server = http.createServer(async (req, res) => {
 await gates.loadPolicy().catch((e) => console.error('[guardrails]', e.message));   // writes data/guardrails/triggers for the hook
 // receipts a crash left half-written (#369): before listen, so nothing can mint first
 await gates.reconcile().catch((e) => console.error('[guardrails] reconcile', e.message));
+// approvals that ran out unused while nobody looked (#498): marked expired before anything can be presented
+await gates.expireRunOut().catch((e) => console.error('[guardrails] expiry', e.message));
+// A new process's first snapshot reads the gate card from its file, and the file on disk is the
+// PREVIOUS process's: after a pull and restart the page still said "behind" for one poll. So the card
+// is computed once before this process answers anything, waited for at most 3 s (the remote read can
+// take longer with no network; it then finishes behind the first poll). Done BEFORE listening, not
+// inside the first poll: a status read between "listening" and "first snapshot" has no cards at all.
+// This first card is computed before the mesh directory is read, so it does not look at agents' repos yet.
+if (!GUARDRAILS_ONLY) await Promise.race([stages.run('guardrails-card', writeGateCard), new Promise((r) => setTimeout(r, FIRST_CARD_WAIT_MS))]);
 server.listen(SETTINGS.port, '0.0.0.0', () => {
   console.log(`[ops-board] http://localhost:${SETTINGS.port} (+ tailnet, source-guarded)${DEMO ? ' — DEMO MODE (synthetic data)' : ''}`);
   recordEvent('sys', DEMO ? 'Ops Board started in demo mode — synthetic fleet, nothing real is touched' : 'Ops Board started').catch(() => {});

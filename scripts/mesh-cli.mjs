@@ -15,7 +15,7 @@ import {
 } from '../src/mesh.mjs';
 import { applyChrome, groupPlan, groupRepairPlan, isDisposablePlaceholder, domainTable } from '../src/chrome.mjs';
 import { resolve as resolveConfig } from '../src/config.mjs';
-import { CHECKLIST, requestOf } from '../src/tasks.mjs';
+import { CHECKLIST, requestOf, unverifiedLine } from '../src/tasks.mjs';
 import { createWorktree, cleanWorktree, worktreeMode, prState } from '../src/worktree.mjs';
 import { adoptDecision, sweepTasks, closeBlockers, workerCapacity, prsToRead, mapCapped, PR_READ_DAYS, PR_READ_CAP } from '../src/worker-lifecycle.mjs';
 import { SETTINGS } from '../src/config.mjs';
@@ -112,6 +112,9 @@ const HELP = `usage:
                                      --program: ask for a PROGRAM GO — once approved, the task's standing gate
                                      classes (merges into private repos, local launchd loads) run without a tap
   task.sh revoke-go <id> ["why"]     end the task's program go (it also ends when the task closes)
+  task.sh confirm-request <id> ["why"]   mission-control only: a task filed by a caller the board could not
+                                     verify (names enforced) really is the named requester's. Until then that
+                                     name has no requester standing on it. The owner confirms on the board.
   task.sh approved-in-pane <id> "<what the owner said, when>" [--decline]
                                      record an answer the owner gave in your pane. An approval is a proposal:
                                      it counts when the owner confirms it on the board (no program go, no plan
@@ -198,6 +201,8 @@ async function task(sub, pos, flags) {
       return patch({ op: 'request_approval', policy_item: flags.policy, text: note(1), ...(flags.program ? { kind: 'program' } : {}) });
     case 'revoke-go':
       return patch({ op: 'revoke_go', text: note(1) });
+    case 'confirm-request':
+      return patch({ op: 'request_confirm', text: note(1) });
     case 'approved-in-pane': {
       // `--decline "<text>"` parses the text as the flag's value — accept it either way
       const r = await patch({ op: 'record_decision', decision: flags.decline ? 'decline' : 'approve',
@@ -334,6 +339,9 @@ async function task(sub, pos, flags) {
       // the original request, whenever the last 10 comments no longer show it
       const rq = requestOf(t);
       if (rq && !t.comments.slice(-10).some((c) => c.at === rq.at && c.text === rq.text)) console.log(`  request (${rq.at.slice(5, 16)} ${rq.who}): ${rq.text}`);
+      // a request the board could not verify: said from the task's own field, however long the task has grown
+      if (unverifiedLine(t)) console.log(`  ⚠ ${unverifiedLine(t)}`);
+      else if (t.unverified?.confirmed) console.log(`  request confirmed as ${t.unverified.confirmed.as}'s by ${t.unverified.confirmed.by} (${String(t.unverified.confirmed.at).slice(5, 16)}); it was filed unverified`);
       for (const c of t.comments.slice(-10)) console.log(`  ${c.at.slice(5, 16)} ${c.who}: ${c.text}`);
       return;
     }
@@ -424,7 +432,7 @@ async function main() {
 
   if (cmd === 'outbox') {          // mesh outbox            → list queued messages
     const { outbox } = await api('GET', '/api/agents');   // mesh outbox drop <agent> → cancel them
-    if (sub === 'drop') { const r = await api('POST', '/api/mesh/outbox/drop', { to: rest[0] }); return console.log(`dropped ${r.dropped}`); }
+    if (sub === 'drop') { const r = await api('POST', '/api/mesh/outbox/drop', { to: rest[0], actor: await whoami(flags).catch(() => undefined) }); return console.log(`dropped ${r.dropped}${r.ownOnly ? ' (your own messages only: the rest is the addressee\'s, mission-control\'s or the owner\'s to drop)' : ''}`); }
     return console.log(outbox.length ? outbox.map((m) => `${m.to}: ${m.line} — ${m.lastReason || ''}`).join('\n') : '(outbox empty)');
   }
 

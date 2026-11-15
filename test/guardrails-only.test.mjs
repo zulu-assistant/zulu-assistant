@@ -89,7 +89,9 @@ async function cloneCheckout() {
     await copyFile(path.join(ROOT, f), path.join(root, f));
     await chmod(path.join(root, f), st.mode & 0o777);
   }
-  const env = { HOME: home, PATH: BARE_PATH, NODE_BIN_DIR: NODE_DIR, ZULU_NO_LAUNCHD: '1', ZULU_NO_OPEN: '1', ZULU_NO_NOTIFY: '1', TMPDIR: os.tmpdir(), LANG: 'en_US.UTF-8' };
+  // CLAUDE_BIN: the hook installer refuses to write on a Claude Code that is too old for its entries (#503), and the
+  // Node folder on this PATH may hold whatever claude this machine has. No claude at all is a note, on any machine.
+  const env = { HOME: home, PATH: BARE_PATH, NODE_BIN_DIR: NODE_DIR, ZULU_NO_LAUNCHD: '1', ZULU_NO_OPEN: '1', ZULU_NO_NOTIFY: '1', TMPDIR: os.tmpdir(), LANG: 'en_US.UTF-8', CLAUDE_BIN: path.join(home, 'no-claude-here') };
   return { base, root, home, env };
 }
 const freePort = () => new Promise((resolve, reject) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); s.on('error', reject); });
@@ -104,6 +106,23 @@ test('install.sh --guardrails --dry-run: the plan, and nothing written', { skip:
     assert.match(r.stdout, /would\s+write .*\.master-console\.plist and load/);
     assert.match(r.stdout, /\(dry run: nothing was written\)/);
     assert.ok(!existsSync(path.join(c.root, 'overlay')) && !existsSync(path.join(c.home, 'Library')) && !existsSync(path.join(c.home, '.claude', 'settings.json')));
+  } finally { await rm(c.base, { recursive: true, force: true }); }
+});
+
+test('install.sh --guardrails on a Claude Code too old for the hook entries: the board is installed, the hook is not, and the run says so (#503)', { skip: !MAC && 'the board runs as a LaunchAgent (macOS)', timeout: 120000 }, async () => {
+  const c = await cloneCheckout();
+  try {
+    const old = path.join(c.home, 'old-claude');
+    await writeFile(old, '#!/bin/sh\necho "2.1.290 (Claude Code)"\n'); await chmod(old, 0o755);
+    const r = spawnSync('/bin/bash', [path.join(c.root, 'install.sh'), '--guardrails', '--yes'], { cwd: c.root, env: { ...c.env, MC_PORT: '1', CLAUDE_BIN: old }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /WARN   Claude Code 2\.1\.290 is older than 2\.1\.295/, 'the shown step warns');
+    assert.match(r.stderr, /REFUSED  Claude Code 2\.1\.290 is older than 2\.1\.295, and nothing was written\./);
+    assert.match(r.stdout, /the hook is NOT installed, so nothing is held yet/);
+    assert.doesNotMatch(r.stdout, /hook installed: restart|The command does not run/);
+    assert.match(r.stdout, /the gate hook is not in ~\/\.claude\/settings\.json yet: until scripts\/guardrails-install\.sh --apply has written it, every command runs as before/);
+    assert.ok(!existsSync(path.join(c.home, '.claude', 'settings.json')), 'no settings file was written');
+    assert.equal((await readdir(path.join(c.home, 'Library', 'LaunchAgents'))).length, 1, 'the board itself is installed');
   } finally { await rm(c.base, { recursive: true, force: true }); }
 });
 
@@ -189,6 +208,7 @@ test('a Guardrails-only board with no cmux on PATH: no collector, mesh or heal; 
     assert.ok(status, `the board answered (${errs.slice(0, 400)})`);
     assert.equal(status.profile, 'guardrails', JSON.stringify({ stages: Object.keys(status.poll?.stages || {}), demo: status.demo, errs: errs.slice(0, 300) }));
     assert.ok(!status.demo);
+    assert.equal(status.watching, 0, 'the example entries are not counted: the profile script dropped them in the local.json it made');
     // which stages ran: the board's own cards, the ledger, the gate card. No collector, no mesh, no heal.
     const ran = Object.keys(status.poll.stages);
     for (const s of ['board-cards', 'alerts', 'work', 'events', 'guardrails-card']) assert.ok(ran.includes(s), `${s} ran (${ran})`);

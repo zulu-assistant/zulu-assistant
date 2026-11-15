@@ -32,6 +32,10 @@ change: switching to Guardrails only turns off the fleet cards, the mesh and the
 `--switch` to do it on purpose. `--yes` alone never switches. An agent that runs this installer is held
 by the gate like any other change to the gate itself; the `--dry-run` form is free.
 
+**Came from the default install (`./install.sh`)?** Then the board keeps its profile: it goes on
+showing your sessions and whatever you chose to watch, and this command adds the gate to it (the
+`defaultMode` line and the hook). Nothing is turned off, so no `--switch` is needed.
+
 ## Try it
 
 In a scratch repository, ask your agent to push to `main`:

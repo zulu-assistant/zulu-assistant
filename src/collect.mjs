@@ -6,6 +6,8 @@ import { readFile, stat, readdir, open } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { acrossWindows } from './cmux-windows.mjs';
+import { plainSessions } from './sessions-plain.mjs';
+import { claudeGaugeForFile } from './context.mjs';
 import { JOBS, DOCKER_CONTAINERS, ENDPOINTS, CRON, CRON_DRIFT, DISK, MEM, PROCESSES, SETTINGS } from './config.mjs';
 
 function run(cmd, args, timeoutMs = 8000) {
@@ -193,6 +195,9 @@ async function workspaceNames() {
 }
 
 export async function getSessions() {
+  // no cmux hook file on this Mac (cmux was never run here): show Claude Code's own live sessions,
+  // read-only, from its per-process registry. With the file present nothing changes.
+  if (!(await stat(SETTINGS.cmuxSessionsFile).catch(() => null))) return plainSessions({ gaugeFor: claudeGaugeForFile }).catch(() => []);
   try {
     const d = JSON.parse(await readFile(SETTINGS.cmuxSessionsFile, 'utf8'));
     const wsNames = await workspaceNames();

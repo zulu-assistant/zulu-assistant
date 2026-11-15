@@ -140,6 +140,16 @@ async function measure(file, parse) {
 
 // ---- collectors ------------------------------------------------------------------------
 
+/** The context gauge for one Claude transcript file (a session with no cmux workspace: src/sessions-plain.mjs). null when it cannot be read. */
+export async function claudeGaugeForFile(file) {
+  try {
+    const r = await measure(file, parseClaudeTail);
+    if (!r) return null;
+    const models = await readJson(resolveConfig('config/models.json'));
+    return gauge({ tokens: r.tokens, window: windowFor(r.model, models.contextWindows || {}), model: r.model, source: 'claude', at: r.at, estimated: !!r.estimated });
+  } catch { return null; }
+}
+
 async function readJson(file) { try { return JSON.parse(await readFile(file, 'utf8')); } catch { return {}; } }
 
 /** Newest Codex rollout for a workspace: hook record first, else a unique cwd match. */

@@ -99,7 +99,7 @@ test('upgrade and rollback are refused with the switch, before anything changes'
 });
 
 // Every launchctl write under scripts/ and in install.sh sits behind the switch. Quoted text is messages, not calls.
-const NOT_CODE = new Set(['scripts/triage.sh', 'scripts/gate-triggers.default']);   // an allow-list string and a pattern list
+const NOT_CODE = new Set(['scripts/triage.sh', 'scripts/triage-allow.mjs', 'scripts/gate-triggers.default']);   // allow-list strings and a pattern list
 const GUARD_WINDOW = 4;
 function unguardedWrites(text) {
   const lines = text.split('\n'); const out = [];
