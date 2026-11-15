@@ -179,9 +179,10 @@ test('a push: approved at one commit, it runs only while the pushed ref still po
 
 // ── after Mission Control's read of PR 140 ──
 test('the pin is used only when the shell hands it to the program: a comment, a list end or a group reads the head again', async () => {
-  const PIN = ['gh pr merge 7 --squash', 'gh pr merge 7 --squash 2>&1', 'gh pr merge 7 --squash &> out.log', 'GH_REPO=o/r gh pr merge 7 --squash', 'gh pr merge 7 --squash > /tmp/out.txt', 'gh pr merge 7 --subject "a b"'];
+  const PIN = ['gh pr merge 7 --squash', 'gh pr merge 7 --squash 2>&1', 'gh pr merge 7 --squash 2>&1 > out.log', 'GH_REPO=o/r gh pr merge 7 --squash', 'gh pr merge 7 --squash > /tmp/out.txt', 'gh pr merge 7 --subject "a b"'];
+  // 1.3.1: '&>' / '&>>' are one redirect in bash and zsh but background + redirect in dash, so no pin there
   const NO_PIN = ['gh pr merge 7 --squash # land it', 'gh pr merge 7 --squash #', 'gh pr merge 7 --squash\n# next line', 'gh pr merge 7 --squash;', 'gh pr merge 7 --squash &', '(gh pr merge 7 --squash)', 'gh pr merge 7 --squash --',
-    '{ gh pr merge 7 --squash; }', 'gh pr merge 7 --subject "fix #12"', 'gh pr merge 7 --squash \\'];
+    '{ gh pr merge 7 --squash; }', 'gh pr merge 7 --subject "fix #12"', 'gh pr merge 7 --squash \\', 'gh pr merge 7 --squash &> out.log', 'gh pr merge 7 --squash &>> out.log', 'gh pr merge 7 --squash >& out.log'];
   for (const c of PIN) assert.equal(pinnedMerge(c, A), `${c} --match-head-commit ${A}`, c);
   for (const c of NO_PIN) assert.equal(pinnedMerge(c, A), null, c);
   assert.equal(pinnedMerge('gh pr merge 7', 'not-a-sha; rm x'), null, 'the head is a commit id or nothing is pinned');

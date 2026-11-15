@@ -233,7 +233,10 @@ test('the board of a default install with no cmux: your sessions, the next-steps
     assert.ok(!labels.includes('cmux:bridge'), labels.join(','));
     assert.ok(!labels.includes('guardrails'), labels.join(','));
     assert.match(next.detail, /install\.sh --guardrails/); assert.match(next.detail, /install\.sh --full/);
-    assert.deepEqual(status.jobs.filter((j) => !['ok', 'due'].includes(j.status)).map((j) => `${j.label}:${j.status}`), [], 'no coloured card on a fresh light board');
+    // the disk and memory gauges read THIS machine (1.3.1): a full disk or high swap is the host's state, not the
+    // install's, and an upgrade runs this suite on the user's machine, so judging them here would roll it back
+    const HOST_GAUGES = new Set(['disk:/', 'mem:']);
+    assert.deepEqual(status.jobs.filter((j) => !HOST_GAUGES.has(j.label) && !['ok', 'due'].includes(j.status)).map((j) => `${j.label}:${j.status}`), [], 'no coloured card on a fresh light board');
     assert.ok(!Object.keys(status.poll.stages).includes('heal'), 'nothing to heal without cmux');
     for (const [name, st] of Object.entries(status.poll.stages)) assert.equal(st.failures, 0, `${name}: ${st.error}`);
   } finally {

@@ -2,7 +2,10 @@
 # triage.sh, resident-launch.sh, agent-spawn.sh, task.sh, agent-send.sh, agent-close.sh,
 # render-tmpl.sh, checkpoint restore.sh — so launchd and cmux shells
 # (no login profile) find the same Node + `claude` the interactive shell uses.
-# Resolution: $NODE_BIN_DIR if set → nvm $MC_NODE_VERSION → newest nvm → Homebrew.
+# Resolution: $NODE_BIN_DIR if set → nvm $MC_NODE_VERSION → newest nvm → the first folder that really holds an
+# executable node: Homebrew (/opt/homebrew/bin), /usr/local/bin (Intel Homebrew, the official installer), then the
+# node on PATH (an absolute path only). Before 1.3.1 the last step was /opt/homebrew/bin unchecked, so a machine
+# with Node only in /usr/local/bin or elsewhere on PATH (Linux CI) got a NODE_BIN that does not exist.
 # No globs (zsh aborts on no-match); safe under `set -eu`.
 : "${MC_NODE_VERSION:=v22.23.0}"
 if [ -z "${NODE_BIN_DIR:-}" ]; then
@@ -11,9 +14,17 @@ if [ -z "${NODE_BIN_DIR:-}" ]; then
     NODE_BIN_DIR="$_nvm/$MC_NODE_VERSION/bin"
   else
     _v="$(ls "$_nvm" 2>/dev/null | sort -V | tail -1 || true)"
-    if [ -n "$_v" ] && [ -x "$_nvm/$_v/bin/node" ]; then NODE_BIN_DIR="$_nvm/$_v/bin"; else NODE_BIN_DIR="/opt/homebrew/bin"; fi
+    if [ -n "$_v" ] && [ -x "$_nvm/$_v/bin/node" ]; then NODE_BIN_DIR="$_nvm/$_v/bin"
+    elif [ -x /opt/homebrew/bin/node ]; then NODE_BIN_DIR="/opt/homebrew/bin"
+    elif [ -x /usr/local/bin/node ]; then NODE_BIN_DIR="/usr/local/bin"
+    else
+      _n="$(command -v node 2>/dev/null || true)"
+      case "$_n" in /*) if [ -x "$_n" ]; then NODE_BIN_DIR="${_n%/*}"; fi ;; esac
+      # nothing found: keep the old answer, so callers' "Node >= 22 required" message is the one shown
+      : "${NODE_BIN_DIR:=/opt/homebrew/bin}"
+    fi
   fi
-  unset _nvm _v
+  unset _nvm _v _n
 fi
 NODE_BIN="$NODE_BIN_DIR/node"
 export NODE_BIN_DIR NODE_BIN

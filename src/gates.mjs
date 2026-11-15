@@ -2494,9 +2494,11 @@ export function soleMerge(command) {
 export function pinnedMerge(command, head) {
   if (!soleMerge(command) || !/^[0-9a-f]{7,64}$/i.test(String(head || ''))) return null;
   const text = String(command).trim();
-  // a line the parser reads but a shell may read otherwise: a comment sign, a line break, a group, a list end
-  // (an output redirect such as 2>&1 or &>file is none of these)
-  if (/[#\n\r;&(){}\\]/.test(text.replace(/\d*>&\d+|&>>?/g, ' ')) || /(^|\s)--(\s|$)/.test(text)) return null;
+  // a line the parser reads but a shell may read otherwise: a comment sign, a line break, a group, a list end.
+  // A descriptor copy (2>&1, >&2) reads the same in every POSIX shell and is let through. `&>` / `&>>` is NOT
+  // (1.3.1): bash and zsh read one redirect, but dash (/bin/sh on Debian; macOS when /var/select/sh is dash) reads
+  // `&` (background) then a redirect, so the appended pin became a second command and gh merged unpinned.
+  if (/[#\n\r;&(){}\\]/.test(text.replace(/\d*>&\d+/g, ' ')) || /(^|\s)--(\s|$)/.test(text)) return null;
   const pinned = `${text} --match-head-commit ${head}`;
   let was, now; try { was = parseCommand(text); now = parseCommand(pinned); } catch { return null; }
   const one = (p) => { const run = p.cmds.filter((c) => !c.assignOnly); return !p.opaque.length && run.length === 1 && run[0].bin === 'gh' && !run[0].fromSub ? run[0] : null; };

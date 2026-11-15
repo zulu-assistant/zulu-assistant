@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-16
+
+**Upgrade if you installed Node from somewhere other than nvm or Homebrew on Apple silicon, or if you run Guardrails.** A patch on 1.3.0: the installer could refuse a working Node, and one form of an approved merge ran without its head pin under one shell. The known limitations of 1.3.0 (below) still apply.
+
+### Security
+- **Guardrails: a merge written with `&>` is no longer pinned.** When you approve a held `gh pr merge` that is the only command of its call, the gate appends `--match-head-commit <the head you saw>`, so GitHub refuses if the pull request moved. With the output sent through `&>` or `&>>`, bash and zsh read one redirect, but dash reads `&` (run in the background) and then a redirect: the pin became a second command and the merge ran unpinned. Such a merge now has its head read again before it is let through, like every other form the gate cannot pin; `2>&1` is unchanged. Only a session whose shell is dash was affected (`/bin/sh` on Debian; on macOS, `/bin/sh` runs bash unless its owner changed it). In 1.3.0, the first release with the pin. Found in our own review; not known to have been used.
+
+### Fixed
+- **The installer on a Mac with Node in `/usr/local/bin` and no nvm.** `scripts/env.sh` fell back to `/opt/homebrew/bin` without checking that Node was there. With Node from Intel Homebrew or the official installer, `./install.sh` said "Node >= 22 required (found: none)" with Node 22 installed, and the scripts that start Node by its path (`scripts/guardrails-install.sh`, `scripts/guardrails-anchor.sh`, the board's start script, triage) could not start. It now takes the first folder that holds an executable `node`: nvm, then Homebrew, then `/usr/local/bin`, then the `node` on your PATH. In every release before this one.
+- **The test suite on Linux and on a nearly full Mac.** The repository's Linux test job failed on 1.3.0: seven tests, the two causes above. And one first-hour test judged the disk and memory cards of the machine it ran on, so on a Mac with a nearly full disk an upgrade's test step failed and the upgrade rolled back. That test now leaves those two cards out.
+
 ## [1.3.0] - 2026-11-16
 
 **Security: if you run Guardrails, upgrade.** In 1.2.4 and every earlier release, a held action could run without asking you in other spellings: a held call behind a launcher's flag that takes a value (`timeout -s KILL 5 …`, `caffeinate -t 5 …`, `noglob …`, `stdbuf …`); and in-place edits inside a guarded folder (`sed -i` after a `cd` there, `plutil -replace`). And the dry run the gate asks for before a write was itself taken on trust: a script that pays or sends without its flag would have run as "the dry run". Two more spellings, an interpreter named with its version and a held program run through its interpreter by its file, were patched in 1.2.4 the day it was found; they are in 1.2.3 and every earlier release, and this release reads more of them than the patch could. All were found in our own review; none is known to have been used. The details are under Security below.
