@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — one fix task per failing supplier (src/parser-watch.mjs, task #456)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';

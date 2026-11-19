@@ -180,7 +180,9 @@ export function isBrowserProcess(exe, apps = DEFAULT_BROWSERS) {
  *   chain     nearest first (chainOf)
  *   sessions  Map pid → { workspaceId, start, vendor } (sessionPids)
  *   envOf     (pid) → workspace id from that pid's start environment | null | undefined (not read)
- *   jobs      Map pid → name: launchd jobs the owner mapped to a name (SETTINGS.callerEvidence.jobs)
+ *   jobs      Map pid → name, or pid → { name, start }: launchd jobs the owner mapped to a name
+ *             (SETTINGS.callerEvidence.jobs). With a start, the link must be the SAME process (start
+ *             time within 2 s; an unknown start on either side = not the job: the pid may be reused)
  *   boardPid  this board
  * → { kind: 'agent', workspaceId, sessionPid, vendor, basis } — basis 'session-map' | 'env'
  *   { kind: 'board' } | { kind: 'job', name } | { kind: 'local' }
@@ -193,7 +195,12 @@ export function resolveChain(chain, { sessions = new Map(), envOf = () => undefi
   const agentAncestor = chain.some((l) => mapped(l) || looksLikeAgent(l.comm));
   const topDown = [...chain].reverse();
   if (chain.some((l) => l.pid === boardPid)) return { kind: 'board', agentAncestor, underCmux, why: 'a child of the board process' };
-  for (const l of topDown) if (jobs.has(l.pid)) return { kind: 'job', name: jobs.get(l.pid), agentAncestor, underCmux, why: 'a mapped launchd job' };
+  const jobOf = (l) => {
+    const j = jobs.get(l.pid);
+    if (j == null || typeof j === 'string') return j ?? null;
+    return j.start != null && l.start != null && Math.abs(l.start - j.start) <= 2 ? j.name : null;
+  };
+  for (const l of topDown) { const name = jobOf(l); if (name) return { kind: 'job', name, agentAncestor, underCmux, why: 'a mapped launchd job' }; }
 
   // The topmost mapped session wins — when two things the agent does not write agree with the map:
   // the chain reaches the cmux app, and the session process's own START environment names the same
@@ -358,18 +365,28 @@ export function createCallerEvidence({ readSessions = async () => ({}), jobs = {
     envCache.set(key, ws);
     return ws;
   }
-  async function jobPids() {
+  // A running job's pid is kept 30 s with the start time it had then; "not running" is never kept: a
+  // job that starts right after a lookup and calls the board is named on its first call (#643). A kept
+  // pid names a process only while its start time matches (resolveChain, 2 s), so a pid the system
+  // gave to another process is not the job. A pid with no start time in the table is not kept and
+  // names nothing. A kept pid this lookup's process table no longer shows with that start time (the
+  // run ended; a new run has another pid) is dropped and launchd is asked again at once. The labels
+  // are asked together.
+  async function jobPids(t) {
     const m = new Map();
     const uid = typeof process.getuid === 'function' ? process.getuid() : null;
-    for (const [label, name] of Object.entries(jobs || {})) {
+    const alive = (h) => { const s = t?.get(h.pid)?.start; return s != null && Math.abs(s - h.start) <= 2; };
+    await Promise.all(Object.entries(jobs || {}).map(async ([label, name]) => {
       let hit = jobCache.get(label);
-      if (!hit || now() - hit.at > 30000) {
+      if (!hit || now() - hit.at > 30000 || !alive(hit)) {
         const r = uid == null ? { out: '' } : await run('launchctl', ['print', `gui/${uid}/${label}`], timeoutMs);
         const pid = Number(/^\s*pid = (\d+)/m.exec(r.out)?.[1]) || null;
-        hit = { pid, at: now() }; jobCache.set(label, hit);
+        const start = pid ? t?.get(pid)?.start ?? null : null;
+        hit = pid && start != null ? { pid, start, at: now() } : null;
+        if (hit) jobCache.set(label, hit); else jobCache.delete(label);
       }
-      if (hit.pid) m.set(hit.pid, String(name));
-    }
+      if (hit) m.set(hit.pid, { name: String(name), start: hit.start });
+    }));
     return m;
   }
 
@@ -404,7 +421,7 @@ export function createCallerEvidence({ readSessions = async () => ({}), jobs = {
     // read the start environment only where the resolution will ask for it
     const envs = new Map();
     for (const l of chain) if (sessions.has(l.pid) || looksLikeAgent(l.comm)) envs.set(l.pid, await envFor(l));
-    const res = resolveChain(chain, { sessions, envOf: (pid) => envs.get(pid), jobs: await jobPids(), boardPid });
+    const res = resolveChain(chain, { sessions, envOf: (pid) => envs.get(pid), jobs: await jobPids(t), boardPid });
     const exe = chain[0].comm;
     return { ...res, pid: owner.pid, exe, browser: isBrowserProcess(exe, browsers), ms: now() - t0 };
   }
@@ -436,4 +453,33 @@ export function callerSettings(cfg) {
   const mode = ['observe', 'on'].includes(c.mode) ? c.mode : 'off';
   const tw = c.tripwire === true ? 'agent' : ['agent', 'browser'].includes(c.tripwire) ? c.tripwire : false;
   return { mode, tripwire: tw, browsers: Array.isArray(c.browsers) && c.browsers.length ? c.browsers.map(String) : DEFAULT_BROWSERS, jobs: c.jobs && typeof c.jobs === 'object' ? c.jobs : {} };
+}
+
+/**
+ * A mapped job's name as a sender (#643 b). The jobs map names launchd labels; a name there that is
+ * an agent's (live or closed), the owner's, "board", or empty is refused, so a job can never take a
+ * name somebody else has. → { senders: Set(lowercase names), problems: [{ label, name, why }] }
+ */
+export function jobSenders(jobs, { agentNames = [], isOwner = () => false } = {}) {
+  const agents = new Set(agentNames.map((n) => String(n).toLowerCase()));
+  const senders = new Set(); const problems = [];
+  for (const [label, raw] of Object.entries(jobs || {})) {
+    const name = String(raw || '').trim().toLowerCase();
+    const why = !name ? 'no name' : agents.has(name) ? 'an agent has that name' : isOwner(name) ? 'the owner\'s name' : name === 'board' ? 'the board\'s own name' : ['me', 'self'].includes(name) ? 'not a name' : null;
+    if (why) problems.push({ label, name, why }); else senders.add(name);
+  }
+  return { senders, problems };
+}
+
+/**
+ * May the calling process send under `name`, a name no agent has? Only when it is a mapped job's
+ * name AND the evidence shows that very job behind the call. Anything else stays refused as an
+ * unknown name. → { ok, why }
+ */
+export function jobSenderVerdict(name, ev, senders) {
+  const n = String(name || '').trim().toLowerCase();
+  if (!senders?.has(n)) return { ok: false, why: 'not a mapped job\'s name' };
+  if (!ev) return { ok: false, why: 'caller evidence is off, so a job\'s name cannot be proven' };
+  if (ev.kind === 'job' && String(ev.name || '').toLowerCase() === n) return { ok: true, why: 'a mapped launchd job' };
+  return { ok: false, why: ev.kind === 'job' ? `the calling process is the job ${ev.name}` : `the calling process is not that job (${ev.kind})` };
 }

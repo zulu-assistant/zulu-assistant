@@ -9,7 +9,7 @@ import { readFile, writeFile, readdir, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { containsSecret } from './secret-text.mjs';
 import { OWNER, isOwner, isPrincipal as isListedPrincipal, PRINCIPALS, SETTINGS } from './config.mjs';
-import { addGate, decideGate, gateEvent, pendingGates, settleAfterGates, gatesResolved, findGate, openProposal, newProposal, proposeGate, rejectProposal, proposalWhat } from './gate-ledger.mjs';
+import { addGate, decideGate, gateEvent, pendingGates, settleAfterGates, gatesResolved, findGate, openProposal, newProposal, proposeGate, rejectProposal, proposalWhat, RUN_SEEN_MINUTES } from './gate-ledger.mjs';
 import { cleanStamp, addStamp, buildPacket, packetText, packetBrief } from './completion-packet.mjs';
 
 export const STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'needs_approval', 'done', 'cancelled'];
@@ -260,8 +260,9 @@ export function applyPatch(prev, patch, ctx = {}) {
   if (['gate_request', 'gate_event'].includes(op) && !ctx.gateSystem) throw new MeshError(403, `"${op}" is written by the board's gate service only`);
   // a closed task still takes the one gate event that only takes standing away: an approval that ran out
   // unused is marked expired wherever it sits (#498), so it cannot be presented later
-  const expiring = op === 'gate_event' && patch.event === 'expired';
-  if (TERMINAL.has(t.status) && !expiring && !['comment', 'reopen', 'record_decision', 'set_requester', 'request_confirm', 'answer'].includes(op))
+  // …and the two that only report what a released call did (#627, Codex): it may report back after the task closed
+  const expiring = op === 'gate_event' && ['expired', 'ran', 'not_seen'].includes(patch.event);
+  if (TERMINAL.has(t.status) && !expiring &&!['comment', 'reopen', 'record_decision', 'set_requester', 'request_confirm', 'answer'].includes(op))
     throw new MeshError(409, `task #${t.id} is ${t.status}`);
 
   switch (op) {
@@ -526,6 +527,13 @@ export function applyPatch(prev, patch, ctx = {}) {
         notifyMC.push('gate');
       }
       if (patch.event === 'rerun_declined') comment(`GATE ${g.id} re-attempted after it was declined`, 'gate', { gate: { id: g.id, event: 'rerun_declined' } });
+      // #627 (Codex): what the released call did
+      if (patch.event === 'ran') comment(`GATE ${g.id} ran ${g.ran_at.slice(11, 19)}Z (seen in the call's own result${g.ran_late ? ', after "no run seen"' : ''})`, 'gate', { gate: { id: g.id, event: 'ran' } });
+      if (patch.event === 'not_seen') {
+        comment(`GATE ${g.id} released ${String(g.executed_at).slice(11, 16)}Z, no run seen in ${RUN_SEEN_MINUTES} min (a no at the Codex prompt, or the call ended without a result). Nothing is retried; a late result is still recorded.`, 'gate', { gate: { id: g.id, event: 'not_seen' } });
+        events.push(`task #${t.id} GATE ${g.id}: released, no run seen in ${RUN_SEEN_MINUTES} min`);
+        notifyMC.push('not_seen');
+      }
       break;
     }
     case 'record_decision': {
@@ -766,7 +774,7 @@ export const activeProgramGo = (t) => (t?.program_go && !t.program_go.revoked_at
 
 // Tasks filed from OUTSIDE (the team chat, GitHub issues and discussions, a chat channel's name):
 // their title and body are someone else's words. Board-made sources are not outside text.
-const BOARD_SOURCES = new Set(['brain', 'parser-watch', 'release-drift', 'operating-reading', 'triage']);   // triage: the board files the ask (#588)
+const BOARD_SOURCES = new Set(['brain', 'parser-watch', 'release-drift', 'operating-reading', 'triage', 'heal-restore']);   // triage: the board files the ask (#588); heal-restore: a resident left bare (#678)
 export const outsideTask = (t) => Boolean(t && (t.requester === 'github' || (t.source?.via && !BOARD_SOURCES.has(t.source.via))));
 /** "slack intake" / "github intake" — a fixed word from a short allow-list of characters, never free text. */
 export const sourceLabel = (t) => `${String(t?.source?.via || t?.requester || 'intake').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24) || 'intake'} intake`;

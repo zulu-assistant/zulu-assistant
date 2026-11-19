@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — engine choice per role (scripts/engine.mjs)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { engineFor, launchSpec, commandLine } from '../scripts/engine.mjs';

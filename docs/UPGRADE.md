@@ -3,6 +3,14 @@
 One-click upgrade ships in 1.2.0 (see [VERSIONS.md](VERSIONS.md)), and 1.2.0 is the first release you can upgrade *from* this way; from 1.0.x, upgrade by hand once ([INSTALL.md](INSTALL.md) §7b). From then on an install made by `get.sh` upgrades with one click: the board's **update** card shows **⇧ UPDATE TO vX.Y.Z** when a newer release is out.
 The same steps run from a terminal with `zulu upgrade`.
 
+## Upgrading to 1.3.2
+From 1.3.0 or 1.3.1, the button (or `zulu upgrade`) is all that is needed, with one step of yours **if your agents include Codex**:
+
+- **Add the Codex hook entry.** Run `scripts/guardrails-install.sh --codex` (it shows what it would write), then `scripts/guardrails-install.sh --apply --codex`. It adds one entry, `PermissionRequest`, to `~/.codex/hooks.json`; the entries you have stay. Then restart each Codex session (a resumed session reads the hook file at its start). Until you do, an approved call in a Codex session still stops at Codex's own prompt, as in 1.3.0 and 1.3.1.
+- **A Codex merge now carries its own head pin.** A held `gh pr merge` from a Codex session must end in `--match-head-commit <the PR's head now>`; without it nothing is filed and the agent is told the exact command. This applies at once, with or without the new entry.
+
+Nothing else changes for you: no rule in your rules file, no setting, no migration. From 1.2.x, read [Upgrading to 1.3](#upgrading-to-13) as well.
+
 ## Upgrading to 1.3
 The button (or `zulu upgrade`) brings the code, runs the migrations and the tests, and restarts the board. These steps it does not do, because each touches something that is yours:
 

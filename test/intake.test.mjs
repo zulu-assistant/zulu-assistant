@@ -1,5 +1,6 @@
 // Chat intake (task #223): routing, dedupe, untrusted text, attachments,
 // person-blocks and the publisher. Neutral fixtures; no network.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, stat, readFile } from 'node:fs/promises';

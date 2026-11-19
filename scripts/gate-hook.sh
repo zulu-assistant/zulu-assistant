@@ -76,18 +76,23 @@ fi
   # silence because of TEXT in the call: the input holds the call's own words, and a command, a
   # comment or a tool's input can spell an event's name.
   [ "$code" = 3 ] && exit 0
+  # An answer from the Node step is printed as it is, whatever the event (#627: the allow for Codex's
+  # PermissionRequest is one; for PostToolUse the step never prints, it exits 3 above).
+  if [ "$code" = 0 ] && [ -n "$out" ]; then printf '%s' "$out"; exit 0; fi
   # Only when the Node step did not answer does the shell need the event itself, so that a call
   # which already ran is not answered with a deny. It is believed from one form only: the input's
   # own key with its value, quotes unescaped. A string value cannot produce that (its quotes arrive
   # escaped), and a tool's input that carries a real key of that name makes the key occur twice,
   # which is not believed either. Anything else is a call that has not run yet.
+  # Codex's PermissionRequest (#627) is answered with nothing too: no answer there means Codex asks as usual,
+  # and a deny printed for it would be the wrong event's form.
   post=0
   case "$in" in
     *'"hook_event_name"'*'"hook_event_name"'*) ;;
     *'"hook_event_name":"PostToolUse"'*|*'"hook_event_name": "PostToolUse"'*) post=1 ;;
+    *'"hook_event_name":"PermissionRequest"'*|*'"hook_event_name": "PermissionRequest"'*) post=1 ;;
   esac
   [ $post -eq 1 ] && exit 0
-  if [ "$code" = 0 ] && [ -n "$out" ]; then printf '%s' "$out"; exit 0; fi
   why="the gate check failed"
   [ "$code" = late ] && why="the gate check did not answer in ${deadline} s"
   [ "$code" = nonode ] && why="the hook is registered without the path of its Node program (GATE_NODE), and it does not look one up on the session's PATH. Run scripts/guardrails-install.sh again: the gate check could not run"

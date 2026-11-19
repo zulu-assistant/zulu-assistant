@@ -1,5 +1,6 @@
 // Hash-chained receipts (1.3): one line per gate change, verify against gates[], and a grant that
 // runs only when the chain holds its approval. Temp dirs only; the "board" is the gate service.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, mkdir, rm, appendFile, chmod } from 'node:fs/promises';

@@ -1,3 +1,4 @@
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classify, isEnforced, parseCommand, triggerLines, compileTriggers, ereToJs, normalizeForTriggers, cmdHash, dryTokens, dryHash, repoSlug, globMatch, DEFAULT_POLICY } from '../src/gates.mjs';

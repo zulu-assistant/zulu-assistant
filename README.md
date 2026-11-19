@@ -1,9 +1,11 @@
 # Zulu Assistant
 
-**A local ops board and agent workforce for the Mac that runs your automations.**
-It watches every LaunchAgent, container, cron line and endpoint on the machine. It
-shows your live Claude Code and Codex sessions next to them. When something breaks,
-it heals what it safely can and escalates the rest to you.
+**A person approves before an agent merges, pushes, deploys or sends.**
+When one of your Claude Code or Codex agents reaches something that can't be taken back, the command
+doesn't run. It waits on your board with the exact command, folder and agent, and one click lets that
+exact call run once, with a receipt on the task. Around the gate is a local ops board for the Mac that
+runs your automations: it watches every LaunchAgent, container, cron line and endpoint, shows your live
+agent sessions next to them, heals what it safely can and escalates the rest to you.
 
 [![CI](https://github.com/zulu-assistant/zulu-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/zulu-assistant/zulu-assistant/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-00d900.svg)](LICENSE)
@@ -12,22 +14,13 @@ it heals what it safely can and escalates the rest to you.
 
 Website: [https://zuluassistant.com](https://zuluassistant.com)
 
-![Zulu Assistant demo: a job fails, the self-heal restarts it, a worker asks for approval, a task closes](docs/media/demo.gif)
-
-<sub>Recorded in demo mode (`./install.sh --demo`). Every name in it is synthetic. A 38-second cut is in [docs/media/demo-short.gif](docs/media/demo-short.gif).</sub>
-
-| Board | Agents + work ledger | `?tv` kiosk |
-|---|---|---|
-| ![board](docs/media/board.png) | ![agents and work](docs/media/agents-and-work.png) | ![tv mode](docs/media/tv-mode.png) |
-
-**Both halves together.** The board, and cmux with the phosphor sidebar. An agent asks for permission,
-its row rises to the top of ATTENTION, and when it's answered the row drops back:
-
-![cmux demo: an agent works, asks for permission, the INPUT row rises to the top of the phosphor sidebar, it is answered and the row drops back](docs/media/cmux-demo.gif)
-
-<sub>Recorded from `./install.sh --demo --cmux`: its own cmux window, six scripted fake agents, every name synthetic.</sub>
-
 ## Guardrails: a human gate and a receipt for every irreversible action
+
+![Guardrails: an agent's production deploy is held, waits on the board with the exact command, one click approves it, it runs once and the task keeps the receipt](docs/media/guardrails.gif)
+
+<sub>Recorded in demo mode (`./install.sh --demo`): a scripted agent, every name synthetic. The captions were added for the recording.</sub>
+
+If Zulu is useful to you, a [star on GitHub](https://github.com/zulu-assistant/zulu-assistant) helps others find it.
 
 Your agents work on their own, until they reach something that can't be taken back: a merge, a push to
 `main`, a deploy, a script's `--commit` run, a message sent, a store write, a delete outside the
@@ -43,8 +36,31 @@ run went).
   reused or stretched to a different command.
 - **A program go**, when you want one: approve a task's plan once, and its routine merges and local
   service loads run without a tap. Each still leaves a receipt.
-- **Honest limits:** it stops your agents' own mistakes, not a hostile program running as you. See
-  [docs/GUARDRAILS.md](docs/GUARDRAILS.md) and [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md).
+- **Honest limits:** it stops your agents' own mistakes, not a hostile program running as you. In a
+  Codex session an approved call runs without Codex's own prompt only once the Codex hook entry is installed
+  (`scripts/guardrails-install.sh --apply --codex`, since 1.3.2), and a held MCP tool call there can
+  still meet that prompt. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md)
+  and [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md).
+
+Only want the gate? `./install.sh --guardrails` installs the board, the ledger and the hook, and nothing
+else: [docs/QUICKSTART-GUARDRAILS.md](docs/QUICKSTART-GUARDRAILS.md).
+
+## The board
+
+![Zulu Assistant demo: a job fails, the self-heal restarts it, a worker asks for approval, a task closes](docs/media/demo.gif)
+
+<sub>Recorded in demo mode (`./install.sh --demo`). Every name in it is synthetic. A 38-second cut is in [docs/media/demo-short.gif](docs/media/demo-short.gif).</sub>
+
+| Board | Agents + work ledger | `?tv` kiosk |
+|---|---|---|
+| ![board](docs/media/board.png) | ![agents and work](docs/media/agents-and-work.png) | ![tv mode](docs/media/tv-mode.png) |
+
+**Both halves together.** The board, and cmux with the phosphor sidebar. An agent asks for permission,
+its row rises to the top of ATTENTION, and when it's answered the row drops back:
+
+![cmux demo: an agent works, asks for permission, the INPUT row rises to the top of the phosphor sidebar, it is answered and the row drops back](docs/media/cmux-demo.gif)
+
+<sub>Recorded from `./install.sh --demo --cmux`: its own cmux window, six scripted fake agents, every name synthetic.</sub>
 
 ## The problem
 
@@ -115,6 +131,9 @@ Everything the setup does and cannot automate is in [docs/INSTALL.md](docs/INSTA
 diagnostic file (nothing is uploaded). Attach it to an
 [install report](https://github.com/zulu-assistant/zulu-assistant/issues/new?template=install_report.yml).
 
+If it caught something for you, a [star on GitHub](https://github.com/zulu-assistant/zulu-assistant) helps
+others find it. Nothing in Zulu depends on it.
+
 ## Why not tmux and a dashboard?
 
 tmux is great at keeping panes alive. It has no idea what an agent is doing. cmux
@@ -179,7 +198,7 @@ Config is resolved `overlay/` → core → `examples/`. Adding coverage takes on
 
 ## Roadmap
 
-- Latest release: **1.3.1** ([tested versions](docs/VERSIONS.md), [changelog](CHANGELOG.md)).
+- Latest release: **1.3.2** ([tested versions](docs/VERSIONS.md), [changelog](CHANGELOG.md)).
   It has the board, demo mode, Mission Control, the Agent Mesh, the brain templates, the installer,
   Slack team-chat intake and Guardrails; since 1.2: one-click upgrade, a Guardrails-only install,
   push notices to your phone (a self-hosted ntfy relay), GitHub intake, the evidence panel and the
@@ -200,13 +219,17 @@ Config is resolved `overlay/` → core → `examples/`. Adding coverage takes on
 
 ## About the star prompt
 
-The installer asks once, and only in an interactive terminal, as soon as your board first
-answers (or at the end, if it didn't come up): `Star zulu-assistant on GitHub? [y/N]`. The default is No. If `gh` is not logged in, it skips the question
-silently. Only an explicit `y` stars, using your own `gh` login. The board may also show
-**one** toast, the first time it catches something for you, with two buttons:
-**Star**, which just opens this page, and **Never ask again**. Both answers are kept in
-`data/star-prompt.json`, and neither asks again. No feature ever depends on it. To star
-later, run `./install.sh star`.
+The installer asks once, and only in an interactive terminal with `gh` logged in:
+`Star zulu-assistant on GitHub? [y/N]`. The full install (`--full`) asks as soon as your board first
+answers (or at the end, if it didn't come up); the default install (`./install.sh`) and the demo ask
+at the end. The default is No. Only an explicit `y` stars, using your own `gh` login. Where the
+question cannot be asked (output to a pipe, or no `gh` login), the default install and the demo end
+with one line instead that names this repository and says a star helps others find it. It is
+printed once, and never after the question was asked. The board may also show
+**one** toast, the first time it catches something for you (the first gate you approve, a session it
+brought back, a task closed), with two buttons: **Star**, which just opens this page, and **Never ask
+again**. Everything is kept in `data/star-prompt.json`, and nothing asks twice. No feature ever
+depends on it. To star later, run `./install.sh star`.
 
 ## Contributing · Security · License
 

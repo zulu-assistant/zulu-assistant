@@ -33,6 +33,9 @@ node scripts/publish.mjs --check
 ```
 
 - Tests use `node:test` only.
+- A test file starts with `import './temp-root.mjs';`. It gives the file its own temp folder, removed when the
+  file's process ends, so `mkdtemp(path.join(os.tmpdir(), …))` needs no cleanup of its own.
+  `KEEP_TEST_TMP=1` keeps the folder for a look.
 - Tests must pass on a clean checkout with **no `data/` and no `overlay/`**.
   Use neutral fixtures and inject registries or paths instead of reading the
   owner's config. The existing tests show the pattern (`cronPresence(text,

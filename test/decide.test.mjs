@@ -1,5 +1,6 @@
 // WORK-panel approval logic (public/decide.js) + the page/server wiring that
 // task #85 depends on: no window.confirm, boot id injected, 403 on a bad token.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

@@ -7,6 +7,7 @@
 //
 // Nothing here changes the checkout: migrate gets an empty temp folder as its root and a dry run, and the
 // upgrade script is started with the no-launchd switch, which makes it refuse before it reads anything.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink } from 'node:fs/promises';

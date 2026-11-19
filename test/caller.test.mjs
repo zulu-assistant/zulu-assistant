@@ -4,6 +4,7 @@
 // One thing these tests cannot fix in advance: whether THEY are run by an agent. So the real-process
 // tests work out, with the same functions, whether an agent session is above this test process,
 // and assert that the board sees exactly that.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -16,6 +17,7 @@ import path from 'node:path';
 import {
   plainAddr, localAddresses, isLocalSource, parseLsof, connectionOwner, connectionSeen, parseProcTable, chainOf, workspaceInEnv,
   sessionPids, looksLikeAgent, isBrowserProcess, DEFAULT_BROWSERS, resolveChain, doorVerdict, createCallerEvidence, callerSettings,
+  jobSenders, jobSenderVerdict,
 } from '../src/caller.mjs';
 import { createLedger } from '../src/tasks.mjs';
 import { createGateService } from '../src/gate-service.mjs';
@@ -371,6 +373,113 @@ test('the lookup: a launchd job the owner mapped is named; the browser flag come
   const w = await createCallerEvidence({ readSessions: async () => ({}), run: fakeRun({ lsof: lsofWeb }).run, boardPid: 900, interfaces: () => IFACES }).of(REQ);
   assert.equal(w.kind, 'local'); assert.equal(w.browser, true); assert.equal(w.agentAncestor, false);
   assert.equal(doorVerdict(w, 'browser').refuse, null, 'the board page in a web view passes both rules');
+});
+
+test('a mapped job\'s name as a sender: only that job behind the call; never an agent\'s, the owner\'s or the board\'s name (#643 b)', () => {
+  const jobs = { 'x.watch': 'Disc-Watch', 'x.triage': 'headless:triage', 'x.bad': 'agent-mesh', 'x.own': 'owner', 'x.board': 'board', 'x.empty': '' };
+  const { senders, problems } = jobSenders(jobs, { agentNames: ['agent-mesh', 'mission-control'], isOwner: (n) => n === 'owner' });
+  assert.deepEqual([...senders].sort(), ['disc-watch', 'headless:triage']);
+  assert.deepEqual(problems.map((p) => [p.label, p.why]), [['x.bad', 'an agent has that name'], ['x.own', 'the owner\'s name'], ['x.board', 'the board\'s own name'], ['x.empty', 'no name']]);
+  const job = { kind: 'job', name: 'disc-watch', agentAncestor: false };
+  assert.equal(jobSenderVerdict('disc-watch', job, senders).ok, true, 'the mapped job itself');
+  assert.equal(jobSenderVerdict('DISC-WATCH', job, senders).ok, true, 'letter case does not matter');
+  for (const [ev, what] of [
+    [{ kind: 'job', name: 'headless:triage' }, 'another mapped job'],
+    [{ kind: 'agent', name: 'agent-mesh', agentAncestor: true }, 'an agent session'],
+    [{ kind: 'local', agentAncestor: false }, 'a plain terminal'],
+    [{ kind: 'unknown' }, 'a failed lookup'],
+    [{ kind: 'gone' }, 'a sender that left'],
+    [null, 'evidence off'],
+  ]) assert.equal(jobSenderVerdict('disc-watch', ev, senders).ok, false, what);
+  assert.equal(jobSenderVerdict('agent-mesh', { kind: 'job', name: 'agent-mesh' }, senders).ok, false, 'an agent\'s name is never a job sender');
+  assert.equal(jobSenderVerdict('nobody', job, senders).ok, false, 'a name not in the map');
+});
+
+test('the lookup: a job that starts right after a "not running" answer is named on its first call; a running job is still read once in 30 s (#643)', async () => {
+  const lsofJob = 'p7010\ncclaude\nn127.0.0.1:54321->127.0.0.1:3210\n';
+  let launchctl = '\tstate = not running\n';
+  let clock = 1_000_000;
+  const base = fakeRun({ lsof: lsofJob });
+  const run = async (cmd, args) => (cmd === 'launchctl'
+    ? (base.calls.push([cmd, ...args].join(' ')), { out: args[1].endsWith('/x.triage') ? launchctl : '\tstate = not running\n', err: null })
+    : base.run(cmd, args));
+  const asked = () => base.calls.filter((c) => c.startsWith('launchctl')).length;
+  const j = createCallerEvidence({ readSessions: async () => ({}), jobs: { 'x.triage': 'headless:triage', 'x.other': 'headless:other' }, run, now: () => clock, boardPid: 900, interfaces: () => IFACES });
+  const before = await j.of(REQ);
+  assert.notEqual(before.kind, 'job', 'not running: the call is not the job');
+  assert.equal(asked(), 2, 'both labels asked');
+  launchctl = '\tstate = running\n\tpid = 7000\n';
+  clock += 1000;
+  const after = await j.of(REQ);
+  assert.equal(after.kind, 'job', 'one second later the job runs and is named'); assert.equal(after.name, 'headless:triage');
+  const n = asked();
+  clock += 5000;
+  assert.equal((await j.of(REQ)).kind, 'job');
+  assert.equal(asked(), n + 1, 'a running job is kept 30 s; only the label that is not running is asked again');
+  launchctl = '\tstate = not running\n';
+  clock += 31_000;
+  assert.notEqual((await j.of(REQ)).kind, 'job', 'after 30 s the pid is asked again and a stopped job is not named');
+});
+
+test('a kept job pid names a process only while its start time matches: a reused pid is not the job (#643)', async () => {
+  const lsofJob = 'p7010\ncclaude\nn127.0.0.1:54321->127.0.0.1:3210\n';
+  // the job ended and the system gave pid 7000 to another program 10 minutes later, inside the 30 s the pid is kept
+  const reused = PS.replace(' 7000     1 Mon Jan  5 08:30:00 2026', ' 7000     1 Mon Jan  5 08:40:00 2026').replace(' 7010  7000 Mon Jan  5 08:30:01 2026', ' 7010  7000 Mon Jan  5 08:40:01 2026');
+  assert.notEqual(reused, PS);
+  let clock = 1_000_000;
+  let launchctl = '\tstate = running\n\tpid = 7000\n';
+  const base = fakeRun({ lsof: lsofJob, ps: [PS, reused] });
+  const run = async (cmd, args) => (cmd === 'launchctl' ? (base.calls.push(cmd), { out: launchctl, err: null }) : base.run(cmd, args));
+  const j = createCallerEvidence({ readSessions: async () => ({}), jobs: { 'x.triage': 'headless:triage' }, run, now: () => clock, boardPid: 900, interfaces: () => IFACES });
+  assert.equal((await j.of(REQ)).kind, 'job', 'the job itself');
+  launchctl = '\tstate = not running\n';         // the job has ended
+  clock += 5000;
+  assert.notEqual((await j.of(REQ)).kind, 'job', 'same pid, another start time: not the job');
+  assert.equal(base.calls.filter((c) => c === 'launchctl').length, 2, 'the stale entry was dropped and launchd asked again');
+  // resolveChain: a kept entry with no start time names nothing; within 2 s it does
+  assert.equal(resolveChain(chainOf(7010, TABLE), { jobs: new Map([[7000, { name: 'headless:triage', start: null }]]), boardPid: 900 }).kind, 'local');
+  assert.equal(resolveChain(chainOf(7010, TABLE), { jobs: new Map([[7000, { name: 'headless:triage', start: start(7000) + 2 }]]), boardPid: 900 }).kind, 'job');
+  assert.equal(resolveChain(chainOf(7010, TABLE), { jobs: new Map([[7000, { name: 'headless:triage', start: start(7000) + 3 }]]), boardPid: 900 }).kind, 'local');
+});
+
+test('a kept entry gone stale: the next run of the job, with a new pid inside the 30 s, is named on its first call (#643)', async () => {
+  // run 1 = pid 7000 (its child 7010 calls); run 2 starts 5 s later as pid 7020 (its child 7030 calls)
+  const run2 = PS.replace(' 7000     1 Mon Jan  5 08:30:00 2026 /bin/sh', ' 7020     1 Mon Jan  5 08:30:05 2026 /bin/sh')
+    .replace(' 7010  7000 Mon Jan  5 08:30:01 2026', ' 7030  7020 Mon Jan  5 08:30:06 2026');
+  assert.notEqual(run2, PS);
+  let clock = 1_000_000;
+  let launchctl = '\tstate = running\n\tpid = 7000\n';
+  let lsof = 'p7010\ncclaude\nn127.0.0.1:54321->127.0.0.1:3210\n';
+  const calls = [];
+  let table = PS;
+  const run = async (cmd, args) => {
+    calls.push(cmd);
+    if (cmd === 'launchctl') return { out: launchctl, err: null };
+    if (cmd === 'lsof') return { out: lsof, err: null };
+    if (cmd === 'ps' && args[0] === '-axo') return { out: table, err: null };
+    if (cmd === 'ps') return { out: 'x', err: null };
+    return { out: '', err: new Error(`unexpected ${cmd}`) };
+  };
+  const j = createCallerEvidence({ readSessions: async () => ({}), jobs: { 'x.triage': 'headless:triage' }, run, now: () => clock, boardPid: 900, interfaces: () => IFACES });
+  assert.equal((await j.of(REQ)).kind, 'job', 'run 1 is named');
+  clock += 5000;
+  table = run2; launchctl = '\tstate = running\n\tpid = 7020\n'; lsof = 'p7030\ncclaude\nn127.0.0.1:54321->127.0.0.1:3210\n';
+  const r2 = await j.of(REQ);
+  assert.equal(r2.kind, 'job', 'run 2, five seconds later, is named on its first call'); assert.equal(r2.name, 'headless:triage');
+  assert.equal(calls.filter((c) => c === 'launchctl').length, 2, 'launchd asked again in the same lookup');
+});
+
+test('ten mapped labels that are not running are asked together, not one after another (#643)', async () => {
+  const lsofJob = 'p7010\ncclaude\nn127.0.0.1:54321->127.0.0.1:3210\n';
+  const base = fakeRun({ lsof: lsofJob });
+  const run = async (cmd, args) => (cmd === 'launchctl' ? new Promise((r) => setTimeout(() => r({ out: '\tstate = not running\n', err: null }), 100)) : base.run(cmd, args));
+  const jobs = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`x.job${i}`, `job-${i}`]));
+  const j = createCallerEvidence({ readSessions: async () => ({}), jobs, run, boardPid: 900, interfaces: () => IFACES });
+  const t0 = Date.now();
+  const ev = await j.of(REQ);
+  const ms = Date.now() - t0;
+  assert.notEqual(ev.kind, 'job'); assert.notEqual(ev.kind, 'unknown', 'inside the lookup budget');
+  assert.ok(ms < 600, `ten 100 ms answers took ${ms} ms (one after another: 1000 ms)`);
 });
 
 // ── against real processes: a throwaway server (never the board) and the real lsof / ps ──

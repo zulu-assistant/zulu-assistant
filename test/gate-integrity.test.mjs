@@ -2,6 +2,7 @@
 // run in the live checkout, what has landed on the default branch? Pure rules first, then real
 // temporary repositories: an origin, and a clone of it standing in for the live checkout. The
 // "what the remote says" reader and the clock are injected; nothing here touches a real remote.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -379,7 +380,10 @@ test('the board wires it in: one poll stage, read-only helpers, the card file ca
   const src = readFileSync(path.join(ROOT, 'server.mjs'), 'utf8');
   assert.match(src, /const INTEGRITY = integritySettings\(DEMO \? null : SETTINGS\.gateIntegrity\);/);
   assert.match(src, /const integrity = INTEGRITY\.mode !== 'on' \? null : createGateIntegrity\(\{/);
-  assert.match(src, /files: \(\) => \[\.\.\.gatePaths\(gates\.policy\(\)\?\.lists\?\.gateCode \|\| GATE_DEFAULT_POLICY\.lists\.gateCode, [^\n]*, \.\.\.OWN_FILES\],/);
+  // the policy's list, else the shipped one (#636: its folders' ls-tree is read asynchronously first)
+  assert.match(src, /files: async \(git = liveGit\) => \{\n\s*const list = gates\.policy\(\)\?\.lists\?\.gateCode \|\| GATE_DEFAULT_POLICY\.lists\.gateCode;[\s\S]{0,400}return \[\.\.\.gatePaths\(list, [^\n]*\), \.\.\.OWN_FILES\];/);
+  // #636: no synchronous child process anywhere in the board's own file
+  assert.doesNotMatch(src, /execFileSync|spawnSync|execSync/);
   // the settings-change hook reports a block to the board, from this machine only
   assert.match(src, /url\.pathname === '\/api\/gates\/config-change' && req\.method === 'POST'\) \{\n[^\n]*\n[^\n]*\n\s*if \(!localOnly\(req\)\) throw/);
   assert.match(src, /JSON\.stringify\(\{ \.\.\.c, \.\.\.\(integ \? \{ integrity: integ \} : \{\}\), at: Date\.now\(\) \}\)/);
@@ -392,8 +396,8 @@ test('the board wires it in: one poll stage, read-only helpers, the card file ca
   assert.match(src, /if \(integrity && answer\.decision === 'allow'\) for \(const ms of \[20e3, 90e3\]\) setTimeout\(\(\) => integrity\.readRemote\(true\)/);
   // an entry of ours that would not fail closed is said on the card, without colour (a note, never a problem)
   assert.match(src, /const open = failOpenEntries\(userSettings, \{ repo: LIVE \}\);\n\s*if \(open\.length\) notes\.push\(/);
-  // the only git commands the check runs are ones that read
-  const used = [...readFileSync(path.join(ROOT, 'src', 'gate-integrity.mjs'), 'utf8').matchAll(/git\(\['([a-z-]+)'/g)].map((m) => m[1]);
+  // the only git commands the check runs are ones that read (#636: `g` is git under the check's budget)
+  const used = [...readFileSync(path.join(ROOT, 'src', 'gate-integrity.mjs'), 'utf8').matchAll(/\b(?:git|g)\(\['([a-z-]+)'/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(used)].sort(), ['cat-file', 'config', 'describe', 'ls-tree', 'merge-base', 'rev-list', 'rev-parse', 'symbolic-ref']);
   // every repo a registered agent works in is looked at for a settings file that switches hooks off
   assert.match(src, /for \(const repo of repos\) for \(const f of PROJECT_SETTINGS\) \{\n\s*const j = await json\(path\.join\(repo, f\)\);\n\s*const why = settingsProblem\(j\);\n\s*if \(why\) registration\.push\(/);
@@ -741,7 +745,7 @@ test('the settings-change hook tells its own checkout\'s board, not one the envi
   assert.equal(at({ env: { MESH_BOARD: 'http://127.0.0.1:4999' }, args: ['--env-board'] }), 'http://127.0.0.1:4999');
   // review finding 3: with twenty kept heads a poll asked git about each one, every time
   const src = readFileSync(path.join(ROOT, 'src', 'gate-integrity.mjs'), 'utf8');
-  assert.match(src, /const has = \(sha\) => \{ if \(here\.has\(sha\)\) return true; const yes = git\(\['cat-file', '-e', `\$\{sha\}\^\{commit\}`\]\) !== null; if \(yes\) \{/);
+  assert.match(src, /const has = async \(g, sha\) => \{ if \(here\.has\(sha\)\) return true; const yes = \(await g\(\['cat-file', '-e', `\$\{sha\}\^\{commit\}`\]\)\) !== null; if \(yes\) \{/);
 });
 
 // ── the settings a session is STARTED with (task 513) ───────────────────────

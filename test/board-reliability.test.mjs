@@ -1,6 +1,7 @@
 // node --test "test/*.test.mjs"
 // Board reliability: feed tail read, outbox serialisation, poll stage isolation,
 // the persisted digest day, process handlers, backup pruning + card, data-size report.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, appendFile, readdir, utimes, rm, chmod } from 'node:fs/promises';

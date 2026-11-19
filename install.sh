@@ -20,11 +20,14 @@
 #   ./install.sh star             star the repo on GitHub (asks first; your own gh login)
 #   ./install.sh check | verify   pass through to scripts/bootstrap.sh
 #
-# The star prompt (full install and --demo, last step): asked ONCE, default No,
+# The star prompt (full install, last step): asked ONCE, default No,
 # only in an interactive terminal, skipped silently when gh is not logged in,
 # never repeated, never tied to any feature. Only an explicit "y" stars, via
 # `gh api -X PUT /user/starred/<owner>/<repo>` under YOUR gh login. The answer
 # is kept in data/star-prompt.json.
+# The light install and --demo ask the same question where it can be asked; where
+# it cannot (a pipe, no gh login) they end with ONE line naming the repo instead
+# (star_light / star_line), printed once (recorded in the same file). Never both.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -111,6 +114,31 @@ star_prompt() {  # star_prompt ask|explicit
   fi
 }
 
+# star_light: the light install's and the demo's last step. Where the question can be asked (an
+# interactive terminal, gh logged in) it is the same one question as the full install; where it
+# cannot (a pipe, no gh) one line names the repo instead. Never both: once either happened
+# (data/star-prompt.json installer / installerLine), neither runs again here.
+star_light() {
+  "$NODE_BIN" -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(d.installer?.answer||d.installerLine?0:1)' "$STAR_FILE" 2>/dev/null && return 0
+  if [[ -t 0 && -t 1 ]] && has gh && gh auth status >/dev/null 2>&1; then star_prompt ask; else star_line; fi
+}
+
+# star_line: where the question cannot be asked. No question, no gh; printed once
+# (data/star-prompt.json installerLine), and not at all after an answer at install.
+star_line() {
+  local url; url=$(repo_url)
+  [[ "$url" == https://github.com/?* ]] || return 0
+  "$NODE_BIN" -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(d.installer?.answer||d.installerLine?0:1)' "$STAR_FILE" 2>/dev/null && return 0
+  echo
+  say note "Zulu is free and open source. If it is useful to you, a star on $url helps others find it."
+  mkdir -p "$(dirname "$STAR_FILE")"
+  "$NODE_BIN" -e '
+    const fs = require("fs"); const f = process.argv[1];
+    let d = {}; try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch {}
+    d.installerLine = { at: Date.now() };
+    fs.writeFileSync(f, JSON.stringify(d, null, 1));' "$STAR_FILE" 2>/dev/null || true
+}
+
 demo_up() { curl -s -o /dev/null -m 2 -w '%{http_code}' "http://localhost:$PORT/api/status" 2>/dev/null | grep -q 200; }
 
 do_demo() {
@@ -128,7 +156,7 @@ do_demo() {
     say info "stop it with ./install.sh demo-stop"
   fi
   [[ "${1:-}" == --cmux ]] && demo_cmux
-  star_prompt ask
+  star_light
 }
 
 # The cmux half: a separate "ZULU DEMO" window with fake agent panes; the demo
@@ -243,7 +271,7 @@ do_light() {
     if [[ -z "${ZULU_NO_OPEN:-}" ]]; then open "http://localhost:$PORT/" 2>/dev/null || true; fi
   else say next "board: http://localhost:$PORT (logs/server.err.log says why if it does not answer)"; fi
   next_steps
-  star_prompt ask
+  star_light
 }
 # Each is one command and each is opt-in. Kept in step with the board's card (src/setup.mjs NEXT_STEPS).
 next_steps() {

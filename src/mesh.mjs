@@ -268,6 +268,11 @@ const DIALOG = [
 ];
 const BUSY = [/esc to interrupt/i, /\bWorking \(\d/i, /^\s*[✻✶✳✢·*]\s+\S+…\s*\(/m];
 const READY_FOOTER = [/\? for shortcuts/i, /shift\+tab to cycle/i, /manual mode on/i, /accept edits on/i, /auto mode on/i, /bypass permissions on/i, /plan mode on/i];
+// `enter/esc latest`: a Codex pane left scrolled up (0.162.1: "↓ Back to bottom", sometimes "New activity · Earlier
+// messages available"). Probed on a scratch Codex pane (#624): typed text stays in the composer and one Enter submits
+// it and jumps to the bottom, so the view is ready. Before, it read as not recognised and messages expired unread.
+// Read on the footer line (the last line) only: the conversation above may quote the phrase (MC's read of 48a2875).
+const READY_LAST_LINE = [/\benter\/esc latest\b/i];
 const PLACEHOLDER = /^(Ask Codex to do anything|Try ".*"|Implement \{feature\}|Find and fix a bug.*|Summarize recent commits|Write tests for .*|Explain this codebase|Improve documentation.*|Run \/review.*)$/i;
 const SHELL = /(?:^|\s)[%$#]\s*$/;
 
@@ -287,7 +292,8 @@ export function classifyScreen(screen) {
   const busy = BUSY.some((re) => re.test(tail));
   if (input !== null && input && !PLACEHOLDER.test(input)) return { state: 'draft', draft: input, busy };
   if (busy) return { state: 'busy' };
-  if (input !== null && READY_FOOTER.some((re) => re.test(tail))) return { state: 'ready' };
+  if (input !== null && (READY_FOOTER.some((re) => re.test(tail)) || READY_LAST_LINE.some((re) => re.test(lines[lines.length - 1]))))
+    return { state: 'ready' };
   if (lines.length && SHELL.test(lines[lines.length - 1])) return { state: 'shell' };
   return { state: 'unknown' };
 }

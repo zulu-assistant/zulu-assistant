@@ -1,3 +1,4 @@
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, readdirSync, rmSync } from 'node:fs';

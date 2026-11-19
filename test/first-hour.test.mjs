@@ -4,6 +4,7 @@
 //
 // The installer and the board run from a COPY of this checkout under a temp HOME with
 // ZULU_NO_LAUNCHD=1. Nothing here touches the real HOME, the real LaunchAgents or the live board.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, copyFile, readdir, rm, lstat, chmod } from 'node:fs/promises';
@@ -147,6 +148,11 @@ test('the default install: one LaunchAgent and your config; nothing in ~/.claude
     assert.ok(!existsSync(path.join(c.home, '.config')), 'no cmux or terminal config');
     assert.deepEqual(JSON.parse(await readFile(path.join(c.root, 'overlay/config/local.json'), 'utf8')), { dropExamples: true });
     assert.equal(JSON.parse(await readFile(path.join(c.root, 'data/setup-state.json'), 'utf8')).mode, 'light');
+    // the last line names the repo and asks nothing (no gh, no [y/N]); it is recorded so a re-run stays quiet
+    const lines = r.stdout.trim().split('\n');
+    assert.match(lines.at(-1), /^note\s+.*a star on https:\/\/github\.com\/\S+ helps others find it\.$/);
+    assert.doesNotMatch(r.stdout, /\[y\/N\]/);
+    assert.ok(JSON.parse(await readFile(path.join(c.root, 'data/star-prompt.json'), 'utf8')).installerLine?.at > 0);
     // the registry a new install reads: no example placeholders
     const reg = spawnSync(process.execPath, ['-e', "import('./src/config.mjs').then((m) => console.log(JSON.stringify([m.JOBS.length, m.DOCKER_CONTAINERS.length, m.ENDPOINTS.length, m.PROFILE])))"], { cwd: c.root, env: c.env, encoding: 'utf8' });
     assert.deepEqual(JSON.parse(reg.stdout), [0, 0, 0, 'full'], reg.stderr);
@@ -156,7 +162,9 @@ test('the default install: one LaunchAgent and your config; nothing in ~/.claude
 test('a re-run on an existing install removes nothing and keeps what is there', { skip: !MAC && 'the board runs as a LaunchAgent (macOS)', timeout: 120000 }, async () => {
   const c = await cloneCheckout();
   try {
-    assert.equal(install(c).status, 0);
+    const first = install(c);
+    assert.equal(first.status, 0);
+    assert.match(first.stdout, /helps others find it/);
     // what a fuller install would have left: a second LaunchAgent, Claude settings with hooks, setup answers, a started checklist
     const la = path.join(c.home, 'Library', 'LaunchAgents');
     await writeFile(path.join(la, 'com.zulu-assistant.mission-control-triage.plist'), '<plist/>');
@@ -172,6 +180,7 @@ test('a re-run on an existing install removes nothing and keeps what is there', 
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /skip\s+overlay\/ already has every example file/);
     assert.match(r.stdout, /skip\s+plist \S+\.master-console up to date/);
+    assert.doesNotMatch(r.stdout, /helps others find it/, 'the star line is printed once, never on a re-run');
     assert.deepEqual((await readdir(la)).sort(), before, 'no LaunchAgent removed, no backup copy made');
     assert.equal(await readFile(path.join(c.home, '.claude', 'settings.json'), 'utf8'), settings);
     assert.ok(existsSync(path.join(c.home, '.claude', 'skills', 'mine')));

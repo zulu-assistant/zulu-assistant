@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — overlay + secrets resolver (Agent-OS Phase 2, task #38)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, utimes } from 'node:fs/promises';

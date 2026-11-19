@@ -18,8 +18,10 @@
 // moving it by hand hides nothing. A commit is landed when it is one of those heads, or an
 // ancestor of one that is in the local repository.
 //
-// Everything here is pure except createGateIntegrity, which takes its readers as arguments.
+// Everything here is pure except createGateIntegrity, which takes its readers as arguments, and the asynchronous
+// reader below (#636), which the board injects as those readers.
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 
 export const MAX_HEADS = 20;
 export const DEFAULT_BEHIND_MINUTES = 30;
@@ -545,7 +547,96 @@ export function integrityCard({ files, registration = [], port = null, notes = [
   return { ...base, status: files?.status || 'unknown', detail: said(files?.detail || 'gate files not checked') };
 }
 
+// ── read-only child processes off the board's event loop (#636) ─────────────
+/**
+ * The board once ran its git reads with execFileSync. Each held the whole loop (HTTP requests, gate checks, the
+ * door's caller lookup) for up to its own limit, and a first check after a restart could add up to minutes
+ * (11-14 22:56Z: the guardrails-card stage took 55 s). Here every read is asynchronous, and a check gets ONE budget
+ * for all its reads together:
+ *
+ *   const budget = createBudget(5000);
+ *   const r = await readChild('git', ['-C', dir, 'rev-parse', 'HEAD'], { limitMs: 3000, budget, label: 'integrity' });
+ *   // → { out, code, ranOut }  code 0 = answered yes · code > 0 = answered NO (a hit, not a failure) · ranOut = no answer
+ *
+ * A read gets the lower of its own limit and what is left of the budget; with nothing left it is not started and
+ * reads ranOut. A read over 1 s logs one line with the program and its first word only (never paths, refs or other
+ * arguments). Reads running at once are capped board-wide. (Kept in this file, already on the gate-code list and
+ * this check's own files, so no new module joins the hooks' imports; nothing the settings-change hook calls uses it.)
+ */
+export const SLOW_READ_MS = 1000;
+export const BOARD_MAX_READS = 6;          // child reads running at once, the whole board
+
+export function createBudget(ms, now = () => Date.now()) {
+  const end = now() + Math.max(0, Number(ms) || 0);
+  return { left: () => Math.max(0, end - now()), ms, ranOut: false };
+}
+
+// the board-wide cap: a FIFO of waiters for a free slot
+let readsNow = 0;
+const readWaiters = [];
+const acquireRead = () => (readsNow < BOARD_MAX_READS ? (readsNow++, Promise.resolve()) : new Promise((r) => readWaiters.push(r)));
+const releaseRead = () => { const next = readWaiters.shift(); if (next) next(); else readsNow--; };
+export const readsRunning = () => ({ running: readsNow, waiting: readWaiters.length });
+
+/** The first word a log line may name: git's or gh's subcommand, after `-C <dir>` and other leading options. */
+export function firstWord(args = []) {
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i]);
+    if (a === '-C' || a === '-c' || a === '--git-dir' || a === '--work-tree') { i++; continue; }
+    if (a.startsWith('-')) continue;
+    return a.replace(/[^\w-]/g, '').slice(0, 24) || '?';
+  }
+  return '?';
+}
+
+/**
+ * readChild(cmd, args, { limitMs, budget, label, cwd, run, log }) → { out, code, ranOut, ms }
+ *   run   injectable for tests: (cmd, args, { timeout, cwd }) → Promise<{ out, code, killed }>
+ */
+export async function readChild(cmd, args, { limitMs = 3000, budget = null, label = 'read', cwd, run = execRun, log = console.log, now = () => Date.now() } = {}) {
+  const t0 = now();
+  await acquireRead();
+  try {
+    const timeout = Math.min(limitMs, budget ? budget.left() : limitMs);
+    if (timeout <= 0) { if (budget) budget.ranOut = true; return { out: '', code: null, ranOut: true, ms: now() - t0 }; }
+    const r = await run(cmd, args, { timeout, cwd });
+    const ms = now() - t0;
+    if (ms > SLOW_READ_MS) log(`${new Date(now()).toISOString()} [slow-read] ${cmd} ${firstWord(args)} ${(ms / 1000).toFixed(1)} s (${label})`);
+    if (r.killed) { if (budget) budget.ranOut = true; return { out: '', code: null, ranOut: true, ms }; }
+    return { out: String(r.out || ''), code: r.code, ranOut: false, ms };
+  } finally { releaseRead(); }
+}
+
+/** execFile as a promise: an exit status is an answer; a kill by the timer (or no program) is not. */
+export function execRun(cmd, args, { timeout, cwd } = {}) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { encoding: 'utf8', timeout, cwd, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 }, (err, out) => {
+      if (!err) return resolve({ out, code: 0, killed: false });
+      // a number = the program answered with that exit status; killed / a string code (ENOENT …) = no answer
+      resolve({ out: String(out || ''), code: typeof err.code === 'number' ? err.code : null, killed: err.killed || typeof err.code !== 'number' });
+    });
+  });
+}
+
+/** An error that says a read ran out (thrown by the board's git so the check can tell it from a "no"). */
+export class RanOut extends Error {
+  constructor(what) { super(`${what} ran out`); this.ranOut = true; }
+}
+
 // ── the impure shell ────────────────────────────────────────────────────────
+export const READ_BUDGET_MS = 5000;      // #636: every git read of one integrity check together
+export const KEEP_LAST_POLLS = 3;        // #636: polls whose reads ran out that keep the last full judgment
+
+/** #636: the folders of the gateCode list that need an ls-tree (read before gatePaths, which stays pure). */
+export function gateDirs(list) {
+  return (Array.isArray(list) ? list : []).map((g) => /^<(?:live|repo)>\/(.+)\/\*\*$/.exec(String(g))?.[1]).filter(Boolean);
+}
+
+/** #636: the git reads remoteTarget asks for, so they can be read asynchronously first and handed to it as answers. */
+export function remoteTargetReads(settings = integritySettings('on')) {
+  return [['config', '--get', `remote.${settings.remote}.url`], ['symbolic-ref', '-q', '--short', 'HEAD'],
+    ['describe', '--exact-match', '--tags', 'HEAD'], ['symbolic-ref', '-q', '--short', `refs/remotes/${settings.remote}/HEAD`]];
+}
 /**
  * createGateIntegrity({ root, files, git, readFile, readState, writeState, readRemoteHead, now, settings })
  *   root            the live checkout
@@ -554,32 +645,37 @@ export function integrityCard({ files, registration = [], port = null, notes = [
  *   readRemoteHead  async () → sha — what the REMOTE says the default branch's head is (gh / ls-remote)
  * → { check() → the judgment + card fields, readRemote(force) }
  */
-export function createGateIntegrity({ root, files, git, readFile, readState, writeState, readRemoteHead, now = () => Date.now(), settings = integritySettings(null) }) {
+export function createGateIntegrity({ root, files, git, readFile, readState, writeState, readRemoteHead, now = () => Date.now(), settings = integritySettings(null), budgetMs = READ_BUDGET_MS }) {
   const treeCache = new Map();           // commit → Map path → blob id (a commit never changes)
   const ancestorCache = new Map();       // `${a}..${b}` → boolean
   let state = null;
   let lastRead = 0;
+  // #636: the last FULL judgment, and since when no poll could finish its reads (in memory: a restart starts unread)
+  let lastFull = null;
+  let unread = null;                     // { since, polls } while reads run out
 
   const load = async () => { state ||= { heads: [], passedAt: null, behindSince: null, behindOf: null, ...((await readState().catch(() => null)) || {}) }; return state; };
+  // #636: `git` may be asynchronous (args, budget) → stdout | null (a "no" or an error) and throws when it ran out
+  // (`e.ranOut`): only an answer is kept in a cache; a read that ran out is never taken for a "no".
   // a commit that is in the repository stays there: only a "no" is asked again (it may be fetched later)
   const here = new Set();
-  const has = (sha) => { if (here.has(sha)) return true; const yes = git(['cat-file', '-e', `${sha}^{commit}`]) !== null; if (yes) { if (here.size > 500) here.clear(); here.add(sha); } return yes; };
-  const isAncestor = (a, b) => {
+  const has = async (g, sha) => { if (here.has(sha)) return true; const yes = (await g(['cat-file', '-e', `${sha}^{commit}`])) !== null; if (yes) { if (here.size > 500) here.clear(); here.add(sha); } return yes; };
+  const isAncestor = async (g, a, b) => {
     if (!a || !b) return false;
     if (a === b) return true;
     const key = `${a}..${b}`;
-    if (!ancestorCache.has(key)) { if (ancestorCache.size > 500) ancestorCache.clear(); ancestorCache.set(key, git(['merge-base', '--is-ancestor', a, b]) !== null); }
+    if (!ancestorCache.has(key)) { const yes = (await g(['merge-base', '--is-ancestor', a, b])) !== null; if (ancestorCache.size > 500) ancestorCache.clear(); ancestorCache.set(key, yes); }
     return ancestorCache.get(key);
   };
   // (kept per commit AND file list: a file newly on the list is not in what was read for the old list, and
   // read from that it looked changed until the board restarted; seen when a rules file gained an entry, #571)
-  const treeOf = (commit, paths) => {
+  const treeOf = async (g, commit, paths) => {
     const key = `${commit}\n${paths.join('\n')}`;
     if (!treeCache.has(key)) {
-      if (treeCache.size > 40) treeCache.clear();
-      const out = git(['ls-tree', '-r', commit, '--', ...paths]);
+      const out = await g(['ls-tree', '-r', commit, '--', ...paths]);
       const m = new Map();
       for (const line of String(out || '').split('\n')) { const x = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line); if (x) m.set(x[2], x[1]); }
+      if (treeCache.size > 40) treeCache.clear();
       treeCache.set(key, m);
     }
     return treeCache.get(key);
@@ -602,29 +698,69 @@ export function createGateIntegrity({ root, files, git, readFile, readState, wri
 
   async function check() {
     const s = await readRemote(false);
-    const head = String(git(['rev-parse', 'HEAD']) || '').trim();
+    // #636: ONE budget for every git read of this check; a read that runs out ends the check as "not checked"
+    const budget = createBudget(budgetMs, now);
+    const g = (args) => git(args, budget);
+    try {
+      return await judgeOnce(s, g);
+    } catch (e) {
+      if (!e?.ranOut) throw e;
+      return notChecked(budgetMs);
+    }
+  }
+
+  async function judgeOnce(s, g) {
+    const head = String((await g(['rev-parse', 'HEAD'])) || '').trim();
     if (!head) return { status: 'unknown', state: 'unread', detail: 'gate files not checked: this is not a git checkout', changed: [], behind: [] };
-    const paths = [...new Set(files())].sort();
+    const paths = [...new Set(await files(g))].sort();
     const algo = algoOf(head);
     const newest = newestHead(s);
-    const newestHere = Boolean(newest) && has(newest);
+    const newestHere = Boolean(newest) && await has(g, newest);
     const known = (s.heads || []).map((h) => h.sha);
-    const landed = known.includes(head) || known.some((h) => has(h) && isAncestor(head, h));
-    const k = s.passedAt && has(s.passedAt) ? s.passedAt : null;
-    const back = Boolean(k) && head !== k && isAncestor(head, k);
-    const forward = !k || isAncestor(k, head);
-    const atHead = treeOf(head, paths);
-    const atNewest = newestHere ? treeOf(newest, paths) : null;
+    let landed = known.includes(head);
+    for (const h of known) { if (landed) break; landed = (await has(g, h)) && await isAncestor(g, head, h); }
+    const k = s.passedAt && await has(g, s.passedAt) ? s.passedAt : null;
+    const back = Boolean(k) && head !== k && await isAncestor(g, head, k);
+    const forward = !k || await isAncestor(g, k, head);
+    const atHead = await treeOf(g, head, paths);
+    const atNewest = newestHere ? await treeOf(g, newest, paths) : null;
     const rows = [];
     for (const p of paths) {
       const buf = await readFile(p).catch(() => null);
       rows.push({ path: p, live: buf ? blobId(buf, algo) : null, atHead: atHead.get(p) ?? null, atNewest: atNewest ? (atNewest.get(p) ?? null) : undefined });
     }
     let commitsBehind = null;
-    if (newestHere && newest !== head && isAncestor(head, newest)) commitsBehind = Number(String(git(['rev-list', '--count', `${head}..${newest}`]) || '').trim()) || null;
+    if (newestHere && newest !== head && await isAncestor(g, head, newest)) commitsBehind = Number(String((await g(['rev-list', '--count', `${head}..${newest}`])) || '').trim()) || null;
     const r = judge({ files: rows, head, newest, newestHere, landed, back, forward, state: s, now: now(), behindMinutes: settings.behindMinutes, commitsBehind });
     if (JSON.stringify(r.next) !== JSON.stringify(s)) { state = r.next; await writeState(state).catch(() => {}); }
-    return { ...r, next: undefined, head, newest, readAt: s.readAt || null, readError: s.readError || null, files: paths.length };
+    const out = { ...r, next: undefined, head, newest, readAt: s.readAt || null, readError: s.readError || null, files: paths.length };
+    lastFull = out; unread = null;
+    return out;
+  }
+
+  /**
+   * #636: a check whose reads ran out judged nothing (MC's condition 5). For a few polls the card keeps the last
+   * full judgment with a note; then amber; red once `behindMinutes` pass without a full reading. A red is never
+   * cleared by an unread poll. Nothing is written to the state file. With no full reading yet the same ladder runs
+   * from "unknown" (MC's read of cf04e33: it stayed unknown for ever). When the last full judgment was behind, its
+   * own clock keeps counting: red comes at `behindMinutes` from the earlier of the two clocks.
+   */
+  function notChecked(ms) {
+    unread = unread ? { since: unread.since, polls: unread.polls + 1 } : { since: now(), polls: 1 };
+    const why = `not checked this poll (git ran out after ${(ms / 1000).toFixed(0)} s)`;
+    const behindAt = lastFull?.state === 'behind' && state?.behindSince ? Date.parse(state.behindSince) : NaN;
+    const from = Number.isFinite(behindAt) ? Math.min(unread.since, behindAt) : unread.since;
+    const mins = Math.floor((now() - from) / 60e3);
+    const keep = lastFull ? { ...lastFull, unread: unread.polls } : { status: 'unknown', state: 'unread', changed: [], behind: [], unread: unread.polls };
+    if (lastFull?.status === 'down') return { ...keep, detail: `${lastFull.detail} · ${why}` };
+    if (settings.behindMinutes > 0 && mins >= settings.behindMinutes) {
+      return { ...keep, status: 'down', detail: lastFull?.state === 'behind'
+        ? `gate files behind for ${mins} min, and not checked since (git ran out at every poll)`
+        : `gate files not checked for ${mins} min (git ran out at every poll)` };
+    }
+    const last = lastFull ? `; last full reading: ${lastFull.detail}` : '; no full reading since the board started';
+    if (unread.polls > KEEP_LAST_POLLS) return { ...keep, status: 'warn', detail: `gate files not checked for ${unread.polls} polls (git ran out)${last}` };
+    return { ...keep, detail: lastFull ? `${lastFull.detail} · ${why}` : `gate files ${why}` };
   }
   return { check, readRemote, state: () => state };
 }

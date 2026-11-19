@@ -4,6 +4,7 @@
 // Nothing here touches the real HOME, the real LaunchAgents or the live board: the installer runs
 // in a COPY of this checkout under a temp HOME with ZULU_NO_LAUNCHD=1, and the board under test is
 // started from that copy on its own port.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, copyFile, readdir, rm, lstat, chmod } from 'node:fs/promises';

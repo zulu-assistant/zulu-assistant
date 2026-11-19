@@ -3,6 +3,7 @@
 // Nothing here touches the real HOME or the real launchd: the installer runs in a COPY of this checkout
 // under a temp HOME, with a stand-in launchctl that records every call. scripts/env.sh puts /usr/bin ahead
 // of the caller's PATH, so the stand-in goes in NODE_BIN_DIR, the only directory env.sh puts first.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, copyFile, readdir, rm, lstat, chmod, symlink } from 'node:fs/promises';

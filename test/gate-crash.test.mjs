@@ -1,6 +1,7 @@
 // Guardrails crash and restart (#369, from public feedback): an approval must never run twice, even
 // when the board dies between spending the grant and writing the receipt. Temp dirs only; the
 // "board" here is the gate service itself, and the crash is a real child process exiting mid-call.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile } from 'node:fs/promises';

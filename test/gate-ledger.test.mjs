@@ -1,3 +1,4 @@
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, stat } from 'node:fs/promises';
@@ -499,9 +500,13 @@ test('13b: the walk reads the words as gh does: a value flag takes the next word
   // and nothing over-asks: every plain landing in a private checkout still runs
   const priv = await goBoard(gitFor());
   for (const c of ['gh pr merge 3', 'gh pr merge 3 --squash --delete-branch', 'gh pr merge 3 -sd', 'gh pr merge 3 -m -t "the subject" -b "the body"', 'gh pr merge 3 --subject=x --body=y --rebase',
-    'gh pr merge 3 -st "subject here"', 'gh pr merge 3 --match-head-commit 0123abc', 'gh pr merge 3 --auto', 'gh pr merge feature/x', 'gh pr merge', 'gh pr merge 3 -R acme/app -t -Rnot-a-repo',
+    'gh pr merge 3 -st "subject here"', 'gh pr merge 3 --auto', 'gh pr merge feature/x', 'gh pr merge', 'gh pr merge 3 -R acme/app -t -Rnot-a-repo',
     'gh pr merge https://github.com/acme/app/pull/3 -s', 'gh -R acme/app pr merge 3'])
     assert.equal((await priv.s.check(c)).decision, 'allow', c);
+  // #708 C (MC's condition): a merge whose PR could not be read (none is read on this board) and that pins a head in
+  // its own words is bound to that head as "not read", and such a row never runs under a program go. It ran before.
+  const pinned = await priv.s.check('gh pr merge 3 --match-head-commit 0123abc');
+  assert.equal(pinned.decision, 'deny', pinned.reason);
   const { namedRepos } = await import('../src/gate-service.mjs');
   assert.deepEqual(namedRepos(['gh', 'pr', 'merge', '3', '-tRacme/app'], ''), { names: [], unknown: false, any: false, admin: false });
   assert.deepEqual(namedRepos(['gh', 'pr', 'merge', '3', '-sRacme/app'], '').names, ['acme/app']);

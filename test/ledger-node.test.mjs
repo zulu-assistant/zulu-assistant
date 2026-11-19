@@ -1,5 +1,6 @@
 // Loads the optional cmux sidebar (system/cmux/sidebars/ledger-node.js, #416) with a stub runtime
 // and checks that it reads the selected workspace's task from the label the board writes.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

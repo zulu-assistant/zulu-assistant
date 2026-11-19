@@ -4,6 +4,7 @@
 // name ended with no output, and no output from a before-call hook means the call runs.
 // These tests feed the real scripts/gate-hook.sh the hook JSON as Claude Code sends it, in both
 // field orders, board down: every held call must come back denied, whatever its text says.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

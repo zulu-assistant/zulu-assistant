@@ -1,3 +1,4 @@
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -136,7 +137,8 @@ test('B: an address inside a flag\'s value does not name the repository; a landi
     assert.equal(d.unfiled, true, c); assert.match(d.reason, /no repo named/, c);
   }
   assert.deepEqual(await s.gates(), []); assert.equal(s.prCalls.length, 0);
-  const named = await s.codex('gh pr merge https://github.com/acme/app/pull/5 --squash');
+  // a Codex merge also pins the head in its own words (#627)
+  const named = await s.codex('gh pr merge https://github.com/acme/app/pull/5 --squash --match-head-commit a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
   assert.equal(named.unfiled, undefined);
   const [g] = await s.gates();
   assert.equal(g.ref?.head, 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'); assert.equal(s.prCalls.length, 1);   // read once, bound
@@ -149,7 +151,7 @@ test('B: an address inside a flag\'s value does not name the repository; a landi
 
 test('C: a Codex gh row whose repository is named says so', async () => {
   const s = await service();
-  await s.codex('gh pr merge 5 --squash -R acme/app');
+  await s.codex('gh pr merge 5 --squash -R acme/app --match-head-commit a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');   // pinned in its own words (#627)
   const [g] = await s.gates();
   assert.equal(g.folderUnread, true); assert.equal(g.repoNamed, true);
   const ctx = {}; vm.runInNewContext(await readFile(path.join(ROOT, 'public', 'decide.js'), 'utf8'), { globalThis: ctx });

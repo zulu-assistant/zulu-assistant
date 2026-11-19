@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — the cmux demo (src/demo-cmux.mjs, scripts/demo-agent.mjs; task #152)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile } from 'node:fs/promises';

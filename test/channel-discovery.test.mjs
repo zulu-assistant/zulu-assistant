@@ -1,5 +1,6 @@
 // Channel discovery (#365): visible-but-unrouted chat channels → one board task each.
 // Neutral fixtures; no network.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';

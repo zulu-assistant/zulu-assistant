@@ -3,6 +3,7 @@
 // the file and prints one line for the owner to type. These tests check the file, the line, and
 // the line's effect in a folder that stands in for the filesystem root (the same line with `sudo`
 // and the ownership options taken out, since a test is not an administrator).
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

@@ -1,14 +1,15 @@
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { realpathSync, existsSync } from 'node:fs';
 import vm from 'node:vm';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classify, scriptsRun, DEFAULT_POLICY, CHECKS } from '../src/gates.mjs';
-import { createGateService, namesPrRepo } from '../src/gate-service.mjs';
+import { createGateService, namesPrRepo, RESTATE_FORMS } from '../src/gate-service.mjs';
 import { createLedger } from '../src/tasks.mjs';
 import { hookInput } from '../scripts/gate-hook.mjs';
 import { OWNER } from '../src/config.mjs';
@@ -175,9 +176,14 @@ test('board: a Codex merge with no repo named is refused unfiled; named, it is r
   const plain = await s.codex('gh pr merge 12 --squash');
   assert.equal(plain.decision, 'deny'); assert.equal(plain.unfiled, true); assert.match(plain.reason, /no repo named \(name it: --repo owner\/name\)/);
   assert.equal(s.prCalls.length, 0); assert.deepEqual(await s.gates(), []);
-  const named = await s.codex('gh pr merge 12 --squash -R acme/app');
-  assert.equal(named.decision, 'allow'); assert.match(named.reason, /auto-approved under program go/);
+  // named, it is read; in a Codex session the merge must also pin the head in its own words (#627), program go or not
+  const head = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+  const unpinned = await s.codex('gh pr merge 12 --squash -R acme/app');
+  assert.equal(unpinned.unfiled, true); assert.ok(unpinned.reason.includes(`gh pr merge 12 --squash -R acme/app --match-head-commit ${head}`), unpinned.reason);
   assert.equal(s.prCalls.length, 1);
+  const named = await s.codex(`gh pr merge 12 --squash -R acme/app --match-head-commit ${head}`);
+  assert.equal(named.decision, 'allow'); assert.match(named.reason, /auto-approved under program go/); assert.equal(named.updatedCommand, undefined);
+  assert.equal(s.prCalls.length, 2);
   assert.equal(namesPrRepo({ tokens: ['gh', 'pr', 'merge', 'https://github.com/acme/app/pull/12'] }), true);
   assert.equal(namesPrRepo({ tokens: ['gh', 'pr', 'merge', '12'] }), false);
 });
@@ -195,6 +201,35 @@ test('board: one rule (#551): every held Codex call with an unread folder is ref
   const gs = await s.gates();
   assert.equal(gs.length, 3);
   assert.deepEqual(gs.map((g) => !!g.folderUnread), [false, true, false]);      // the gh row: its repo is named, so where it runs does not matter
+});
+
+test('#624: every form a refusal text names is in fact filed; an absolute script path alone is not offered', async () => {
+  // found on 390: the text offered an absolute script path, the agent restated with one and was refused again
+  const example = {
+    'cd /abs/path && …': 'cd /work/app && node tools/rename.mjs --commit',
+    'git -C /abs/path …': 'git -C /work/notes push --dry-run origin HEAD:refs/heads/main',
+    'gh … --repo owner/name': 'gh repo delete --yes --repo acme/old-app',
+  };
+  assert.deepEqual(Object.keys(example).sort(), [...RESTATE_FORMS].sort(), 'each named form has an example here');
+  const s = await service();
+  const listed = (reason, re) => {
+    const m = reason.match(re); assert.ok(m, `${re} in: ${reason}`);
+    return m[1].split(/, or |, /);
+  };
+  const push = await s.codex('git push --dry-run origin HEAD:refs/heads/main');      // the restate text
+  const script = await s.codex('node scripts/rename.mjs --commit');                   // the unreadRefusal line, inside it
+  for (const d of [push, script]) assert.equal(d.unfiled, true);
+  const named = [...listed(push.reason, /in the command itself \(([^)]*)\)/), ...listed(script.reason, /\(name it: ([^)]*)\)/)];
+  for (const f of named) assert.ok(RESTATE_FORMS.includes(f), `the text names a form the rule does not read: ${f}`);
+  for (const t of [push.reason, script.reason]) assert.doesNotMatch(t, /, an absolute script path|or an absolute script path/);
+  // each named form, restated: filed (a row), not refused again
+  for (const f of new Set(named)) { const d = await s.codex(example[f]); assert.equal(d.unfiled, undefined, `${f}: ${d.reason}`); }
+  // and the form the old text offered is still refused, as the one rule says (#551)
+  assert.equal((await s.codex('node /work/tools/rename.mjs --commit')).unfiled, true);
+  // the public docs name the same forms and no others (source repo: publish/public/docs; the public edition: docs/)
+  const docFile = [path.join(ROOT, 'publish', 'public', 'docs', 'GUARDRAILS.md'), path.join(ROOT, 'docs', 'GUARDRAILS.md')].find((f) => existsSync(f));
+  const doc = await readFile(docFile, 'utf8');
+  assert.doesNotMatch(doc, /absolute script path/);
 });
 
 test('the row: a Codex gate whose folder was not told says so in place of the folder', async () => {

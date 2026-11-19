@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs"
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import { OWNER } from '../src/config.mjs';
 import assert from 'node:assert/strict';
@@ -76,6 +77,20 @@ const CODEX_APPROVAL = [
   '  Press enter to confirm or esc to cancel',
 ].join('\n');
 
+// #624: a Codex pane left scrolled up, as read on a scratch Codex 0.162.1 pane (idle; the second after output
+// arrived while scrolled; the third as a live pane read it). Typed text + one Enter submitted in each.
+const CODEX_SCROLLED = [
+  '  33',
+  '  34',
+  '                                     ↓ Back to bottom · esc ',
+  '› Ask Codex to do anything',
+  '  gpt-5 high · ~/my-app',
+  '  enter/esc latest · ? shortcuts                                       ⚠ 3 warnings · f2 to view',
+].join('\n');
+const CODEX_SCROLLED_NEW = CODEX_SCROLLED.replace('↓ Back', 'New activity · ↓ Back').replace('enter/esc', 'New activity · enter/esc');
+const CODEX_SCROLLED_EARLIER = CODEX_SCROLLED.replace('enter/esc latest · ? shortcuts', 'New activity · Earlier messages available.  enter/esc latest');
+const CODEX_SCROLLED_DRAFT = CODEX_SCROLLED.replace('Ask Codex to do anything', 'half a thought').replace('enter/esc latest · ? shortcuts', 'esc latest');
+
 const SHELL = 'Last login: Sat Sep 26\nuser@mac probe % ';
 
 // ---- screen classification + routing rule --------------------------------------
@@ -90,6 +105,33 @@ test('classifyScreen recognises ready/busy/draft/dialog/shell', () => {
   assert.equal(classifyScreen(CODEX_READY).state, 'ready');
   assert.equal(classifyScreen(CODEX_APPROVAL).state, 'dialog');
   assert.equal(classifyScreen(SHELL).state, 'shell');
+});
+
+test('#624: a Codex pane left scrolled up is ready; a draft in it is still a draft', () => {
+  for (const s of [CODEX_SCROLLED, CODEX_SCROLLED_NEW, CODEX_SCROLLED_EARLIER]) assert.equal(classifyScreen(s).state, 'ready', s);
+  assert.deepEqual(classifyScreen(CODEX_SCROLLED_DRAFT), { state: 'draft', draft: 'half a thought', busy: false });
+  assert.equal(classifyScreen(CODEX_SCROLLED.replace('› Ask Codex to do anything\n', '')).state, 'unknown');   // no input line: not ready
+});
+
+test('#624 ordering: scrolled + a Working line is busy; an approval prompt with the scrolled footer under it is a dialog', () => {
+  const working = CODEX_SCROLLED.replace('  33\n  34\n', '• Working (6m 48s • esc to interrupt)\n  └ Tip: a tip.\n');
+  assert.equal(classifyScreen(working).state, 'busy');
+  const approval = [
+    '  $ node tools/report.mjs',
+    '› 1. Yes, proceed (y)',
+    '  2. Yes, and don\'t ask again for commands that start with `node tools/report.mjs` (p)',
+    '  3. No, and tell Codex what to do differently (esc)',
+    '  Press enter to confirm or esc to cancel',
+  ].join('\n');
+  const foot = '  New activity · Earlier messages available.  enter/esc latest   ⚠ 3 · f2';
+  assert.equal(classifyScreen(`${approval}\n \n${foot}`).state, 'dialog');
+  assert.equal(classifyScreen(`${approval}\n \n› Ask Codex to do anything\n \n${foot}`).state, 'dialog');
+});
+
+test('#624: the scrolled footer is read on the last line only, never quoted from the conversation above', () => {
+  const quoted = ['⏺ The footer reads enter/esc latest in that view.', '', '────────────', '❯ ', '────────────', '  Context left until auto-compact: 3%'].join('\n');
+  assert.equal(classifyScreen(quoted).state, 'unknown');
+  assert.equal(classifyScreen(['enter/esc latest', 'user@host dir % '].join('\n')).state, 'shell');
 });
 
 test('dialog words far up the conversation do not block delivery', () => {

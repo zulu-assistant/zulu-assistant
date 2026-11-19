@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — database-view cards (src/view-watch.mjs, task #289)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';

@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — install.sh --brain hook merge + publish public-only mapping
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mergeHooks } from '../scripts/merge-hooks.mjs';

@@ -25,8 +25,10 @@ That one command is the **light install**: a Node check, your config (`overlay/`
 LaunchAgent, and the board opens. Nothing else is installed: no Homebrew packages, nothing in your
 Claude settings, nothing paid. The board shows your live Claude Code sessions, read-only, and a
 *next steps* card. It shows no Guardrails card and, on a Mac without cmux, no cmux card: you asked
-for neither, and the next-steps card names both with their commands. Run it again any time: it
-adds what is missing and removes nothing.
+for neither, and the next-steps card names both with their commands. At the end it asks once whether to
+star the GitHub repository (default No; only in an interactive terminal with `gh` logged in). Where it
+cannot ask, its last line names the repository and says a star helps others find it, once (the demo
+ends the same way). Run it again any time: it adds what is missing and removes nothing.
 
 Everything described from §3 on is the **full install**, one flag more:
 
@@ -328,6 +330,12 @@ No script can do these. Do them early; some need an app relaunch.
 5. **Power chain (optional, recommended for an always-on Mac)**:
    - `sudo pmset autorestart 1` — power back on after a power cut;
    - System Settings → Users & Groups → automatically log in as your user.
+
+   Check auto-login again after a password change or a macOS update. It needs the user name
+   (`defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser`) and the stored password
+   (`ls -l /etc/kcpassword`, a root-owned file). macOS deletes that file when the password changes, and some
+   updates delete it too. With the name still set, the Mac then waits at the login screen; tick the setting
+   again and enter the password. Auto-login is not offered while FileVault is on.
 
    With the cmux login item and the KeepAlive LaunchAgents, this brings the fleet back unattended:
    power on → login → cmux restores workspaces and resumes Claude → the board starts → the

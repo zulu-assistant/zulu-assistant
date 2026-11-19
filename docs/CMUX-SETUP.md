@@ -157,7 +157,30 @@ know:
   per-workspace cooldown, 60 s pass throttle, 12 repairs per pass; one ticker line per repair.
   Manual pass: `node src/heal-restore.mjs`.
 
-Codex panes are not auto-resumed by cmux; run `codex resume` in each by hand.
+- **Relaunches that resume nothing.** Some cmux relaunches (an update relaunch, for one) run no
+  auto-resume at all and leave login shells. `src/heal-restore.mjs` restores such a workspace, Claude
+  or Codex, when its scrollback is an untouched login shell, cmux was launched between 90 seconds and
+  2 hours ago, and the workspace's newest session is restorable and not running: it runs
+  `cmux restore claude|codex <id>` and checks that the agent came back. A Codex session started with
+  `--profile` is left to its own launcher.
+  - **A session the hook maps no longer list.** The newest session comes from the agents' hook maps
+    (`~/.cmuxterm/claude-hook-sessions.json` and the Codex one). A session can drop out of them while
+    cmux still records how to resume it. Then the board takes cmux's own record for that workspace
+    (`resumeBinding` in cmux's session file), with the same checks: a well-formed id, not a `--profile`
+    launch, its session not running in any process, and never for a workspace whose directory entry
+    is closed.
+  - **Every pass-over is logged.** A login shell the board does not restore gets one line in
+    `logs/server.log` saying why (`fresh shell, not restored (…)`), once per workspace.
+  - **A resident left bare.** A registered resident whose pane is still a bare shell after the 2-hour
+    window is not restored by the board: it may have been left so on purpose. It gets ONE low task to
+    Mission Control per cmux launch, with the facts (hours bare, the last session written, the tasks it
+    owns, the restore line), and one ticker line a day that names that task. A board restart files no
+    second task, and a task closed or cancelled keeps that launch quiet. Restore it, or close its
+    directory entry.
+
+So Codex panes come back like Claude ones. A pane that is still a bare shell after that window (a
+profile session, or a cmux launched more than 2 hours before the board looked): run
+`codex resume <id>` in it, or `node src/heal-restore.mjs --dry-run` to see what the board would do.
 
 ## The cmux demo
 

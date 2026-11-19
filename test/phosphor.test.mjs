@@ -1,6 +1,7 @@
 // Loads the real cmux sidebar (system/cmux/sidebars/phosphor.js) with a stub
 // runtime to test its data logic: ATTENTION filter/sort, quiet folding, calm
 // line, and mode-specific keys. Rendering itself is cmux's (not testable here).
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

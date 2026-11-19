@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — publish manifest + scrub gate (Agent-OS Phase 3)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, mkdir, symlink } from 'node:fs/promises';

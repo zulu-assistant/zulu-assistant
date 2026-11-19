@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — zulu setup: scan parsers, local.json merge, setup card, doctor redaction
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';

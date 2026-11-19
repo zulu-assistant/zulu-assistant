@@ -4,17 +4,18 @@
 // pass | allow | deny. docs/GUARDRAILS.md.
 import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import os from 'node:os';
 import path from 'node:path';
-import { classify, parseCommand, commandCwd, shippedRulesMissing, isEnforced, wouldEnforce, headlessName, isHeadless, compileTriggers, triggerLines, cmdHash, describeToolCall, dryHash, scriptPath, shellQuote, repoSlug, globMatch, positionals, pushAddress, pushSlug, isShellTool, UNREAD_MARK, HASH_VERSION, DEFAULT_POLICY, OPAQUE, CHECKS, CHECK_MODES, MCP_UNLISTED, mcpParts, mcpAllowKey, checkMode, namesBoard, scriptsRun, scriptsEditedInCall, pushedRefs, pinnedMerge } from './gates.mjs';
+import { classify, parseCommand, commandCwd, shippedRulesMissing, isEnforced, wouldEnforce, headlessName, isHeadless, compileTriggers, triggerLines, cmdHash, describeToolCall, dryHash, scriptPath, shellQuote, repoSlug, globMatch, positionals, pushAddress, pushSlug, isShellTool, UNREAD_MARK, HASH_VERSION, DEFAULT_POLICY, OPAQUE, CHECKS, CHECK_MODES, MCP_UNLISTED, mcpParts, mcpAllowKey, checkMode, namesBoard, scriptsRun, scriptsEditedInCall, pushedRefs, pinnedMerge, ownPin } from './gates.mjs';
 import { hookIdentity } from './caller.mjs';
-import { createGateStore, auditRows, focusOf, runOut } from './gate-ledger.mjs';
+import { createGateStore, auditRows, focusOf, runOut, runUnseen, RUN_SEEN_MINUTES } from './gate-ledger.mjs';
 import { containsSecret, LIVE_STATUSES, activeProgramGo } from './tasks.mjs';
 import { createReceiptChain, chainMode } from './receipt-chain.mjs';
 import { rowContext, agentWords } from './row-context.mjs';
 import { SETTINGS } from './config.mjs';
 import { labelPrefix } from './upgrade.mjs';
+import { readChild, createBudget } from './gate-integrity.mjs';   // #636: the asynchronous reader (already on the gate-code list)
 
 // Which repo does a PR landing act on? gh takes it from a pull request URL, the repo flag, GH_REPO and
 // GH_HOST, with its own precedence. The board does not model that precedence: it COLLECTS every repo
@@ -123,6 +124,8 @@ export const RESTART_NOTE = 'recorded after restart; outcome unknown';
 /** The note on a gate the board found approved after its time (#498); and on one a grant was presented for by then. */
 export const RAN_OUT_NOTE = 'its time was over; marked by the board';
 export const LATE_GRANT_NOTE = 'a grant was presented after its time was over';
+/** #627: how long a call released to a Codex session waits for Codex's own permission request (it follows at once). */
+export const RELEASE_MS = 30_000;
 
 const MODES = ['enforce', 'observe', 'off'];
 const WHENS = ['pushProtected', 'outsideRepo', 'engineStart', 'installerWrite', 'gitConfigWrite', 'gitRefWrite', 'liveCheckout', 'boardProcess', 'gitDashC', 'ghApiWrite', 'ghPublicRepo', 'curlWrite', 'browserAction', 'uiScript', 'otherPane', 'paneCommand'];
@@ -186,6 +189,9 @@ const LATE = Symbol('the caller lookup did not answer in time');
 // a headless run, every session of a Guardrails-only install). Nobody wakes it after the decision,
 // so the text tells it to run the same command again. A registered agent's text is unchanged.
 export const cannotWake = (agent) => /^(unregistered|headless):/.test(String(agent || ''));
+// #624: the forms a Codex call with an unread folder may be restated in, and the only ones the texts name. Each is
+// read by the one rule (#551); a test files one call per form (test/gate-codex-folder.test.mjs).
+export const RESTATE_FORMS = Object.freeze(['cd /abs/path && …', 'git -C /abs/path …', 'gh … --repo owner/name']);
 export const denyText = {
   pending: (t, g, { noWake = false } = {}) => `GATE: ${g.label} — not run. Waiting on the owner, task #${t} (gate ${g.id})${g.previously ? `; it was approved before (${String(g.previously.at).slice(11, 16)}Z, ${g.previously.gate}) but expired unused, so the owner is asked again` : ''}. ${noWake
     ? `This session cannot be woken: run the same command again after the owner approves (an approval lasts ${Number(g.ttlMinutes) || 120} minutes). Do not change it or work around it.`
@@ -200,18 +206,91 @@ export const denyText = {
   focus: (n) => `GATE: you have ${n} live tasks and no focus, so this gate would land on the wrong one. Set it first: task.sh focus <N> — then retry.`,
   down: () => 'GATE: board unreachable — gated command not run (fail closed). Retry when the board is up.',
   // #548: nothing filed. A row the owner could approve here would be bound to nothing (no commit, no PR head, no script)
-  restate: (why) => `GATE: not run and not filed — ${why}. Codex does not tell the gate which folder a command runs in, so this call cannot be read or bound. Run it again with the folder or repo in the command itself (git -C /abs/path …, cd /abs/path && …, gh … --repo owner/name, an absolute script path); that call is read and, if it needs the owner, asked as usual.`,
+  // #624: name only forms the one rule reads (RESTATE_FORMS); an absolute script path alone is refused again (#551)
+  restate: (why) => `GATE: not run and not filed — ${why}. Codex does not tell the gate which folder a command runs in, so this call cannot be read or bound. Run it again with the folder or repo in the command itself (${RESTATE_FORMS.join(', ')}); only these forms are read, and an absolute script path alone is not. That call is read and, if it needs the owner, asked as usual.`,
   // #584 PR 2: gh takes the PR of the branch current when it runs, and the call changes branch first; the board can
   // only read the PR of the branch current now, so a row would name another PR than the one merged
   // #584 PR 2: an unbound row is asked as written; this says how the next one gets bound
   boundHint: () => 'Next time, run what comes first as its own call and the push or merge alone: the row then names the commit it sends.',
+  // #636: the same call from the same agent is being decided right now, and this one ran out of time waiting for it
+  sameCall: () => 'GATE: not run — the same call from you is being decided right now. Run it again in a moment, once: it is then answered from that decision (one row, or the release you were given).',
+  // #636: the reads the reading needs did not all answer in time: nothing is passed on a guess, and nothing is filed
+  readsRanOut: () => 'GATE: not run and not filed — the board could not read this call\'s repository in time (git did not answer within the check\'s 6 s). Run it again; if it keeps happening, tell Mission Control.',
   // #589: the grant binds the script's content as the board reads it now, before the call changes it
   editFirst: (edited) => `GATE: not run and not filed — this call changes ${edited.map((e) => `${e.script} (${e.by})`).join(', ')} and also runs it, so the content the owner would approve is not the content that runs. Make the change as its own call first, then run the script alone; that call is read and, if it needs the owner, asked as usual.`,
+  // #627: Codex cannot take the board's pin (no rewrite from a hook), so the merge must carry it in its own words
+  codexPin: (head, pinned, had = null) => `GATE: not run and not filed — ${had ? `this merge is pinned to ${String(had).slice(0, 7)}, but the PR's head is now ${String(head).slice(0, 7)}` : 'in a Codex session a merge must name the head it merges'}, so the owner would approve a head that is not the one merged. ${pinned
+    ? `Run exactly this instead (alone, as its own call): ${pinned}`
+    : `Run the merge alone, as its own call, ending in --match-head-commit ${head}`}; that call is filed for the owner, and GitHub refuses it if the head moves.`,
   namePr: () => 'GATE: not run and not filed — gh pr merge with no PR named, after a branch change in the same call: the board reads the PR of the branch current now, and the merge would take the PR of the branch the call switches to. Name the PR (gh pr merge <number> …) and run it again; that call is read and, if it needs the owner, asked as usual.',
+  // #708: what the approval refers to could not be read just now (GitHub or git did not answer in time). Unread is not
+  // moved: the approval stands and its grant is put back, and nothing is filed
+  headUnread: (t, g, what) => `GATE: not run and not filed — ${what} could not be read just now (it did not answer in time), so the board cannot confirm it is still what the owner approved. The approval (task #${t} gate ${g}) stands: run the same command again, once.`,
+  // #708: the hook stopped waiting before this check ended: nothing is written for an answer it never receives
+  late: () => 'stale request (the hook already gave up)',
 };
 
 export function createGateService({ root, ledger, policyFile, identifyWs, headlessWs = () => null, mcName = async () => 'mission-control', isPrivateRepo = ghIsPrivate, prInfo = ghPrInfo, recordEvent = async () => {}, afterTaskChange = async () => {}, ownerId = 'owner', home = os.homedir(), git = defaultGit, now = () => Date.now(), stateDir, board, receiptChain = 'on', surfaceUrl = async () => null }) {
   const store = createGateStore(stateDir || path.join(root, 'data', 'guardrails'));
+  // #636: `git` (the one given, or the default asynchronous reader) is read only through a check's cache: every
+  // helper below that calls git(cwd, args) gets the current check's answer, synchronously, or a recorded miss that
+  // toFixpoint reads and asks again. No child process runs on the board's loop, and outside a check git answers null.
+  const reads = new AsyncLocalStorage();
+  const readGit = git;
+  git = (cwd, args) => { const rc = reads.getStore(); return rc ? rc.sync(cwd, args) : null; };
+  const fixed = async (fn) => {
+    const rc = reads.getStore();
+    if (!rc) return fn();
+    const { out, passes } = await toFixpoint(rc, fn);
+    rc.passes = Math.max(rc.passes || 0, passes);
+    return out;
+  };
+  // #636: one decision at a time per call (agent + fingerprint): find, re-read and use of a grant, and the filing of a
+  // row, are one step for that call. The lock comes first, the store's own serial step inside it, never the other way.
+  const callLocks = new Map();
+  async function perCall(key, fn) {
+    const prev = callLocks.get(key) || Promise.resolve();
+    let release; const mine = new Promise((res) => { release = res; });
+    const tail = prev.then(() => mine);
+    callLocks.set(key, tail);
+    try {
+      const rc = reads.getStore();
+      let timer;
+      const got = await Promise.race([prev.then(() => true),
+        new Promise((res) => { timer = setTimeout(() => res(false), rc ? rc.budget.left() : CHECK_BUDGET_MS); timer.unref?.(); })]);
+      clearTimeout(timer);
+      if (!got) return { decision: 'deny', reason: denyText.sameCall() };            // held: never passed
+      return await fn();
+    } finally {
+      release();
+      if (callLocks.get(key) === tail) callLocks.delete(key);
+    }
+  }
+  // #627 (Codex): calls this board released in the last RELEASE_MS, each waiting for the permission request Codex
+  // makes right after the PreToolUse hook. In memory only (a restart forgets them: Codex then asks as usual), and
+  // single use. A record goes when its permission request is answered, when the call's own result arrives, or at 30 s.
+  const releases = [];
+  const pruneReleases = () => { for (let i = releases.length - 1; i >= 0; i--) if (now() - releases[i].at > RELEASE_MS) releases.splice(i, 1); };
+  function noteRelease(rec) { pruneReleases(); releases.push({ ...rec, at: now() }); }
+  /** The release this permission request is for: same agent (the board's own evidence of the session when it has it), session, turn, tool, command and folder. */
+  function takeRelease({ agent, seenAs, session, turn, tool, command, cwd }) {
+    pruneReleases();
+    const who = seenAs || agent;
+    const i = releases.findIndex((r) => r.agent === who && r.session && r.session === session && r.turn && r.turn === turn
+      && r.tool === tool && r.command === command && r.cwd === cwd);
+    return i < 0 ? null : releases.splice(i, 1)[0];
+  }
+  /** A Codex call's own result: drop its release record, and record on the gate it released that it ran (late when "no run seen" came first). */
+  async function noteRan(toolUseId) {
+    for (let i = releases.length - 1; i >= 0; i--) if (releases[i].toolUseId === toolUseId) releases.splice(i, 1);
+    for (const t of await ledger.list()) {
+      const g = (t.gates || []).find((x) => x.released_tool_use === toolUseId && x.status === 'executed' && !x.ran_at);
+      if (!g) continue;
+      const u = await ledger.update(t.id, { op: 'gate_event', actor: 'board', gate: g.id, event: 'ran' }, { gateSystem: true });
+      await afterTaskChange(u.task, u, 'board');
+      return;
+    }
+  }
   // Hash-chained receipts (src/receipt-chain.mjs): one line per gate change, learned from the ledger's
   // own writes; a grant runs only when the chain holds its approval. A ledger that cannot tell us
   // about its writes (a test double) means no chain.
@@ -403,7 +482,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
   // cwd null (#548: a Codex call whose folder was not told): gh would read the PR of whatever folder it runs in, so
   // only a PR whose repo the command or GH_REPO names is read
   const readPr = (cmd, cwd, input) => (!cwd && !input.ghRepo && !namesPrRepo(cmd) ? Promise.resolve(null)
-    : Promise.resolve(prInfo(cmd, cwd || root, { ghRepo: input.ghRepo || null })).catch(() => null));
+    : inBudget(Promise.resolve().then(() => prInfo(cmd, cwd || root, { ghRepo: input.ghRepo || null, budget: reads.getStore()?.budget || null })), reads.getStore()?.budget || null));
   /** #548: why a Codex call cannot be read or bound (its push, delete, gh or git reading, a merge with no repo named, a relative script), or null. */
   // One rule (#551, MC's second read of PR 147): every held Codex shell call whose folder is unread is refused, unless it
   // is a gh call that names its repository. Then the folder on a Codex row is always where the call runs.
@@ -423,33 +502,50 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     }
     if (marked) return r.why;
     if (r.cmd?.bin === 'gh') return `${r.label.toLowerCase()} with no repo named (name it: --repo owner/name)`;
-    return `${r.label.toLowerCase()}, in a folder Codex did not name (name it: cd /abs/path && …, git -C /abs/path …, or an absolute script path)`;
+    return `${r.label.toLowerCase()}, in a folder Codex did not name (name it: ${RESTATE_FORMS.slice(0, 2).join(', or ')})`;
   }
   /** The folder a held command's repository is read from: none when a Codex call's folder was not told to the hook (#548). */
   // …and none when a folder change in the call may not have applied (#551): which repository it acts on is not known
   const folderOf = (r, cwd) => (r.cmd?.folderUnread || r.cmd?.folderUnsure ? null : r.cmd?.repoCwd || r.cmd?.cwd || cwd);
   /**
    * An approved grant is about to be used: is the thing it refers to still what the owner approved?
-   * → { ok: true, updatedCommand?, note? } | { ok: false, why }
+   * → { ok: true, updatedCommand?, note? } | { ok: false, why, unread? }
+   * #708: `unread` = it could not be read (not answered in time). Only a head or ref that was READ and differs
+   * supersedes the approval; an unread one never releases the call either.
    */
   async function stillBound(g, r, { command, cwd, engine, tool, input }) {
     if (!g?.ref) return { ok: true };
     if (g.ref.kind === 'pr') {
       if (!g.ref.head) return { ok: true };
+      // #627 (Codex) and #708 (every engine): the command's own words pin a head, in the exact form the board itself
+      // writes (ownPin). The fingerprint is the approved one (the grant matched it), so the pin was in the call the
+      // owner approved. GitHub compares it when the call runs, atomically: that replaces the re-read here.
+      const own = ownPin(command);
+      if (own) return own.head.toLowerCase() === String(g.ref.head).toLowerCase()
+        ? { ok: true, note: `pinned by its own words to head ${sha7(g.ref.head)}` }
+        : { ok: false, why: `its pin names ${sha7(own.head)}, and the head you approved is ${sha7(g.ref.head)}` };
+      // a row bound only by the command's pin (#708 C) is released only by that pin: never on a read, never on the board's pin
+      if (g.ref.pinnedOnly) return { ok: false, why: `the head ${sha7(g.ref.head)} was bound from the command's own pin, and this call does not carry it` };
       // the command alone on its line: let GitHub compare, atomically, by pinning the head the owner saw
       // (only when the pinned text is still one command whose own words carry the pin; otherwise the head is read again)
       const pin = engine === 'claude' && tool === 'Bash' && typeof input.command === 'string' ? pinnedMerge(command, g.ref.head) : null;
       if (pin) return { ok: true, updatedCommand: pin, note: `pinned to head ${sha7(g.ref.head)}` };
-      const s = r.cmd ? await readPr(r.cmd, folderOf(r, cwd), input) : null;
-      if (!s?.headOid) return { ok: false, why: `the PR head could not be read again (approved at ${sha7(g.ref.head)})` };
+      // #708: one more read when the first did not answer and the check has the time for it
+      let s = r.cmd ? await readPr(r.cmd, folderOf(r, cwd), input) : null;
+      if (r.cmd && !s?.headOid && (reads.getStore()?.budget.left() ?? 0) >= RETRY_MIN_MS) s = await readPr(r.cmd, folderOf(r, cwd), input);
+      if (!s?.headOid) return { ok: false, unread: true, why: `the PR head could not be read again (approved at ${sha7(g.ref.head)})` };
       return s.headOid === g.ref.head ? { ok: true, note: `head ${sha7(g.ref.head)} unchanged` } : { ok: false, why: `the PR head moved ${sha7(g.ref.head)} → ${sha7(s.headOid)} after you approved` };
     }
     if (g.ref.kind === 'push') {
       // the refs this run would send must be the ones the approval recorded, each at the same commit
       const names = String(g.ref.name || '').split(' ').filter(Boolean);
-      const sends = r.cmd && folderOf(r, cwd) ? pushSends(r.cmd, folderOf(r, cwd)) : { unbound: 'unread' };
+      const sends = r.cmd && folderOf(r, cwd) ? await fixed(() => pushSends(r.cmd, folderOf(r, cwd))) : { unbound: 'unread' };
+      // #708: refs that could not be read (a read ran out) are unread; refs read as others than the approved ones are a change
+      const ranOut = () => Boolean(reads.getStore()?.budget.ranOut);
+      if (sends.unbound && ranOut()) return { ok: false, unread: true, why: `the refs this push sends could not be read (approved: ${g.ref.name})` };
       if (sends.unbound || sends.refs.join(' ') !== names.join(' ')) return { ok: false, why: `the refs this push sends could not be read as the approved ones (${g.ref.name})` };
-      const b = pushBinding(names, folderOf(r, cwd));
+      const b = await fixed(() => pushBinding(names, folderOf(r, cwd)));
+      if (!b && ranOut()) return { ok: false, unread: true, why: `the pushed ref ${g.ref.name} could not be read again (approved at ${sha7(g.ref.head)})` };
       if (!b) return { ok: false, why: `the pushed ref ${g.ref.name} could not be read again (approved at ${sha7(g.ref.head)})` };
       return b.head === g.ref.head ? { ok: true } : { ok: false, why: names.length > 1 ? `one of ${names.join(', ')} moved after you approved (was ${g.ref.shown || sha7(g.ref.head)}, now ${b.shown})` : `${g.ref.name} moved ${sha7(g.ref.head)} → ${sha7(b.head)} after you approved` };
     }
@@ -536,7 +632,11 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
   async function check(input, { evidence = null, names = false, noteBudgetMs = undefined } = {}) {
     const budgetMs = noteBudgetMs || NOTE_BUDGET_MS;
     const who = { agent: null, declared: null, force: false, late: false };
-    const r = await decide(input, { evidence, names, who, budgetMs });
+    // #636: the check's own reads: one budget for all of them, inside the hook's 8 s wait
+    const rc = createReadCache(readGit, createBudget(CHECK_BUDGET_MS));
+    const r = await reads.run(rc, () => decide(input, { evidence, names, who, budgetMs }));
+    if (rc.passes > 3) console.log(`${new Date(now()).toISOString()} [guardrails] classify took ${rc.passes} passes (${normTool(input.tool)})`);
+    readings.passesMax = Math.max(readings.passesMax || 0, rc.passes || 0);
     const raw = Array.isArray(input.command) ? input.command.join(' ') : String(input.command ?? input.filePath ?? '');
     // decide() fills `who`; a request it turned away before it looked (a stale one) is named as declared
     const declared = who.declared || await whoIs(input, await loadPolicy().catch(() => null), input.cwd || root).catch(() => `unregistered:${path.basename(input.cwd || root)}`);
@@ -604,16 +704,32 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       }
       if (who) { who.agent = agent; who.force = force; }
     };
+    // #627 (Codex): the released call's own result. Its release record goes (nothing left to answer for it), and the
+    // gate records that it ran. The usual post handling (dry-run bookkeeping) follows.
+    if (input.event === 'post' && engine === 'codex' && input.toolUseId) await noteRan(String(input.toolUseId)).catch(() => {});
+    // #627 (Codex): Codex asks before a call leaves its sandbox, after the PreToolUse hook. `allow` only for the call
+    // this board has just released; anything else is a pass, and the hook prints nothing (Codex asks as usual).
+    // Never a deny: a held call was denied at PreToolUse already.
+    if (input.event === 'permission') {
+      if (engine !== 'codex') return { decision: 'pass' };
+      const ev = typeof evidence === 'function' ? await within(evidence, budgetMs) : null;
+      const seenAs = ev && ev !== LATE && ev.kind === 'agent' ? hookIdentity(ev, { declared, folder: path.basename(cwd), headlessWs: (ws) => headlessName(headlessWs(ws), p) }).agent : null;
+      const rec = takeRelease({ agent: declared, seenAs, session: input.session, turn: input.turn, tool, command, cwd });
+      if (!rec) return { decision: 'pass' };
+      recordEvent('sys', `guardrails: gate ${rec.gate} on #${rec.task}: Codex's own prompt answered by the release (runs now)`).catch(() => {});
+      return { decision: 'allow', reason: `released by the owner's approval (task #${rec.task} gate ${rec.gate})`, task: rec.task, gate: rec.gate };
+    }
     if (input.event !== 'post' && mcpParts(tool)) seen ??= await store.mcpSeen();
     // the allow file is looked at again at most once a minute, whatever the call
     if (now() - allowCheckedAt > 60_000) { allowCheckedAt = now(); await syncMcpAllow().catch(() => {}); }
     const ctx = ctxFor(cwd);
-    let r = classify(call, p, ctx);
+    // #636: classify stays synchronous (the hook runs it too); its git reads come from the check's cache, to a fixpoint
+    let r = await fixed(() => classify(call, p, ctx));
     // a rule that leaves Mission Control out (paneReach) held or would hold this call, and the caller says it is
     // Mission Control: that is a privilege, so the name is settled from the session behind the call first
     if (input.event !== 'post' && (r.rule?.exceptMissionControl || r.wouldHold?.exceptMissionControl) && declared === await mcName()) {
       await settle();
-      if (!force && agent === declared) r = classify(call, p, { ...ctx, missionControl: true });
+      if (!force && agent === declared) r = await fixed(() => classify(call, p, { ...ctx, missionControl: true }));
     }
     if (input.event !== 'post' && mcpParts(tool)) await noteMcp(tool, input, agent).catch(() => {});
 
@@ -633,6 +749,20 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       }
     }
     const mode = MODES.includes(p.mode) ? p.mode : 'enforce';
+    // #636: a reading made while git reads ran out is a guess. For an ENFORCED caller a call it would pass is held
+    // instead, unfiled (adds a hold, never frees one; a timed-out synchronous read used to answer null here and the
+    // call could pass). Mode off, observe, or a caller not enforced: it passes as before, with one observed line
+    // (MC's read of b89c951: the hold sat before this decision and refused callers the board only observes).
+    if (input.event !== 'post' && r.verdict === 'clear' && reads.getStore()?.budget.ranOut && mode !== 'off') {
+      await settle();
+      const text = redact(command) ?? '[withheld: the command contains a secret]';
+      if (mode !== 'enforce' || !(force || isEnforced(p, agent, { registered: !agent.startsWith('unregistered:') }))) {
+        await store.observe({ at: new Date(now()).toISOString(), agent, engine, cls: 'unread', why: 'git did not answer in time: the reading may be incomplete', command: text, cwd, tool }).catch(() => {});
+        return { decision: 'pass', observed: true };
+      }
+      recordEvent('sys', `guardrails: ${agent} call held unfiled (git did not answer in time): ${String(text).replace(/\s+/g, ' ').slice(0, 80)}`).catch(() => {});
+      return { decision: 'deny', reason: denyText.readsRanOut(), unfiled: true };
+    }
     // a 1.3 check in observe: the call passes exactly as before, and the reading says what would hold it
     if (input.event !== 'post' && r.verdict === 'clear' && r.wouldHold && mode !== 'off') {
       await settle();
@@ -685,6 +815,8 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       return { decision: 'deny', reason: denyText.editFirst(edited), unfiled: true };
     }
     const hash = cmdHash({ engine, cwd, tool, command, filePath: call.filePath || '', toolInput, scripts: await scriptHashes(tool, command, cwd, call.folderUnread === true) });
+    // #636: from here to the answer, one decision at a time for this call (two identical calls at once: one release, one row)
+    return perCall(`${agent}\0${hash}`, async () => {
     // 1. an approved grant for exactly this call: consume it, let it run once
     const grant = await store.redeem({ cmdHash: hash, agent, now: now() });
     if (grant && !grant.expired && chain.mode !== 'off') {
@@ -721,11 +853,30 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
         if (approved?.status === 'approved') await ledger.update(grant.task, { op: 'gate_event', actor: 'board', gate: grant.gate, event: 'expired', note: LATE_GRANT_NOTE }, { gateSystem: true }).catch(() => {});
       }
     }
+    // #708: the hook stops waiting at its deadline. Past it, nothing is written for this call (no release, no
+    // superseding, no row): the agent was already told no. A grant this check took is put back first.
+    const late = () => Number(input.deadline) > 0 && now() > Number(input.deadline);
+    const giveBack = async () => (grant?.id && !grant.expired && !releases.some((x) => x.task === grant.task && x.gate === grant.gate)
+      ? store.unredeem({ id: grant.id, usedAt: grant.usedAt }).catch(() => false) : false);
     if (grant && !grant.expired && !stale) {
       // …if what it refers to is still what the owner approved (the PR head, the pushed ref)
       const bound = await stillBound(approved, r, { command, cwd, engine, tool, input });
+      if (late()) {
+        await giveBack();
+        return { decision: 'deny', reason: denyText.late(), stale: true };
+      }
+      // #708: unread is not moved. The approval stands, its grant is put back (same check, inside this call's lock,
+      // expiry untouched, never once released), and nothing is filed; the agent runs the same call again
+      if (!bound.ok && bound.unread) {
+        const back = await giveBack();
+        recordEvent('sys', `guardrails: gate ${grant.gate} on #${grant.task} not released to ${agent}: ${bound.why}; the approval stands${back ? '' : ' (its grant could not be put back)'}`).catch(() => {});
+        return { decision: 'deny', reason: denyText.headUnread(grant.task, grant.gate, approved.ref?.kind === 'push' ? `the pushed ref ${approved.ref.name}` : 'the PR head'), unfiled: true, task: grant.task, gate: grant.gate };
+      }
       if (bound.ok) {
-        const u = await ledger.update(grant.task, { op: 'gate_event', actor: 'board', gate: grant.gate, event: 'executed', ...(bound.note ? { note: bound.note } : {}) }, { gateSystem: true });
+        const codexUse = engine === 'codex' && input.toolUseId ? String(input.toolUseId) : null;
+        const u = await ledger.update(grant.task, { op: 'gate_event', actor: 'board', gate: grant.gate, event: 'executed', ...(bound.note ? { note: bound.note } : {}), ...(codexUse ? { toolUse: codexUse } : {}) }, { gateSystem: true });
+        // #627: Codex asks its own question next; this record answers it for this call only (Part 1)
+        if (engine === 'codex' && isShellTool(tool)) noteRelease({ agent, session: input.session || null, turn: input.turn || null, tool, command, cwd, toolUseId: codexUse, task: grant.task, gate: grant.gate });
         recordEvent('sys', `guardrails: gate ${grant.gate} on #${grant.task} released to ${agent} to run once`).catch(() => {});
         await afterTaskChange(u.task, u, 'board');
         return { decision: 'allow', reason: `approved by the owner (task #${grant.task} gate ${grant.gate}) — runs once${bound.note ? `, ${bound.note}` : ''}`, task: grant.task, gate: grant.gate,
@@ -739,6 +890,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     if (grant?.expired) await ledger.update(grant.task, { op: 'gate_event', actor: 'board', gate: grant.gate, event: 'expired' }, { gateSystem: true }).catch(() => {});
 
     // 2. the same call is already waiting, or was declined
+    if (late()) return { decision: 'deny', reason: denyText.late(), stale: true };   // #708: nothing written past the hook's deadline
     const prior = await findByHash(agent, hash);
     // the owner already approved exactly this call once, but it expired unused: ask again (an approval
     // is of the call at that time — never re-armed), and say so on the row and in the notices
@@ -757,15 +909,10 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       return { decision: 'deny', reason: denyText.declined(prior.t.id, prior.g), task: prior.t.id, gate: prior.g.id };
     }
 
-    // 3. which task the receipt lands on (condition C)
-    const short = String(shown).replace(/\s+/g, ' ').slice(0, 80);
-    const where = await resolveTask(agent, r.label, short);
-    if (where.needsFocus) return { decision: 'deny', reason: denyText.focus(where.needsFocus) };
-
     const base = { cls: r.cls, label: r.label, ...(r.check ? { check: r.check } : {}), why: redact(r.why) ?? '[withheld]', command: shown, commandRedacted: shown !== text, bin: r.cmd?.bin || null,
       cwd, ...(r.cmd?.folderUnread ? { folderUnread: true, ...(r.cmd.bin === 'gh' && (namesGhRepo(r.cmd) || input.ghRepo) ? { repoNamed: true } : {}) } : {}), ...(r.cmd?.folderUnsure ? { folderUnsure: r.cmd.folderUnsure } : {}), tool, engine, agent, session: input.session || null, cmdHash: hash, hashVersion: HASH_VERSION, ttlMinutes: r.ttlMinutes,
       // row context: chips from the class and the policy's lists (never from the agent), and the agent's own words, labelled
-      context: rowContext({ cls: r.cls, slug: r.cmd?.cdUnknown ? null : targetSlug(r, folderOf(r, cwd), command, input.ghRepo || null, p.lists), lists: p.lists }),
+      context: rowContext({ cls: r.cls, slug: r.cmd?.cdUnknown ? null : await fixed(() => targetSlug(r, folderOf(r, cwd), command, input.ghRepo || null, p.lists)), lists: p.lists }),
       agentReason: agentWords(input.description) };   // a shell call's description only: an MCP tool's `description` is an argument, not a reason
     if (earlier) {
       base.previously = earlier;
@@ -782,22 +929,50 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       if (s && first.length) base.why = `${base.why} · ${notBound('this merge is not bound to a head', first)}`;
       // the approval is of this PR at this head
       if (s?.headOid && !first.length) base.ref = { kind: 'pr', repo: s.repo || null, number: s.number, head: s.headOid };
+      // #708 C: the PR could not be read, and the command pins a head in its own words (the exact form the board writes):
+      // the row is bound to that head, says it was not read, carries no chips that need a read repository, and is never
+      // run under a program go. Its release takes only the command's own pin (stillBound), never a read
+      const own = !s?.headOid && !first.length ? ownPin(command) : null;
+      if (own) {
+        const n = positionals(r.cmd)[positionals(r.cmd).indexOf('merge') + 1];
+        base.ref = { kind: 'pr', repo: null, number: /^\d+$/.test(String(n || '')) ? Number(n) : null, head: own.head, pinnedOnly: true };
+        base.why = `${base.why} · head ${sha7(own.head)} (pinned by the command; not read)`;
+        base.context = rowContext({ cls: r.cls, slug: null, lists: p.lists });
+      }
     }
-    // a push: the approval is of the commit the pushed ref points at now
+    // #627: a Codex hook cannot add the pin to a merge, so the agent's own words must pin the head read now. Without
+    // that pin, or with one that names a head the PR has moved from, nothing is filed: no row is approved for a head
+    // that will not be the one merged. The text gives the exact command to run instead.
+    if (engine === 'codex' && base.ref?.kind === 'pr') {
+      const own = ownPin(command);
+      if (!own || own.head.toLowerCase() !== String(base.ref.head).toLowerCase()) {
+        const pinned = pinnedMerge(own ? own.bare : command, base.ref.head);
+        recordEvent('sys', `guardrails: ${agent} merge refused unfiled (Codex: ${own ? `pin names ${sha7(own.head)}, head is ${sha7(base.ref.head)}` : 'no pin of its own'}): ${String(shown).slice(0, 80)}`).catch(() => {});
+        return { decision: 'deny', reason: denyText.codexPin(base.ref.head, pinned, own?.head || null), unfiled: true };
+      }
+    }
+    // a push: the approval is of the commit the pushed ref points at now (#708: read before the task is resolved, so a
+    // check that runs past the hook's deadline here makes no task)
     const pushFirst = (r.cmd?.priorMovers || []).filter((m) => m !== 'git push');
     if (r.cls === 'push' && r.cmd?.bin === 'git' && (r.cmd.folderUnread || r.cmd.folderUnsure)) base.why = `${base.why} · not bound to a commit (repository not read)`;
     // #584 PR 2: a command before it in the same call may move what it sends (a switch, a commit, a script): the commit
     // read now is not the one sent, so the row shows none, says what runs first, and a redeem compares nothing (one row)
     else if (r.cls === 'push' && r.cmd?.bin === 'git' && pushFirst.length) base.why = `${base.why} · ${notBound('this push is not bound to a commit', pushFirst)}`;
     else if (r.cls === 'push' && r.cmd?.bin === 'git') {
-      const sends = pushSends(r.cmd, folderOf(r, cwd));
-      const b = sends.refs?.length ? pushBinding(sends.refs, folderOf(r, cwd)) : null;
+      const sends = await fixed(() => pushSends(r.cmd, folderOf(r, cwd)));
+      const b = sends.refs?.length ? await fixed(() => pushBinding(sends.refs, folderOf(r, cwd))) : null;
       if (b) { base.ref = { kind: 'push', name: sends.refs.join(' '), head: b.head }; base.why = `${base.why} · ${b.shown}`; }
       // a form that names no fixed refs, or a ref that cannot be read: the row says so instead of showing a commit
       else if (sends.unbound) base.why = `${base.why} · this push is not bound to a commit (${sends.unbound})`;
       else if (sends.refs?.length) base.why = `${base.why} · this push is not bound to a commit (${sends.refs.join(', ')} could not be read)`;
     }
     if (moved) base.why = `${base.why} · ${moved}`;
+    // 3. which task the receipt lands on (condition C). After the last refusal that files nothing (#674): for a caller
+    // with no live task this makes one, and a call refused unfiled must not leave an empty task behind.
+    const short = String(shown).replace(/\s+/g, ' ').slice(0, 80);
+    if (late()) return { decision: 'deny', reason: denyText.late(), stale: true };   // #708: the reads above may have taken the rest of the wait
+    const where = await resolveTask(agent, r.label, short);
+    if (where.needsFocus) return { decision: 'deny', reason: denyText.focus(where.needsFocus) };
 
     // 4. dry run first (from the task's own history)
     // #598: the dry form is held by another class: none was asked for and none ran, and the record says so
@@ -824,11 +999,16 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       const t = await ledger.get(where.id);
       const go = activeProgramGo(t);
       // the repo is the one the command runs in (cd / git -C), not the hook's session folder
-      const why = !go ? 'no program go' : r.cmd?.cdUnknown ? 'the command runs in a folder the gate cannot resolve' : await standingBlocker(r, folderOf(r, cwd), p, command, { toolInput, ghRepo: input.ghRepo || null });
+      const why = !go ? 'no program go' : r.cmd?.cdUnknown ? 'the command runs in a folder the gate cannot resolve'
+        : base.ref?.pinnedOnly ? 'the PR head was not read (bound only by the command\'s own pin)' : await standingBlocker(r, folderOf(r, cwd), p, command, { toolInput, ghRepo: input.ghRepo || null });
       if (go && !why) {
+        if (late()) return { decision: 'deny', reason: denyText.late(), stale: true };   // #708: no auto-run recorded that the hook never hears of
         const a = await ledger.update(where.id, { op: 'gate_request', actor: 'board', gate: { ...base, auto: { go: go.id, owner: ownerId } } }, { gateSystem: true });
         const g = a.task.gates[a.task.gates.length - 1];
-        const u = await ledger.update(where.id, { op: 'gate_event', actor: 'board', gate: g.id, event: 'executed' }, { gateSystem: true });
+        const codexUse = engine === 'codex' && input.toolUseId ? String(input.toolUseId) : null;
+        const u = await ledger.update(where.id, { op: 'gate_event', actor: 'board', gate: g.id, event: 'executed', ...(codexUse ? { toolUse: codexUse } : {}) }, { gateSystem: true });
+        // #627: as for an approval, Codex's own question that follows is answered for this call only
+        if (engine === 'codex' && isShellTool(tool)) noteRelease({ agent, session: input.session || null, turn: input.turn || null, tool, command, cwd, toolUseId: codexUse, task: where.id, gate: g.id });
         recordEvent('sys', `guardrails: ${agent} ${r.cls} on #${where.id} auto-approved under program go ${go.id} (gate ${g.id})`).catch(() => {});
         await afterTaskChange(u.task, { ...u, events: [...(a.events || []), ...(u.events || [])] }, 'board');
         // a merge under the go is pinned to the head just read, when the command is alone on its line
@@ -839,6 +1019,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     }
 
     // 6. file the gate and wait on the owner
+    if (late()) return { decision: 'deny', reason: denyText.late(), stale: true };   // #708: the standing check reads too
     const u = await ledger.update(where.id, { op: 'gate_request', actor: 'board', gate: base }, { gateSystem: true });
     const g = u.task.gates[u.task.gates.length - 1];
     await afterTaskChange(u.task, u, 'board');
@@ -846,6 +1027,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     const hint = (/not under the program go: the landing is not the whole command/.test(base.why || '') ? ` ${ALONE_HINT}` : '')
       + (/is not bound to a (commit|head) \(run before it in the same call/.test(base.why || '') ? ` ${denyText.boundHint()}` : '');
     return { decision: 'deny', reason: denyText.pending(where.id, g, { noWake: cannotWake(agent) }) + hint, task: where.id, gate: g.id };
+    });
   }
 
   /**
@@ -909,12 +1091,13 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     if (!landingAlone(command)) return NOT_ALONE;
     // the admin flag lands a pull request that does not meet the repo's requirements: never by itself
     if (namedRepos(r.cmd?.tokens || [], command).admin) return 'the admin flag is set (it lands a pull request that does not meet the repo\'s requirements)';
-    const slug = targetSlug(r, cwd, command, ghRepo);
+    const slug = await fixed(() => targetSlug(r, cwd, command, ghRepo));
     if (!slug) return 'the target repo is unknown';
     const inList = (n) => (p.lists?.[n] || []).some((g) => globMatch(String(g).toLowerCase(), slug.toLowerCase()));
     if (inList('publicRemotes')) return `${slug} is public`;
     if (inList('deployOnPush')) return `${slug} deploys on push`;
-    if ((await isPrivateRepo(slug)) !== true) return `${slug} is not confirmed private`;
+    const budget = reads.getStore()?.budget || null;
+    if ((await inBudget(Promise.resolve().then(() => isPrivateRepo(slug, { budget })), budget)) !== true) return `${slug} is not confirmed private`;
     return '';
   }
 
@@ -1010,9 +1193,18 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
    * the approval was over already, and this only records it. → { checked, expired: ['#N gK'] }
    */
   async function expireRunOut() {
-    const expired = []; let checked = 0;
+    const expired = []; const unseen = []; let checked = 0;
     for (const t of await ledger.list()) {
       for (const g of t.gates || []) {
+        // #627: a call released with its id (Codex) that has not reported back: "no run seen", once, with a cc to Mission Control
+        if (runUnseen(g, now())) {
+          try {
+            const u = await ledger.update(t.id, { op: 'gate_event', actor: 'board', gate: g.id, event: 'not_seen' }, { gateSystem: true });
+            unseen.push(`#${t.id} ${g.id}`);
+            await afterTaskChange(u.task, u, 'board');
+          } catch (e) { console.error(`[guardrails] run not seen #${t.id} ${g.id}: ${e.message}`); }
+          continue;
+        }
         if (g.status !== 'approved') continue;
         checked += 1;
         if (!runOut(g, now())) continue;
@@ -1027,7 +1219,8 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
       console.log(`${new Date(now()).toISOString()} [guardrails] ${expired.length} approval(s) ran out unused, now marked expired: ${expired.join(', ')}`);
       recordEvent('sys', `guardrails: ${expired.length} approval(s) ran out unused, now marked expired (${shown})`).catch(() => {});
     }
-    return { checked, expired };
+    if (unseen.length) console.log(`${new Date(now()).toISOString()} [guardrails] released, no run seen in ${RUN_SEEN_MINUTES} min: ${unseen.join(', ')}`);
+    return { checked, expired, ...(unseen.length ? { unseen } : {}) };
   }
 
   async function audit(taskId) {
@@ -1040,7 +1233,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     return chain.verify(await ledger.list(), { only: taskId });
   }
 
-  return { check, callerReadings: () => ({ ...readings }), verifyTriggers, verifyMcpAllow, afterDecision, card, audit, verifyChain, chain, reconcile, expireRunOut, loadPolicy, store, autoFocus, setFocus: (a, id) => store.setFocus(a, id, { explicit: true }), policy: () => policy, policyError: () => policyError };
+  return { check, callerReadings: () => ({ ...readings }), locksHeld: () => callLocks.size, verifyTriggers, verifyMcpAllow, afterDecision, card, audit, verifyChain, chain, reconcile, expireRunOut, loadPolicy, store, autoFocus, setFocus: (a, id) => store.setFocus(a, id, { explicit: true }), policy: () => policy, policyError: () => policyError };
 }
 
 /** Claude: Bash/Read/Edit/Write/mcp__*; Codex shells arrive as shell/exec_command/local_shell. */
@@ -1065,7 +1258,9 @@ export function namesGhRepo(cmd) {
   if (pos[0] === 'api') return /^\/?repos\/[^/\s]+\/[^/\s]+/.test(pos[1] || '');
   return pos[0] === 'repo' && /^[^/\s-][^/\s]*\/[^/\s]+$/.test(pos[2] || '');
 }
-async function ghPrInfo(cmd, cwd, { ghRepo = null } = {}) {
+// #636: every read of a check is asynchronous (src/gate-integrity.mjs readChild) under the check's one budget; the board's
+// event loop is never held by a child process. A read that runs out answers as a failed one did: null, an error.
+async function ghPrInfo(cmd, cwd, { ghRepo = null, budget = null } = {}) {
   const toks = cmd.tokens || [];
   const ri = toks.findIndex((x) => x === '-R' || x === '--repo');
   // the repo the command names, else the one gh would take from the agent's GH_REPO (the hook passes it on)
@@ -1073,25 +1268,85 @@ async function ghPrInfo(cmd, cwd, { ghRepo = null } = {}) {
   const pos = positionals(cmd);
   const target = pos[pos.indexOf('merge') + 1];        // number, URL or branch; none = the current branch's PR
   const args = ['pr', 'view', ...(target ? [target] : []), ...(repo ? ['-R', repo] : []), '--json', 'number,title,headRefName,baseRefName,headRefOid,url'];
-  const out = execFileSync('gh', args, { cwd, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
-  const j = JSON.parse(out);
+  const r = await readChild('gh', args, { cwd, limitMs: 5000, budget, label: 'gate check' });
+  if (r.code !== 0) throw new Error(r.ranOut ? 'gh pr view ran out' : 'gh pr view failed');
+  const j = JSON.parse(r.out);
   return { number: j.number, title: String(j.title || '').slice(0, 120), head: j.headRefName, base: j.baseRefName, headOid: j.headRefOid || null, repo: repoSlug(j.url?.replace(/\/pull\/\d+$/, '')) };
 }
 
 // GitHub says whether a repo is private (gh, the owner's login); cached 6h; any failure → not confirmed
+// (a read that ran out is not cached: it said nothing about the repo)
 const privCache = new Map();
-async function ghIsPrivate(slug) {
+async function ghIsPrivate(slug, { budget = null } = {}) {
   const hit = privCache.get(slug);
   if (hit && Date.now() - hit.at < 6 * 3600e3) return hit.v;
-  let v = null;
-  try { v = execFileSync('gh', ['api', `repos/${slug}`, '--jq', '.private'], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() === 'true'; } catch { v = null; }
-  privCache.set(slug, { v, at: Date.now() });
+  const r = await readChild('gh', ['api', `repos/${slug}`, '--jq', '.private'], { limitMs: 8000, budget, label: 'gate check' });
+  const v = r.code === 0 ? r.out.trim() === 'true' : null;
+  if (!r.ranOut) privCache.set(slug, { v, at: Date.now() });
   return v;
 }
 
-function defaultGit(cwd, args) {
-  try { return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; }
-  catch { return null; }
+async function defaultGit(cwd, args, budget = null) {
+  const r = await readChild('git', ['-C', cwd, ...args], { limitMs: 1500, budget, label: 'gate check' });
+  return r.code === 0 ? (r.out.trim() || null) : null;
+}
+
+export const CHECK_BUDGET_MS = 6000;      // #636: every child read of one gate check together, inside the hook's 8 s wait
+export const CHECK_MAX_READS = 4;         // #636: reads of one check running at once (the board-wide cap is readChild's)
+export const MAX_PASSES = 6;              // #636: classify runs to a fixpoint over its git reads; past this, unread (held)
+export const RETRY_MIN_MS = 2000;         // #708: a PR head read that did not answer at a release is tried once more when this much budget is left
+// the git environment a read uses is the board's own: part of the cache key, so a cache never answers for another
+const GIT_ENV_KEY = createHash('sha256').update(Object.keys(process.env).filter((k) => k.startsWith('GIT_')).sort().map((k) => `${k}=${process.env[k]}`).join('\n')).digest('hex').slice(0, 16);
+
+/**
+ * #636: one check's reads. `sync(cwd, args)` answers from what was read, and records a read not yet asked (answering
+ * null for that pass); `fill()` reads the recorded ones asynchronously, a few at a time, under the check's budget. An
+ * answered "no" (null) is an answer like any other; only a read never asked is a miss.
+ */
+export function createReadCache(read, budget) {
+  const answers = new Map(); const misses = new Map();
+  const key = (cwd, args) => `${cwd}\0${JSON.stringify(args)}\0${GIT_ENV_KEY}`;
+  return {
+    budget,
+    sync(cwd, args) {
+      const k = key(cwd, args);
+      if (answers.has(k)) return answers.get(k);
+      if (!misses.has(k)) misses.set(k, [cwd, args]);
+      return null;
+    },
+    pending: () => misses.size,
+    async fill() {
+      const todo = [...misses.entries()]; misses.clear();
+      let i = 0;
+      const worker = async () => { while (i < todo.length) { const [k, [cwd, args]] = todo[i++]; if (!answers.has(k)) answers.set(k, await inBudget(read(cwd, args, budget), budget)); } };
+      await Promise.all(Array.from({ length: Math.min(CHECK_MAX_READS, todo.length) }, worker));
+    },
+  };
+}
+
+/** #636: a read cut off where the check's budget ends, whatever reader was given: null, and the budget says it ran out. */
+export function inBudget(work, budget) {
+  if (!budget) return Promise.resolve(work).catch(() => null);
+  let timer;
+  const out = new Promise((res) => { timer = setTimeout(() => { budget.ranOut = true; res(null); }, budget.left()); timer.unref?.(); });
+  return Promise.race([Promise.resolve(work).catch(() => null), out]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * #636: run a synchronous step that reads git to a fixpoint: run it with the cache, read what it asked for, run it
+ * again, until a pass asks for nothing new. Only the last pass's result is used, and a step run this way must have
+ * no effect outside its return value (classify, pushSends, pushBinding, targetSlug are pure given their reads).
+ * → { out, passes }
+ */
+export async function toFixpoint(rc, fn) {
+  for (let passes = 1; ; passes++) {
+    const out = fn();
+    if (!rc.pending()) return { out, passes };
+    // reads still not asked at the pass cap or the budget's end: the reading is a guess, as for a read that ran out
+    // (MC's read of b89c951)
+    if (passes >= MAX_PASSES || rc.budget.left() <= 0) { rc.budget.ranOut = true; return { out, passes }; }
+    await rc.fill();
+  }
 }
 
 /** Is the gate hook in the agents' settings? (claude: required; codex: only if ~/.codex exists) */

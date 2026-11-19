@@ -2,6 +2,7 @@
 // whole path segment, never a part of a longer word (#541). Before, the line was the bare word: every call
 // whose text or folder contained it started the Node step, and a checkout in a folder such as
 // `…/zulu-public` failed three hook tests (so the installer's verify step and an upgrade's test step failed there).
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

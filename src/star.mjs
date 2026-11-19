@@ -2,15 +2,18 @@
 //
 // GitHub has no ratings; a star from the user's own account is the only signal,
 // and GitHub's rules forbid automated/inauthentic engagement. So:
-//   - install.sh asks once ("Star zulu-assistant on GitHub? [y/N]"), default No,
-//     and only on an explicit y stars under the user's OWN gh login;
-//   - the board shows ONE toast at the first success moment (first self-heal
-//     repair or first ledger task closed). Star just opens the repo page (the
-//     user stars it there, or not); Never ask again records that. Once shown it
-//     is never shown again, whatever the user clicked;
+//   - the installer asks once ("Star zulu-assistant on GitHub? [y/N]"), default No,
+//     only in a terminal with gh logged in, and only on an explicit y stars under the
+//     user's OWN gh login; where it cannot ask, the light install and the demo print
+//     one line naming the repo instead (once: `installerLine`; never after the question);
+//   - the board shows ONE toast at the first success moment (the first gate the
+//     owner approves, the first self-heal repair or the first ledger task closed).
+//     Star just opens the repo page (the user stars it there, or not); Never ask
+//     again records that. Once shown it is never shown again, whatever the user clicked;
 //   - no pre-checked or silent starring, no OAuth app, no repeats, no gating.
-// Both surfaces share data/star-prompt.json:
-//   { installer: { answer: 'y'|'n', at }, board: { pending: {reason, at}, shownAt, decision: 'star'|'never', at } }
+// All three share data/star-prompt.json:
+//   { installer: { answer: 'y'|'n', at }, installerLine: { at },
+//     board: { pending: {reason, at}, shownAt, decision: 'star'|'never', at } }
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +43,20 @@ export async function successMoment(reason, { file = STAR_FILE, now = Date.now()
   await writeStar(doc, file);
   return true;
 }
+
+/** The success moment of a gate decision: the reason when the owner's decision just approved the
+ *  gate (the first time Guardrails held something for them), else null. A typed approval kept as
+ *  a row, a decline or a gate that was already approved before is not one. */
+export function gateMoment(before, after, gateId) {
+  const was = (before?.gates || []).find((g) => g.id === gateId);
+  const now = (after?.gates || []).find((g) => g.id === gateId);
+  if (!now || now.status !== 'approved' || was?.status === 'approved') return null;
+  const what = PLAIN_CLASS[now.cls];
+  return what ? `an agent's ${what} before it ran` : 'an agent call before it ran';
+}
+
+/** Gate classes the toast names in plain words; every other class reads "an agent call". */
+export const PLAIN_CLASS = { merge: 'merge', push: 'push', deploy: 'deploy', outbound: 'send', delete: 'delete' };
 
 /** What the page should show: the pending toast, or nothing. */
 export function toastFor(doc, repoUrl) {

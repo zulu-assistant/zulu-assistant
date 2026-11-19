@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — weekly operating reading (Zulu 1.2, task #414)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';

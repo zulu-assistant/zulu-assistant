@@ -2,9 +2,19 @@
 
 Each release is tested on one real install with the versions below. Newer versions usually work. If one doesn't, open an [Install report](https://github.com/zulu-assistant/zulu-assistant/issues/new/choose) with `zulu doctor`'s bundle.
 
-**Latest release: 1.3.1.** What is on `main` for the release after it is under Unreleased in the [changelog](../CHANGELOG.md). There was no public 1.1.0: what was built under that name shipped in 1.2.0.
+**Latest release: 1.3.2.** What is on `main` for the release after it is under Unreleased in the [changelog](../CHANGELOG.md). There was no public 1.1.0: what was built under that name shipped in 1.2.0.
 
-## 1.3.1 (2026-11-16)
+## 1.3.2 (2026-11-20)
+
+| Component | Tested version | Notes |
+|---|---|---|
+| macOS | 26.6.2 | Apple silicon |
+| cmux | 0.65.2 | unchanged from 1.3.1 |
+| Claude Code | 2.1.321 | unchanged from 1.3.1 |
+| Codex CLI | 0.170.0 | the Codex hook entry (`PermissionRequest`) was checked live on 0.162.1 and again on 0.170.0 |
+| Node.js | 22.23 | ≥ 22 required; zero npm dependencies. The test suite also runs on Linux (Node 22) |
+
+## 1.3.1 (2026-11-15)
 
 | Component | Tested version | Notes |
 |---|---|---|
@@ -14,7 +24,7 @@ Each release is tested on one real install with the versions below. Newer versio
 | Codex CLI | 0.162.1 | unchanged from 1.3.0 |
 | Node.js | 22.23 | ≥ 22 required; zero npm dependencies. The test suite also runs on Linux (Node 22) |
 
-## 1.3.0 (2026-11-16)
+## 1.3.0 (2026-11-15)
 
 | Component | Tested version | Notes |
 |---|---|---|

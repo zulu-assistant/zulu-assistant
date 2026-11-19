@@ -2485,6 +2485,19 @@ export function soleMerge(command) {
   return ghWordsMatch(run[0].tokens, ['pr', 'merge']) && !run[0].tokens.some((t) => t.startsWith('--match-head-commit'));
 }
 /**
+ * #627: the head a merge command pins itself to, or null. Only the form `pinnedMerge` writes counts: one
+ * `gh pr merge` alone on its line, ending in `--match-head-commit <sha>`, and the text before those two words
+ * must pin back to exactly the same line (so every rule of `pinnedMerge` holds for it). A Codex hook cannot
+ * rewrite a command, so there the pin must be in the agent's own words.
+ * → { head, bare } (bare = the command without the pin) | null
+ */
+export function ownPin(command) {
+  const text = String(command ?? '').trim();
+  const m = /^(.*\S)\s+--match-head-commit\s+([0-9a-f]{7,64})$/i.exec(text);
+  if (!m || /--match-head-commit/.test(m[1])) return null;
+  return pinnedMerge(m[1], m[2]) === `${m[1]} --match-head-commit ${m[2]}` ? { head: m[2], bare: m[1] } : null;
+}
+/**
  * The merge command with the head pinned, or null when the pin would not reach the program. The pin is
  * appended to the text, and the shell hands it to `gh` only when the line ends with the command's own last
  * word: behind a comment, a closing semicolon, an ampersand, a bracket or `--` it is dropped, runs as another

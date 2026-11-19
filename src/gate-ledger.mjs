@@ -44,7 +44,9 @@ export function addGate(t, g, iso) {
     expires_at: null, executed_at: null, attempts: 1, rerunsAfterDecline: 0,
     // what the approval refers to (1.3): the PR and its head commit, or the pushed ref and its commit, as read at filing
     ref: g.ref && ['pr', 'push'].includes(g.ref.kind) ? { kind: g.ref.kind, repo: g.ref.repo ? String(g.ref.repo).slice(0, 140) : null, number: Number(g.ref.number) || null,
-      name: g.ref.name ? String(g.ref.name).slice(0, 200) : null, head: String(g.ref.head || '').slice(0, 64) } : null,
+      name: g.ref.name ? String(g.ref.name).slice(0, 200) : null, head: String(g.ref.head || '').slice(0, 64),
+      // #708 C: bound from the command's own pin while the PR could not be read (released only by that pin)
+      ...(g.ref.kind === 'pr' && g.ref.pinnedOnly === true ? { pinnedOnly: true } : {}) } : null,
   };
   // standing approval: the task's program go approves this class (the gate service checked eligibility)
   if (g.auto?.go && t.program_go?.id === g.auto.go && !t.program_go.revoked_at && !t.program_go.ended_at) {
@@ -176,10 +178,27 @@ export function settleAfterGates(t, ownerId) {
  * `executed` is the stored 1.0 name; it means "released to run once": the board let the call
  * through and the agent reports the outcome. `at` + `note` come from the startup reconcile (#369).
  */
-export function gateEvent(t, { gate, event, at, note }, iso) {
+export function gateEvent(t, { gate, event, at, note, toolUse }, iso) {
   const g = findGate(t, gate);
   if (at != null && (typeof at !== 'string' || Number.isNaN(Date.parse(at)))) throw new GateError(400, 'gate event "at" must be an ISO time');
-  if (event === 'executed') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'executed'; g.executed_at = at || iso; }
+  if (event === 'executed') {
+    if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`);
+    g.status = 'executed'; g.executed_at = at || iso;
+    // #627: a Codex release keeps the id of the call it released, so the call's PostToolUse can say it ran
+    if (typeof toolUse === 'string' && toolUse) g.released_tool_use = toolUse.slice(0, 128);
+  }
+  // #627 (Codex): what happened after the release. Neither changes the status ("executed" = released to run once).
+  // `ran`: the released call's PostToolUse arrived (late when "no run seen" was written first). `not_seen`: none
+  // arrived within RUN_SEEN_MINUTES. Each is written once.
+  else if (event === 'ran') {
+    if (g.status !== 'executed' || g.ran_at) throw new GateError(409, `gate ${g.id} is ${g.status}${g.ran_at ? ', its run already recorded' : ''}`);
+    g.ran_at = at || iso; if (g.not_seen_at) g.ran_late = true;
+    return g;
+  } else if (event === 'not_seen') {
+    if (g.status !== 'executed' || g.ran_at || g.not_seen_at) throw new GateError(409, `gate ${g.id}: ${g.ran_at ? 'its run is recorded' : g.not_seen_at ? 'already marked' : `it is ${g.status}`}`);
+    g.not_seen_at = at || iso;
+    return g;
+  }
   else if (event === 'expired') { if (g.status !== 'approved') throw new GateError(409, `gate ${g.id} is ${g.status}`); g.status = 'expired'; }
   else if (event === 'rerun_declined') { g.rerunsAfterDecline += 1; g.attempts += 1; }
   // a grant was presented for this gate and the receipt chain holds no approval for it: nothing ran
@@ -195,6 +214,12 @@ export function gateEvent(t, { gate, event, at, note }, iso) {
  * An approval with no readable time counts as run out: the board never writes one.
  */
 export const runOut = (g, now = Date.now()) => g?.status === 'approved' && !(Date.parse(g.expires_at) > now);
+
+/** #627: a Codex release whose call has not reported back after this long is marked "no run seen" (cc Mission Control). */
+export const RUN_SEEN_MINUTES = 30;
+/** …a gate released with the id of its call (Codex, since #627; older gates have none) whose run was not seen in time. */
+export const runUnseen = (g, now = Date.now()) => g?.status === 'executed' && Boolean(g.released_tool_use) && !g.ran_at && !g.not_seen_at
+  && Date.parse(g.executed_at) + RUN_SEEN_MINUTES * 60_000 <= now;
 
 /** Close check: nothing pending, nothing re-run after a decline. */
 export function gatesResolved(t) {
@@ -221,6 +246,9 @@ export function auditRows(t) {
     }
     if (g.decided_at) rows.push({ at: g.decided_at, gate: g.id, event: g.via === 'standing' ? 'auto-approved' : g.decision === 'approve' ? 'approved' : 'declined', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.decided_by, via: g.via === 'standing' ? `program go ${g.go}` : g.via + (g.surfaces?.length && g.surfaces.join('+') !== g.via ? ` · ${g.surfaces.join('+')}` : '') + (g.recorded_by ? ` (recorded by ${g.recorded_by})` : '') + (g.proposal?.confirmed_at ? ` · confirming ${proposalWhat(g.proposal)}` : ''), surface: g.surface || null, reason: g.reason });
     if (g.executed_at) rows.push({ at: g.executed_at, gate: g.id, event: 'released (run once)', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: g.note ? `single-use grant · ${g.note}` : 'single-use grant' });
+    // #627 (Codex): whether the released call was seen to run
+    if (g.not_seen_at) rows.push({ at: g.not_seen_at, gate: g.id, event: 'no run seen', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: `no result from the call within ${RUN_SEEN_MINUTES} min of the release` });
+    if (g.ran_at) rows.push({ at: g.ran_at, gate: g.id, event: g.ran_late ? 'ran (seen late)' : 'ran', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: 'the call\'s own result (PostToolUse)' });
     if (g.status === 'disputed') rows.push({ at: g.disputed_at, gate: g.id, event: 'DISPUTED: a grant with no approval in the receipt chain (not run)', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: '' });
     if (g.status === 'expired') rows.push({ at: g.expires_at, gate: g.id, event: 'expired', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: g.note || '' });
     if (g.rerunsAfterDecline) rows.push({ at: g.decided_at, gate: g.id, event: `re-attempted ×${g.rerunsAfterDecline} after decline`, cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: '' });
@@ -273,7 +301,21 @@ export function createGateStore(dir) {
         if (Date.parse(g.expires_at) <= now) { g.used_at = 'expired'; await writeAtomic(f('grants.json'), grants); return { expired: true, task: g.task, gate: g.gate }; }
         g.used_at = new Date(now).toISOString();
         await writeAtomic(f('grants.json'), grants);
-        return { task: g.task, gate: g.gate };
+        return { task: g.task, gate: g.gate, id: g.id, usedAt: g.used_at };
+      });
+    },
+    /**
+     * #708: put back a grant this same check redeemed and did not use (its PR head or pushed ref could not be read).
+     * Only the grant with this id AND the use this check wrote; its expiry is untouched. → true | false
+     */
+    unredeem({ id, usedAt }) {
+      return serial(async () => {
+        const grants = await readJson(f('grants.json'), []);
+        const g = grants.find((x) => x.id === id && x.used_at === usedAt);
+        if (!id || !usedAt || !g) return false;
+        g.used_at = null;
+        await writeAtomic(f('grants.json'), grants);
+        return true;
       });
     },
     /** Spent grants for the startup reconcile: only where and when, never the grant itself. */

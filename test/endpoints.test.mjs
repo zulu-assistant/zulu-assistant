@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — endpoint cards: optional JSON-body judge (okPath/detailPath)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { judgeBody } from '../src/collect.mjs';

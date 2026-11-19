@@ -3,6 +3,7 @@
 // (the default) that record is a PROPOSAL: no grant, no program go and no plan approval until the
 // owner confirms it on the board. 'direct' keeps the behaviour before 1.3.
 // Neutral fixtures, temp dirs only; the one running board is the demo board on a spare port.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';

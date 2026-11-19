@@ -1,6 +1,7 @@
 // node --test "test/*.test.mjs"
 // Trust surface (#469): the owner's token on card actions, Origin / Host / JSON checks on every
 // write, reserved sender names, id-only wakes for intake tasks, enforce-by-default readings.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

@@ -15,7 +15,7 @@ if [ "$mode" = "--remove" ]; then
   [ -n "${ZULU_NO_LAUNCHD:-}" ] || launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$DEST"; echo "removed $LABEL"; exit 0
 fi
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 scripts/render-tmpl.sh system/launchd/chat-intake.plist.tmpl "$tmp/$LABEL.plist"
 plutil -lint "$tmp/$LABEL.plist" >/dev/null
 if [ "$mode" != "--apply" ]; then

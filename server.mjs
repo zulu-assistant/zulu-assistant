@@ -3,7 +3,7 @@
 // MC_DEMO=1 swaps every collector for synthetic data (src/demo.mjs).
 import http from 'node:http';
 import os from 'node:os';
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { readFile, writeFile, mkdir, stat as fsStat } from 'node:fs/promises';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
@@ -32,12 +32,12 @@ import { maybeParserWatch } from './src/parser-watch.mjs';
 import { evidenceMode, evidenceRows, CLOSED_DAYS } from './src/evidence.mjs';
 import { allowedSource, localOnly } from './src/guard.mjs';
 import { isWrite, writeRefusal, senderTrust } from './src/request-guard.mjs';
-import { createCallerEvidence, callerSettings, doorVerdict, isLocalSource, nameVerdict } from './src/caller.mjs';
+import { createCallerEvidence, callerSettings, doorVerdict, isLocalSource, nameVerdict, jobSenders, jobSenderVerdict } from './src/caller.mjs';
 import { createLedger, MeshError, summarize, wakeMessage, outsideTask, sourceLabel, holdOpen } from './src/tasks.mjs';
 import { triageReading } from './src/triage-reading.mjs';
 import { planAsk } from './src/triage-ask.mjs';
 import { createGateService } from './src/gate-service.mjs';
-import { createGateIntegrity, integritySettings, gatePaths, remoteTarget, readRemoteRef, registrationProblems, portProblem, integrityCard, settingsProblem, settingsNote, PROJECT_SETTINGS, startSettingsScan, needsCwd, failOpenEntries, OWN_FILES, isHookCommand, hookEntries, CONFIG_HOOK } from './src/gate-integrity.mjs';
+import { createGateIntegrity, integritySettings, gatePaths, gateDirs, remoteTarget, remoteTargetReads, READ_BUDGET_MS, readRemoteRef, registrationProblems, portProblem, integrityCard, settingsProblem, settingsNote, PROJECT_SETTINGS, startSettingsScan, needsCwd, failOpenEntries, OWN_FILES, isHookCommand, hookEntries, CONFIG_HOOK, readChild, createBudget, RanOut } from './src/gate-integrity.mjs';
 import { DEFAULT_POLICY as GATE_DEFAULT_POLICY, repoSlug as gateRepoSlug } from './src/gates.mjs';
 import { decisionSurface } from './src/gate-ledger.mjs';
 import {
@@ -56,7 +56,7 @@ import {
   DEMO, DEMO_POLL_SECONDS, DEMO_DOMAINS, demoSnapshot, demoContext, demoDirectory, demoHistory, demoBeats,
   demoFeed, demoLog, seedDemoLedger, demoTasksDir, DEMO_GATE,
 } from './src/demo.mjs';
-import { readStar, successMoment, toastFor, recordToast } from './src/star.mjs';
+import { readStar, successMoment, toastFor, recordToast, gateMoment } from './src/star.mjs';
 import { snoozeMode, attentionItems, buildAttention, settle as settleAttention, snoozedByTask, snoozeRefusal, applySnooze, readAttentionState, writeAttentionState, itemText, SNOOZE_CHOICES } from './src/attention.mjs';
 import { maybeUpgradeCheck, readStateSync as readUpgradeState, requestAllowed, upgradePlist, versionInfo, labelPrefix, REQUEST_FILE as UPGRADE_REQUEST } from './src/upgrade.mjs';
 import { relayPass } from './src/relay.mjs';
@@ -134,17 +134,33 @@ const gates = createGateService({
 const LIVE = path.resolve(ROOT);
 const INTEGRITY = integritySettings(DEMO ? null : SETTINGS.gateIntegrity);
 const INTEGRITY_FILE = path.join(ROOT, 'data', 'gate-integrity-state.json');
-const liveGit = (args) => { try { return execFileSync('git', ['-C', LIVE, ...args], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+// #636: off the event loop: asynchronous, 3 s each, inside the check's one budget. An answer (exit 0) is stdout, a
+// "no" (any other exit) is null as before, and a read that ran out THROWS, so the card never takes it for a "no".
+const liveGit = async (args, budget = null) => {
+  const r = await readChild('git', ['-C', LIVE, ...args], { limitMs: 3000, budget, label: 'integrity' });
+  if (r.ranOut) throw new RanOut(`git ${args[0]}`);
+  return r.code === 0 ? r.out.trim() : null;
+};
 const readOnly = (cmd, args) => new Promise((resolve) => { execFile(cmd, args, { encoding: 'utf8', timeout: 10000 }, (err, out, errOut) => resolve({ ok: !err, out: String(out || ''), err: String(errOut || err?.message || '') })); });
 const integrity = INTEGRITY.mode !== 'on' ? null : createGateIntegrity({
   root: LIVE, settings: INTEGRITY, git: liveGit,
   // the policy's own list of gate files; a policy written before 1.3 has none, so the shipped list stands in
-  files: () => [...gatePaths(gates.policy()?.lists?.gateCode || GATE_DEFAULT_POLICY.lists.gateCode, { lsTree: (dir) => String(liveGit(['ls-tree', '-r', '--name-only', 'HEAD', '--', dir]) || '').split('\n').filter(Boolean) }), ...OWN_FILES],
+  // (#636: the folders' ls-tree is read first, asynchronously, and handed to the pure gatePaths)
+  files: async (git = liveGit) => {
+    const list = gates.policy()?.lists?.gateCode || GATE_DEFAULT_POLICY.lists.gateCode;
+    const trees = new Map();
+    for (const dir of gateDirs(list)) trees.set(dir, String((await git(['ls-tree', '-r', '--name-only', 'HEAD', '--', dir])) || ''));
+    return [...gatePaths(list, { lsTree: (dir) => (trees.get(dir) || '').split('\n').filter(Boolean) }), ...OWN_FILES];
+  },
   readFile: (p) => readFile(path.join(LIVE, p)),
   readState: async () => JSON.parse(await readFile(INTEGRITY_FILE, 'utf8')),
   writeState: (st) => writeJsonAtomic(INTEGRITY_FILE, st),
-  readRemoteHead: () => {
-    const target = remoteTarget({ git: liveGit, settings: INTEGRITY });
+  readRemoteHead: async () => {
+    // remoteTarget stays pure: its four reads are made first (one budget), then handed to it as answers
+    const budget = createBudget(READ_BUDGET_MS);
+    const answers = new Map();
+    for (const args of remoteTargetReads(INTEGRITY)) answers.set(args.join(' '), await liveGit(args, budget));
+    const target = remoteTarget({ git: (args) => answers.get(args.join(' ')) ?? null, settings: INTEGRITY });
     return readRemoteRef({ target, slug: /github\.com/i.test(target.url) ? gateRepoSlug(target.url) : null, run: readOnly, remote: INTEGRITY.remote, root: LIVE });
   },
 });
@@ -261,13 +277,33 @@ const refreshDir = async () => {
 };
 const meshConfig = async () => JSON.parse(await readFile(resolveConfig('config/mesh.json'), 'utf8').catch(() => '{}'));
 
-/** Who is acting? Resolve a self-declared name to its directory entry. */
-async function identify(who) {
+/**
+ * Who is acting? Resolve a self-declared name to its directory entry.
+ * `req` (a message, a new task, a comment only): a name no agent has may also be a mapped launchd
+ * job's (SETTINGS.callerEvidence.jobs), accepted only when the evidence shows that job behind the
+ * call (#643 b). Every other caller giving that name gets the unknown-name answer, as before.
+ */
+const jobNameProblemsSaid = new Set();
+async function identify(who, { req = null } = {}) {
   const n = String(who || '').trim().toLowerCase();
   if (!n) throw new MeshError(400, 'actor/requester is required (your agent name: --as or $MESH_AGENT)');
   if (isOwner(n) || n === 'board') return { name: isOwner(n) ? OWNER.id : n, ws: null, mc: false };
   if (['me', 'self'].includes(n)) throw new MeshError(400, `"${n}" is not an agent name — give your own name (--as <name>), or omit --as inside a cmux pane`);
-  const r = resolveTarget(n, dirCache.length ? dirCache : await refreshDir(), { exact: true });
+  const dir = dirCache.length ? dirCache : await refreshDir();
+  const r = resolveTarget(n, dir, { exact: true });
+  if (!r.agent && req && Object.keys(CALLER.jobs).length) {
+    const { senders, problems } = jobSenders(CALLER.jobs, { agentNames: dir.map((a) => a.name), isOwner });
+    for (const p of problems) {
+      if (jobNameProblemsSaid.has(p.label)) continue;
+      jobNameProblemsSaid.add(p.label);
+      console.log(`${new Date().toISOString()} [caller] callerEvidence.jobs: ${p.label} → "${p.name}" is refused as a sender (${p.why})`);
+    }
+    if (senders.has(n)) {
+      const v = jobSenderVerdict(n, await evidenceOf(req), senders);
+      if (v.ok) return { name: n, ws: null, mc: false, job: true };
+      console.log(`${new Date().toISOString()} [caller] job name "${n}" refused as a sender: ${v.why}`);
+    }
+  }
   if (!r.agent) throw new MeshError(400, `unknown agent "${n}" — see GET /api/agents`, { candidates: r.candidates });
   if (r.agent.status === 'closed') throw new MeshError(400, `agent "${r.agent.name}" is closed — an identity must be a live agent`);
   return { name: r.agent.name, ws: r.agent.workspaceId || null, mc: r.agent.kind === 'mission-control' };
@@ -698,7 +734,9 @@ async function afterTaskChange(task, { events = [], wake = [], notifyMC = [], wa
   for (const why of notifyMC) {
     const mc = resolveTarget('mission-control', dirCache).agent;
     if (mc && (task.owner === mc.name || actor === mc.name)) continue;
-    const what = why === 'approval' ? `needs ${OWNER.name}'s approval` : why === 'gate' ? `has a gate waiting on ${OWNER.name} (FYI — gates are the owner's to decide)` : 'is blocked';
+    const what = why === 'approval' ? `needs ${OWNER.name}'s approval` : why === 'gate' ? `has a gate waiting on ${OWNER.name} (FYI — gates are the owner's to decide)`
+      // #627: an approved Codex call was released and its result never came back (a "no" at the pane, or the call ended without one)
+      : why === 'not_seen' ? `has an approved call that was released and not seen to run (${(task.gates || []).filter((x) => x.not_seen_at && !x.ran_at).map((x) => x.id).pop() || 'a gate'})` : 'is blocked';
     // an intake task's title is outside text: the cc carries the id and the source only
     deliveries.push(await meshDeliver('mission-control', `cc: task #${task.id} ${what} (${task.owner})${outsideTask(task) ? ` — ${sourceLabel(task)}` : `: ${task.title}`}`, { from: actor, fromLabel, taskId: task.id, kind: why === 'approval' ? 'approval' : 'cc' }));
   }
@@ -934,6 +972,29 @@ async function poll() {
       .then(() => maybeHealFailedRestores({
         log: (text) => recordEvent('sys', text),   // one ticker line per repaired workspace
         notify,                                    // one Feed summary per pass
+        // #620: closed entries are never resumed from cmux's record. #678: a resident left bare gets ONE low task to Mission
+        // Control per episode (source key = workspace + the cmux launch; the ledger dedupes keys across closed tasks)
+        directory: () => dirCache,
+        fileBareResident: async (f) => {
+          const owns = (await ledger.list({ owner: f.name, status: 'live' })).map((t) => `#${t.id}`);
+          const last = f.lastSession;
+          const t = await ledger.create({
+            title: `Resident ${f.name} is a bare shell since the cmux relaunch (${f.hours} h)`,
+            requester: 'board', owner: resolveTarget('mission-control', dirCache).agent?.name || null, priority: 'low',
+            source: { via: 'heal-restore', key: f.key },
+            body: `Resident ${f.name} (workspace ${f.workspaceId}) has been a bare login shell for ${f.hours} h since the cmux launch of ${f.launchedAt}. `
+              + 'Past the 2-hour window the board does not restore a resident on its own. '
+              + `Last session written: ${last ? `${last.kind} ${last.sessionId} at ${last.at || 'an unknown time'} (${last.source})` : 'none recorded'}. `
+              + `Restore line, typed in its pane: ${f.restore || `none (${f.restoreSkip})`}. `
+              + `Live tasks it owns: ${owns.length ? owns.join(', ') : 'none'}. `
+              + 'Restore it or close its directory entry; closing or cancelling this task keeps this episode quiet until the next cmux relaunch.',
+          });
+          if (!t.existing) {
+            await afterTaskChange(t, { wake: t.owner && !isOwner(t.owner) ? [t.owner] : [] }, 'board');
+            await recordEvent('sys', `restore-retry: resident ${f.name} left bare → task #${t.id} (${t.owner || 'no owner'})`).catch(() => {});
+          }
+          return t;
+        },
         // a resumed session re-adopts its title-derived mesh name
         onRepaired: async (ws) => {
           await celebrate(`a dead session restore in "${ws.title || ws.id}" and brought it back`);
@@ -1175,7 +1236,7 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       const err = validateMessage(b.text);
       if (err) return sendJson(res, 400, { ok: false, msg: err });
-      const me = await identify(b.from);
+      const me = await identify(b.from, { req });
       await noteCaller(req, me.name, 'a mesh message');
       const from = me.name;
       // the owner's name needs the decision token, "board" the board's own process: otherwise the
@@ -1299,7 +1360,7 @@ const server = http.createServer(async (req, res) => {
       } else {
         if (b.source) throw new MeshError(403, 'source is set by the chat intake only');
         delete b.plan_first;
-        const me = await identify(b.requester);
+        const me = await identify(b.requester, { req });
         await noteCaller(req, me.name, 'a new task');
         named = await nameCheck(req, me.name, 'a new task');
         b.requester = me.name; b.requester_ws = named.proven ? me.ws : null;
@@ -1447,7 +1508,7 @@ const server = http.createServer(async (req, res) => {
         if (!isPrincipal(who)) throw new MeshError(403, `"${who}" is not a person in config/principals.json`);
         me = { name: isOwner(who) ? OWNER.id : who, ws: null, mc: false };
       } else {
-        me = await identify(b.actor);
+        me = await identify(b.actor, b.op === 'comment' ? { req } : {});
         const what = `task #${tm[1]} ${String(b.op).slice(0, 24)}`;
         await noteCaller(req, me.name, what);
         const named = await nameCheck(req, me.name, what);
@@ -1515,6 +1576,9 @@ const server = http.createServer(async (req, res) => {
       const trust = typed ? { verified: true } : unverified ? { verified: false, label: unverifiedLabel(unverified.name, unverified.why) } : trustOf(b.actor, req, { decider, intake });
       const deliveries = await afterTaskChange(r.task, r, speaker, { fromLabel: trust.verified ? null : trust.label });
       if (b.op === 'close' && r.task.status === 'done') celebrate(`task #${r.task.id} through to done`);
+      // the first gate the owner approves is a success moment too (the toast is still shown once, src/star.mjs)
+      const gateWin = b.op === 'gate_decide' && decider && !typed ? gateMoment(prev, r.task, b.gate) : null;
+      if (gateWin) celebrate(gateWin);
       if (typed) return sendJson(res, 202, { ok: true, task: r.task, deliveries, proposed: true, msg: `kept as a row for ${OWNER.name} to confirm on the board page (one click). Nothing was approved and nothing runs until then.` });
       return sendJson(res, 200, { ok: true, task: r.task, deliveries, ...(unverified ? { unverifiedSender: true, note: `the board could not verify the name "${unverified.name}" (${unverified.why}): the comment was recorded marked as from an unverified caller` } : {}) });
     }

@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — Agent-OS Phase 0 hygiene guards (task #36)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';

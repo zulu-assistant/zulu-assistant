@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — brain autopilot (src/brain.mjs) + the verified close gate
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

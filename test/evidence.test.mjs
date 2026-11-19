@@ -1,5 +1,6 @@
 // Evidence panel (src/evidence.mjs + public/evidence.js): rows from a fixture ledger,
 // secret redaction, limit/filter, the page render, and the off switch.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

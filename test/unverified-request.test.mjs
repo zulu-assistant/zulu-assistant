@@ -3,6 +3,7 @@
 // more, while the declared name kept the requester's standing (rows R1 to R4 of its probe). Now the
 // mark is a field of the task, every reader takes it from there, and the declared name has no
 // requester standing and gets no requester wakes until the owner or Mission Control confirms it.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';

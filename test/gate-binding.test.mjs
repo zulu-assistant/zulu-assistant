@@ -1,3 +1,4 @@
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -88,7 +89,7 @@ test('a merge: the row shows the head; approved and run alone it is pinned to th
   assert.equal((await s.check('gh pr merge 7 --merge')).decision, 'deny');
 });
 
-test('a merge inside a longer command: the head is read again; unchanged runs, moved or unreadable is superseded and asked again', async () => {
+test('a merge inside a longer command: the head is read again; unchanged runs, moved is superseded and asked again, unreadable keeps the approval (#708)', async () => {
   const cmd = 'gh pr merge 7 --merge && git pull --ff-only';
   const same = await setup();
   await same.check(cmd); await same.approve('g1');
@@ -112,19 +113,34 @@ test('a merge inside a longer command: the head is read again; unchanged runs, m
   await gone.check(cmd); await gone.approve('g1');
   gone.world.head = null;
   const u = await gone.check(cmd);
-  assert.equal(u.decision, 'deny');
-  assert.match((await gone.gates())[0].note, /superseded: the PR head could not be read again/);
+  // #708: unread is not moved: not released, nothing filed, the approval stands; with the head readable again it runs
+  assert.equal(u.decision, 'deny'); assert.equal(u.unfiled, true); assert.match(u.reason, /could not be read just now.*approval \(task #\d+ gate g1\) stands/);
+  assert.equal((await gone.gates()).length, 1); assert.equal((await gone.gates())[0].status, 'approved');
+  gone.world.head = A;
+  assert.equal((await gone.check(cmd)).decision, 'allow');
+  assert.equal((await gone.gates())[0].status, 'executed');
 });
 
-test('a Codex call (the command is a list of words) is never rewritten: the head is read again', async () => {
+test('a Codex call is never rewritten: its merge must pin the head in its own words (#627), word list included', async () => {
   const s = await setup();
-  const argv = ['gh', 'pr', 'merge', '7'];
+  // no pin of its own: refused unfiled, and the text is the exact pinned command
+  const bare = await s.check(['gh', 'pr', 'merge', '7'], { engine: 'codex' });
+  assert.equal(bare.decision, 'deny'); assert.equal(bare.unfiled, true); assert.equal(((await s.gates()) || []).length, 0);
+  assert.ok(bare.reason.includes(`Run exactly this instead (alone, as its own call): gh pr merge 7 --match-head-commit ${A}`), bare.reason);
+  // pinned in its own words: filed, approved, released with no rewrite; GitHub compares the pin when it runs
+  const argv = ['gh', 'pr', 'merge', '7', '--match-head-commit', A];
   await s.check(argv, { engine: 'codex' }); await s.approve('g1');
   const ok = await s.check(argv, { engine: 'codex' });
-  assert.equal(ok.decision, 'allow'); assert.equal(ok.updatedCommand, undefined);
-  const t = await setup();
-  await t.check(argv, { engine: 'codex' }); await t.approve('g1'); t.world.head = B;
-  assert.equal((await t.check(argv, { engine: 'codex' })).decision, 'deny');
+  assert.equal(ok.decision, 'allow'); assert.equal(ok.updatedCommand, undefined); assert.match(ok.reason, /pinned by its own words to head a1b2c3d/);
+  // a pin that names a head the PR has moved from: refused unfiled, with the pin to the head of now
+  const t = await setup(); t.world.head = B;
+  const old = await t.check(argv, { engine: 'codex' });
+  assert.equal(old.decision, 'deny'); assert.equal(old.unfiled, true); assert.equal(((await t.gates()) || []).length, 0);
+  assert.ok(old.reason.includes(`gh pr merge 7 --match-head-commit ${B}`) && old.reason.includes(`pinned to ${A.slice(0, 7)}`), old.reason);
+  // Claude is unchanged: the bare merge is filed, and the board adds the pin at the release
+  const c = await setup();
+  await c.check('gh pr merge 7'); await c.approve('g1');
+  assert.equal((await c.check('gh pr merge 7')).updatedCommand, `gh pr merge 7 --match-head-commit ${A}`);
 });
 
 test('a merge under a program go is pinned to the head just read', async () => {

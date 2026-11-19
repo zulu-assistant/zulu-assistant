@@ -1,5 +1,6 @@
 // Row context (1.3): a chip per class and list on a waiting row, the agent's own words labelled,
 // and no chip text that comes from the agent.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile } from 'node:fs/promises';

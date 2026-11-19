@@ -1,4 +1,5 @@
 // node --test "test/*.test.mjs" — demo mode data (src/demo.mjs)
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, writeFile, mkdir } from 'node:fs/promises';

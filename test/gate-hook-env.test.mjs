@@ -5,6 +5,7 @@
 // scripts/gate-hook.sh with a hostile environment and with a Node step that hangs. The board is a
 // dead port, so a gated call must come back denied by the hook's own offline judgment, and a call
 // that is not gated must pass.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, spawn } from 'node:child_process';

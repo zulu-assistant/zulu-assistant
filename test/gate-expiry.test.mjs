@@ -6,6 +6,7 @@
 // Now the board marks a run-out approval expired (at start and in the poll, on live and closed tasks), and
 // a grant is released only while the ledger itself says the approval stands.
 // Temp dirs only; the "board" is the gate service, and the fixture writes what a process with file tools could.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, mkdir } from 'node:fs/promises';

@@ -1,13 +1,18 @@
 // node --test test/
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
   detectFailedRestore, isLiveClaude, isResumePicker, endsAtShellPrompt,
   parseWorkspaces, maybeHealFailedRestores, resetHealRestoreState, isPristineShell, pickRestorable, isLiveAgent,
+  parseCmuxRecords, pickFromRecord, RESIDENT_NOTICE_MS, bareResidentKey, lastSessionOf, sessionTimeIso,
+  pickMissionControl, mcResumeLine, projectSlug,
 } from '../src/heal-restore.mjs';
+import { createLedger } from '../src/tasks.mjs';
 
 // ---- fixtures (trimmed from real `cmux read-screen` output) ----------------
 
@@ -349,4 +354,258 @@ test('isLiveAgent confirms Codex restores by name, not by accident', () => {
   assert.equal(isLiveAgent('  Working (3s • esc to interrupt)'), true);
   assert.equal(isLiveAgent(LIVE_CLAUDE), true);
   assert.equal(isLiveAgent(FRESH), false);
+});
+
+// ---- #620: cmux's own record, a line for every pass-over, residents left bare -------------------
+
+const REC_SID = 'cccccccc-1111-4222-8333-944455556666';
+// a trimmed cmux session file: workspace 9 has a resume binding; the hook maps know nothing of it
+const cmuxFile = (over = {}) => ({ windows: [{ tabManager: { workspaces: [
+  { workspaceId: WS9, panels: [{ terminal: { resumeBinding: { kind: 'claude', checkpointId: REC_SID, launchCommand: { arguments: ['/x/claude', '--name', 'shipping'] }, updatedAt: 10, ...over } } }] },
+  { workspaceId: WS2, panels: [{ terminal: {} }] },
+] } }] });
+
+test('parseCmuxRecords / pickFromRecord: the binding by workspace, with the hook maps\' checks', () => {
+  const rec = parseCmuxRecords(cmuxFile());
+  assert.deepEqual(Object.keys(rec), [WS9.toUpperCase()]);
+  assert.deepEqual(pickFromRecord(WS9, rec), { kind: 'claude', sessionId: REC_SID, pid: null, source: 'cmux record' });
+  assert.equal(pickFromRecord(WS2, rec), null);
+  assert.match(pickFromRecord(WS9, parseCmuxRecords(cmuxFile({ checkpointId: 'nope' }))).skip, /malformed/);
+  assert.match(pickFromRecord(WS9, parseCmuxRecords(cmuxFile({ kind: 'codex', launchCommand: { arguments: ['codex', '--profile', 'qwen'] } }))).skip, /--profile qwen/);
+  assert.match(pickFromRecord(WS9, parseCmuxRecords(cmuxFile({ launchCommand: undefined }))).skip, /no launch command/);
+  assert.match(pickFromRecord(WS9, parseCmuxRecords(cmuxFile({ kind: 'shell' }))).skip, /kind shell/);
+  assert.deepEqual(parseCmuxRecords({}), {}); assert.deepEqual(parseCmuxRecords(null), {});
+});
+
+const recordOpts = (cmux, log, clock, extra = {}) => freshOpts(cmux, log, clock, {
+  sessionMaps: async () => ({ claude: {}, codex: {}, records: parseCmuxRecords(cmuxFile()) }),
+  runningIds: async () => new Set(),
+  ...extra,
+});
+
+test('no hook-map entry: the session is resumed from cmux\'s record (not running anywhere, entry not closed)', async () => {
+  resetHealRestoreState();
+  const clock = { t: 5_000_000 };
+  const logged = [];
+  const { cmux, calls } = fakeCmux({ 'workspace:9': [FRESH, LIVE_CLAUDE], 'workspace:2': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE] });
+  const r = await maybeHealFailedRestores(recordOpts(cmux, (t) => logged.push(t), clock));
+  assert.deepEqual(r.repaired.map((x) => [x.ref, x.kind, x.sessionId]), [['workspace:9', 'claude', REC_SID]]);
+  assert.match(calls.find((c) => c.startsWith('send --workspace workspace:9')), new RegExp(`restore claude ${REC_SID}$`));
+  assert.match(logged[0], /cmux's own record/);
+  for (const [why, extra] of [
+    ['running in another process', { runningIds: async () => new Set([REC_SID]) }],
+    ['running sessions unread', { runningIds: async () => null }],
+    ['closed directory entry', { directory: async () => [{ workspaceId: WS9, name: 'shipping', kind: 'resident', status: 'closed' }] }],
+  ]) {
+    resetHealRestoreState();
+    const c2 = fakeCmux({ 'workspace:9': [FRESH], 'workspace:2': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE] });
+    const lines = []; const orig = console.log; console.log = (...a) => lines.push(a.join(' '));
+    try {
+      const r2 = await maybeHealFailedRestores(recordOpts(c2.cmux, () => {}, { t: 5_000_000 }, extra));
+      assert.equal(r2.repaired.length, 0, why);
+    } finally { console.log = orig; }
+    assert.equal(c2.calls.some((c) => c.startsWith('send')), false, `${why}: nothing typed`);
+    assert.ok(lines.some((l) => /fresh shell, not restored/.test(l)), `${why}: one line says so`);
+  }
+});
+
+test('a fresh shell with no session record anywhere is passed over with one line, once', async () => {
+  resetHealRestoreState();
+  const lines = []; const orig = console.log; console.log = (...a) => lines.push(a.join(' '));
+  try {
+    for (let i = 0; i < 2; i++) {
+      const { cmux } = fakeCmux({ 'workspace:9': [FRESH], 'workspace:2': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE] });
+      await maybeHealFailedRestores(freshOpts(cmux, () => {}, { t: 5_000_000 + i * 120_000 }, { sessionMaps: async () => ({ claude: {}, codex: {}, records: {} }), runningIds: async () => new Set() }));
+    }
+  } finally { console.log = orig; }
+  assert.deepEqual(lines.filter((l) => /fresh shell/.test(l)), ['[heal-restore] Set up secure remote login: fresh shell, not restored (no session record)']);
+});
+
+// #678: one keyed task per episode (workspace + cmux launch), filed through a real ledger; a board restart (a new
+// process: resetHealRestoreState) files nothing new; one ticker line a day naming the task; never restored
+test('a registered resident still a bare shell after the window: one keyed task per episode, across board restarts', async () => {
+  const ledger = createLedger(await mkdtemp(path.join(os.tmpdir(), 'bare-resident-')));
+  const START = 50_000_000 - 3 * 3600_000;                         // the cmux launch: past the 2 h window
+  const clock = { t: 50_000_000 };
+  const logged = []; const filed = [];
+  const dir = [{ workspaceId: WS9, name: 'shipping', kind: 'resident', status: 'active' }, { workspaceId: WS2, name: 'w', kind: 'worker', status: 'active' }];
+  // the board's side, as in server.mjs: one create per call, the ledger dedupes the key
+  const fileBareResident = async (f) => { filed.push(f); return ledger.create({ title: `Resident ${f.name} bare`, requester: 'board', owner: 'coordinator', priority: 'low', source: { via: 'heal-restore', key: f.key }, body: 'x' }); };
+  const run = (start = START) => {
+    const { cmux, calls } = fakeCmux({ 'workspace:9': [FRESH], 'workspace:2': [FRESH], 'workspace:12': [LIVE_CLAUDE] });
+    return maybeHealFailedRestores(recordOpts(cmux, (t) => logged.push(t), clock, { appStart: async () => start, directory: async () => dir, fileBareResident }))
+      .then((r) => ({ r, calls }));
+  };
+  resetHealRestoreState();
+  const a = await run();
+  assert.equal(a.r.repaired.length, 0); assert.equal(a.calls.some((c) => c.startsWith('send')), false);
+  assert.equal(filed.length, 1, 'the worker is not a resident: one task, for shipping');
+  assert.equal(filed[0].key, bareResidentKey(WS9, START)); assert.equal(filed[0].name, 'shipping'); assert.equal(filed[0].hours, 3);
+  assert.equal(filed[0].lastSession.sessionId, REC_SID); assert.equal(filed[0].lastSession.source, 'cmux record');
+  assert.match(filed[0].restore, new RegExp(`restore claude ${REC_SID}$`));
+  assert.equal((await ledger.list({})).length, 1);
+  assert.equal(logged.length, 1); assert.match(logged[0], /resident shipping is still a bare shell 3 h after the cmux relaunch: not restored on its own; .* \(#1\)$/);
+  clock.t += 120_000; await run();                                // the same process, the next pass: nothing new
+  assert.equal(filed.length, 1); assert.equal(logged.length, 1);
+  // two board restarts in the same day: the ledger already holds the key, so still one task (the ticker line is per process)
+  for (let i = 0; i < 2; i++) { resetHealRestoreState(); clock.t += 50 * 60_000; await run(); }
+  assert.equal((await ledger.list({})).length, 1, 'restarts file nothing new');
+  // a task closed for the episode keeps it quiet: the key is still taken
+  await ledger.update(1, { op: 'cancel', actor: 'coordinator', text: 'folded' });
+  resetHealRestoreState(); clock.t += RESIDENT_NOTICE_MS; await run();
+  assert.equal((await ledger.list({})).length, 1);
+  // the next cmux relaunch is a new episode: a new task
+  resetHealRestoreState(); await run(clock.t - 3 * 3600_000);
+  assert.equal((await ledger.list({})).length, 2);
+  assert.notEqual((await ledger.get(2)).source.key, (await ledger.get(1)).source.key);
+});
+
+test('lastSessionOf: the newest session written for a workspace, from the hook maps or cmux\'s record', () => {
+  const maps = { claude: { activeSessionsByWorkspace: { [WS9.toUpperCase()]: { sessionId: 's1', updatedAt: 5 } }, sessions: { s1: { sessionId: 's1' } } },
+    codex: { sessions: { x: { workspaceId: WS9, sessionId: 's2', updatedAt: 7 } } }, records: { [WS9.toUpperCase()]: [{ kind: 'claude', sessionId: 's3', at: 6 }] } };
+  assert.deepEqual(lastSessionOf(WS9, maps), { kind: 'codex', sessionId: 's2', at: 7, source: 'hook map' });
+  assert.equal(lastSessionOf(WS2, maps), null);
+  assert.equal(lastSessionOf('', maps), null);
+});
+
+// #682: both files keep Unix SECONDS with a fraction (values as read on this machine 11-16); the task said 1970
+test('the last session time reads as its date, from the hook maps and from cmux\'s record (seconds with a fraction)', async () => {
+  const CLAUDE_AT = 1794817180.989686; const RECORD_AT = 1794693479.0959911;
+  assert.equal(sessionTimeIso(CLAUDE_AT), '2026-11-16T08:19:40.989Z');
+  assert.equal(sessionTimeIso(RECORD_AT), '2026-11-14T21:57:59.095Z');
+  assert.equal(sessionTimeIso(0), null); assert.equal(sessionTimeIso(undefined), null);
+  // through a pass: the record only (a session that dropped out of the hook maps), then a newer hook-map entry wins
+  const START = 50_000_000 - 3 * 3600_000;
+  const dir = [{ workspaceId: WS9, name: 'shipping', kind: 'resident', status: 'active' }];
+  const record = { windows: [{ tabManager: { workspaces: [{ workspaceId: WS9, panels: [{ terminal: { resumeBinding: { kind: 'claude', checkpointId: REC_SID, launchCommand: { arguments: ['/x/claude'] }, updatedAt: RECORD_AT } } }] }] } }] };
+  for (const [maps, at, source] of [
+    [{ claude: {}, codex: {}, records: parseCmuxRecords(record) }, '2026-11-14T21:57:59.095Z', 'cmux record'],
+    [{ claude: { activeSessionsByWorkspace: { [WS9.toUpperCase()]: { sessionId: SESSION, updatedAt: CLAUDE_AT } }, sessions: { [SESSION]: { sessionId: SESSION, launchCommand: { arguments: [] } } } }, codex: {}, records: parseCmuxRecords(record) }, '2026-11-16T08:19:40.989Z', 'hook map'],
+  ]) {
+    resetHealRestoreState();
+    const filed = [];
+    const { cmux } = fakeCmux({ 'workspace:9': [FRESH], 'workspace:2': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE] });
+    await maybeHealFailedRestores(freshOpts(cmux, () => {}, { t: 50_000_000 }, { sessionMaps: async () => maps, runningIds: async () => new Set(), appStart: async () => START, directory: async () => dir, fileBareResident: async (f) => { filed.push(f); return { id: 1 }; } }));
+    assert.equal(filed.length, 1, source); assert.equal(filed[0].lastSession.at, at, source); assert.equal(filed[0].lastSession.source, source);
+  }
+});
+
+// ---- #704: Mission Control comes back through its own launcher, never `cmux restore` ----------------
+
+const MC_SID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const NEWER_SID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+const MC_ROOT = "/srv/the board's checkout";
+const MC_DIR = [{ workspaceId: WS2, name: 'mission-control', kind: 'mission-control', status: 'active' }];
+const TRUST = ['Do you trust the files in this folder?', '❯ 1. Yes, proceed', '  2. No, exit', 'Enter to confirm · Esc to cancel'].join('\n');
+// workspace:2 is Mission Control; the hook map also names a session for it (which `cmux restore` would have used)
+const mcMaps = (sid = SESSION, pid = 4545) => ({ claude: {
+  activeSessionsByWorkspace: { [WS9.toUpperCase()]: { sessionId: SESSION, updatedAt: 100 }, [WS2.toUpperCase()]: { sessionId: sid, updatedAt: 200 } },
+  sessions: { [SESSION]: { sessionId: SESSION, isRestorable: true, pid: 4242, launchCommand: { arguments: ['claude'] } },
+    [sid]: { sessionId: sid, isRestorable: true, pid, launchCommand: { arguments: ['/x/claude'] } } },
+}, codex: {}, records: {} });
+const mcOpts = (cmux, log, clock, extra = {}) => freshOpts(cmux, log, clock, {
+  directory: async () => MC_DIR, sessionMaps: async () => mcMaps(), runningIds: async () => new Set(),
+  mcSessionId: async () => MC_SID, transcriptAt: async (id) => ({ [MC_SID]: 1000 })[id] ?? null, repoRoot: MC_ROOT, ...extra,
+});
+const quiet = async (fn) => { const lines = []; const orig = console.log; console.log = (...a) => lines.push(a.join(' ')); try { return { r: await fn(), lines }; } finally { console.log = orig; } };
+
+test('pickMissionControl / mcResumeLine: a strict UUID only, the hook map\'s session only when its transcript is here and newer', () => {
+  assert.deepEqual(pickMissionControl(MC_SID, null, { [MC_SID]: 1 }), { sessionId: MC_SID, from: 'data/mission-control-session-id', other: null });
+  const mapped = { kind: 'claude', sessionId: NEWER_SID, source: 'hook map' };
+  assert.equal(pickMissionControl(MC_SID, mapped, { [MC_SID]: 1, [NEWER_SID]: 2 }).sessionId, NEWER_SID, 'newer transcript in the folder');
+  assert.equal(pickMissionControl(MC_SID, mapped, { [MC_SID]: 2, [NEWER_SID]: 1 }).sessionId, MC_SID, 'older');
+  assert.equal(pickMissionControl(MC_SID, mapped, { [MC_SID]: 1, [NEWER_SID]: null }).sessionId, MC_SID, 'not in this project folder');
+  assert.equal(pickMissionControl(MC_SID, { ...mapped, kind: 'codex' }, { [MC_SID]: 1, [NEWER_SID]: 2 }).sessionId, MC_SID, 'codex');
+  assert.equal(pickMissionControl(MC_SID, { ...mapped, source: 'cmux record' }, { [MC_SID]: 1, [NEWER_SID]: 2 }).sessionId, MC_SID, 'cmux record');
+  assert.equal(pickMissionControl('', mapped, { [NEWER_SID]: 2 }).sessionId, NEWER_SID, 'no file: the hook map\'s, when its transcript is here');
+  assert.match(pickMissionControl('', null, {}).skip, /no id/);
+  assert.match(pickMissionControl(`${MC_SID}; rm -rf ~`, null, {}).skip, /not a UUID/);
+  assert.match(pickMissionControl(MC_SID.slice(0, 35), null, {}).skip, /not a UUID/);
+  assert.match(pickMissionControl(MC_SID, null, {}).skip, /no transcript/);
+  assert.equal(mcResumeLine(MC_ROOT, MC_SID), `cd '/srv/the board'\\''s checkout' && scripts/mc-resume.sh ${MC_SID}`);
+  assert.throws(() => mcResumeLine(MC_ROOT, `${MC_SID} && x`));
+  assert.equal(projectSlug('/Users/me/Zulu Board/'), '-Users-me-Zulu-Board');
+});
+
+test('Mission Control\'s fresh pane gets its launcher with the recorded id, never `cmux restore`; residents unchanged', async () => {
+  resetHealRestoreState();
+  const clock = { t: 5_000_000 };
+  const logged = []; const notes = [];
+  const { cmux, calls } = fakeCmux({ 'workspace:9': [FRESH, LIVE_CLAUDE], 'workspace:2': [FRESH, PICKER, LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE] });
+  const { r } = await quiet(() => maybeHealFailedRestores(mcOpts(cmux, (t) => logged.push(t), clock, { notify: async (...a) => notes.push(a) })));
+  assert.deepEqual(r.repaired.map((x) => [x.ref, x.kind]), [['workspace:9', 'claude'], ['workspace:2', 'mission-control']]);
+  const sends = calls.filter((c) => c.startsWith('send --workspace workspace:2 '));
+  assert.deepEqual(sends, [`send --workspace workspace:2 -- cd '/srv/the board'\\''s checkout' && scripts/mc-resume.sh ${MC_SID}`]);
+  assert.equal(calls.filter((c) => c === 'send-key --workspace workspace:2 enter').length, 2, 'enter, then the picker that was on screen');
+  assert.match(calls.find((c) => c.startsWith('send --workspace workspace:9 ')), new RegExp(`restore claude ${SESSION}$`), 'a resident still comes back by cmux restore');
+  assert.equal(calls.some((c) => c.includes('workspace:2') && /restore (claude|codex)/.test(c)), false);
+  assert.ok(logged.some((l) => /re-resumed Mission Control .*mc-resume\.sh/.test(l)));
+  assert.equal(notes.length, 1, 'one summary of the pass, no failure notice');
+});
+
+test('Mission Control not resumed: one ticker line and one owner notice, nothing typed (or, after the send, nothing answered)', async () => {
+  for (const [why, extra, screens, re, typed] of [
+    ['no id recorded', { mcSessionId: async () => '' }, null, /no id in data\/mission-control-session-id/, false],
+    ['an id that is not a UUID', { mcSessionId: async () => `${MC_SID}; rm -rf ~` }, null, /not a UUID/, false],
+    ['no transcript in the project folder', { transcriptAt: async () => null }, null, /no transcript/, false],
+    ['running elsewhere', { runningIds: async () => new Set([MC_SID]) }, null, /running elsewhere/, false],
+    ['running sessions unread', { runningIds: async () => null }, null, /could not be read/, false],
+    ['its pid alive', { sessionMaps: async () => mcMaps(MC_SID, 777), isAlive: (p) => p === 777 }, null, /is running/, false],
+    ['a used shell', {}, { 'workspace:2': [USED] }, /not a fresh shell/, false],
+    ['the failed-restore shape', {}, { 'workspace:2': [FAILED_VIEWPORT] }, /not a fresh shell/, false],
+    ['a trust dialog after the send', {}, { 'workspace:2': [FRESH, TRUST] }, /trust dialog/, true],
+    ['no agent UI after the send', {}, { 'workspace:2': [FRESH, FRESH] }, /not confirmed/, true],
+  ]) {
+    resetHealRestoreState();
+    const logged = []; const notes = [];
+    const { cmux, calls } = fakeCmux({ 'workspace:9': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE], ...(screens || { 'workspace:2': [FRESH] }) });
+    const { r } = await quiet(() => maybeHealFailedRestores(mcOpts(cmux, (t) => logged.push(t), { t: 5_000_000 }, { notify: async (...a) => notes.push(a), ...extra })));
+    assert.equal(r.repaired.length, 0, why);
+    assert.equal(calls.filter((c) => c.startsWith('send --workspace workspace:2')).length, typed ? 1 : 0, `${why}: typed`);
+    assert.equal(calls.filter((c) => c === 'send-key --workspace workspace:2 enter').length, typed ? 1 : 0, `${why}: no answer to anything on screen`);
+    assert.equal(logged.length, 1, why); assert.match(logged[0], re, why); assert.match(logged[0], /run scripts\/mc-resume\.sh in its pane/);
+    assert.equal(notes.length, 1, `${why}: one owner notice`); assert.equal(notes[0][2], logged[0]);
+  }
+});
+
+test('Mission Control: one try per cmux launch; a closed entry, a launch outside the window and a dry run type nothing', async () => {
+  resetHealRestoreState();
+  const logged = [];
+  const screens = { 'workspace:9': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE], 'workspace:2': [FRESH, FRESH] };
+  const start = 5_000_000 - 10 * 60_000;
+  let c = fakeCmux(screens);
+  await quiet(() => maybeHealFailedRestores(mcOpts(c.cmux, (t) => logged.push(t), { t: 5_000_000 }, { appStart: async () => start })));
+  c = fakeCmux(screens);
+  await quiet(() => maybeHealFailedRestores(mcOpts(c.cmux, (t) => logged.push(t), { t: 5_000_000 + 20 * 60_000 }, { appStart: async () => start })));
+  assert.equal(c.calls.some((x) => x.startsWith('send')), false, 'the same launch: no second try');
+  assert.equal(logged.length, 1);
+  c = fakeCmux(screens);   // cmux launched again: a new try
+  await quiet(() => maybeHealFailedRestores(mcOpts(c.cmux, (t) => logged.push(t), { t: 5_000_000 + 40 * 60_000 }, { appStart: async () => 5_000_000 + 30 * 60_000 })));
+  assert.equal(c.calls.filter((x) => x.startsWith('send --workspace workspace:2')).length, 1);
+
+  for (const [why, extra] of [
+    ['closed entry', { directory: async () => [{ ...MC_DIR[0], status: 'closed' }] }],
+    ['launch long ago', { appStart: async () => 5_000_000 - 3 * 3600_000 }],
+    ['launch too recent', { appStart: async () => 5_000_000 - 30_000 }],
+  ]) {
+    resetHealRestoreState();
+    const lines = []; const d = fakeCmux({ 'workspace:9': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE], 'workspace:2': [FRESH] });
+    await quiet(() => maybeHealFailedRestores(mcOpts(d.cmux, (t) => lines.push(t), { t: 5_000_000 }, extra)));
+    assert.equal(d.calls.some((x) => x.startsWith('send')), false, why);
+    assert.equal(lines.length, 0, `${why}: no line`);
+  }
+  resetHealRestoreState();
+  const d = fakeCmux({ 'workspace:9': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE], 'workspace:2': [FRESH] });
+  const { r } = await quiet(() => maybeHealFailedRestores(mcOpts(d.cmux, () => {}, { t: 5_000_000 }, { dryRun: true })));
+  assert.deepEqual(r.attempted.map((a) => [a.ref, a.kind, a.sessionId]), [['workspace:2', 'mission-control', MC_SID]]);
+  assert.equal(d.calls.some((x) => x.startsWith('send')), false);
+});
+
+test('Mission Control: the hook map\'s newer session (transcript in this project folder) wins, and both ids are logged', async () => {
+  resetHealRestoreState();
+  const { cmux, calls } = fakeCmux({ 'workspace:9': [LIVE_CLAUDE], 'workspace:12': [LIVE_CLAUDE], 'workspace:2': [FRESH, LIVE_CLAUDE] });
+  const { lines } = await quiet(() => maybeHealFailedRestores(mcOpts(cmux, () => {}, { t: 5_000_000 }, {
+    sessionMaps: async () => mcMaps(NEWER_SID), transcriptAt: async (id) => ({ [MC_SID]: 1000, [NEWER_SID]: 2000 })[id] ?? null })));
+  assert.match(calls.find((c) => c.startsWith('send --workspace workspace:2')), new RegExp(`mc-resume\\.sh ${NEWER_SID}$`));
+  assert.ok(lines.some((l) => l.includes(NEWER_SID) && l.includes(MC_SID)), 'both ids in one line');
 });

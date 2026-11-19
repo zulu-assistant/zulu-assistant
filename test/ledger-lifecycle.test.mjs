@@ -2,6 +2,7 @@
 // Ledger + worker lifecycle (#468): a close checks its PR landed, the request survives the
 // comment cap, spawn hands over a Mission Control task, the close sweep and its refusal,
 // the squash proof by branch name, the worker limit.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, realpath } from 'node:fs/promises';

@@ -9,6 +9,7 @@
 // Pure rules first, then the gate service and the ledger over temp dirs, then the demo board on a
 // spare port. As in test/caller.test.mjs, nothing here may assume WHO runs the suite: a request
 // that must have no session behind it is made by a process the test detaches on purpose.
+import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';

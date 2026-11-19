@@ -42,9 +42,13 @@ export function hookInput(j, env = process.env) {
   const tool = j.tool_name || 'Bash';
   const shell = raw != null && isShellTool(tool);
   return {
-    event: /post/i.test(j.hook_event_name || '') ? 'post' : 'pre',
+    // #627: Codex's PermissionRequest (asked after PreToolUse, before a call leaves its sandbox) is 'permission'
+    event: /post/i.test(j.hook_event_name || '') ? 'post' : j.hook_event_name === 'PermissionRequest' ? 'permission' : 'pre',
     engine,
     tool,
+    // #627: which call and turn this is (Codex: PreToolUse and PostToolUse carry the call's id; PermissionRequest only the turn)
+    ...(typeof j.tool_use_id === 'string' && j.tool_use_id ? { toolUseId: j.tool_use_id.slice(0, 128) } : {}),
+    ...(typeof j.turn_id === 'string' && j.turn_id ? { turn: j.turn_id.slice(0, 128) } : {}),
     command: raw,
     // the agent's own description of a shell call (shown on the row, labelled as the agent's words; not part of what an approval binds)
     ...(raw != null && typeof ti.description === 'string' && ti.description.trim() ? { description: ti.description.slice(0, 600) } : {}),
@@ -65,8 +69,15 @@ export function hookInput(j, env = process.env) {
   };
 }
 
-export function hookOutput(decision, reason, event = 'pre', updatedInput = null) {
+export function hookOutput(decision, reason, event = 'pre', updatedInput = null, engine = 'claude') {
   if (event === 'post' || !['allow', 'deny'].includes(decision)) return '';
+  // #627: Codex's permission request. Only `allow` is ever answered (the board never denies one), and with no
+  // other field: Codex 0.162.1 fails the hook closed on updated_input / updated_permissions / interrupt.
+  if (event === 'permission') return decision === 'allow' ? JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }) : '';
+  // #627: Codex takes only `deny` from PreToolUse (its `allow` is "unsupported", and the hook counts as failed). An
+  // approved call gets nothing: the same effect, without the failure line; the permission request that follows is
+  // the one answered.
+  if (engine === 'codex' && decision === 'allow') return '';
   // updatedInput (an allow only): the call runs with this input instead — how an approved merge is pinned to
   // the head the owner saw (`--match-head-commit`). Honoured in auto mode too (checked on 2.1.321).
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason,
@@ -164,6 +175,10 @@ export function boardWait(env = process.env) {
   return asked > 0 && asked < BOARD_WAIT_MS ? asked : BOARD_WAIT_MS;
 }
 
+/** #708: the board took longer than this hook waits (fetch's own timeout), as opposed to a refused or failed connection. */
+export const waitRanOut = (e) => e?.name === 'TimeoutError' || e?.name === 'AbortError';
+export const boardLate = (ms) => `GATE: the board did not answer within ${Math.round(ms / 1000)} s — gated command not run (fail closed). Run it again; if it keeps happening, tell the owner.`;
+
 async function main() {
   const raw = JSON.parse(readFileSync(0, 'utf8') || '{}');
   const input = hookInput(raw);
@@ -183,18 +198,21 @@ async function main() {
     });
     if (!res.ok) throw new Error(`board said ${res.status}`);
     r = await res.json();
-  } catch {
-    if (input.event === 'post') process.exit(EXIT_PASS);
+  } catch (e) {
+    // a call that already ran, or Codex's own permission request (#627: no board, no allow; Codex asks as usual)
+    if (input.event === 'post' || input.event === 'permission') process.exit(EXIT_PASS);
     // the session this hook really runs under, when it can be told (else the declared id, as before)
     const s = sessionWorkspace();
     const v = localVerdict(input, s.found ? { sessionWs: s.ws } : {});
     r = v.verdict !== 'gate' ? { decision: 'pass' }
       : board.named ? { decision: 'deny', reason: `GATE: this session's environment names another board (${board.named}), and the gate hook only asks its own (${hostPort(board.own)}) — gated command not run (fail closed). Tell the owner: MESH_BOARD or MC_PORT is set by a settings file's env block or a shell profile.` }
-        : { decision: 'deny', reason: 'GATE: board unreachable — gated command not run (fail closed). Retry when the board is up.' };
+        // #708: the board was there and slow (the wait ran out) is not the board being down
+        : waitRanOut(e) ? { decision: 'deny', reason: boardLate(timeout) }
+          : { decision: 'deny', reason: 'GATE: board unreachable — gated command not run (fail closed). Retry when the board is up.' };
   }
   // only a plain string command is rewritten (Claude Code's Bash input); the board falls back to re-reading for anything else
   const updated = r.decision === 'allow' && typeof r.updatedCommand === 'string' && typeof raw.tool_input?.command === 'string' ? { ...raw.tool_input, command: r.updatedCommand } : null;
-  const out = hookOutput(r.decision, r.reason, input.event, updated);
+  const out = hookOutput(r.decision, r.reason, input.event, updated, input.engine);
   if (!out) process.exit(EXIT_PASS);
   process.stdout.write(out);
 }

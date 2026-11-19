@@ -16,7 +16,7 @@ if [ "$mode" = "--remove" ]; then
   [ -n "${ZULU_NO_LAUNCHD:-}" ] || launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$DEST"; echo "removed $LABEL (archives in data/backups/ are kept)"; exit 0
 fi
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 scripts/render-tmpl.sh system/launchd/state-backup.plist.tmpl "$tmp/$LABEL.plist"
 plutil -lint "$tmp/$LABEL.plist" >/dev/null
 RUNNER="$(sed -n 's|.*<string>\(.*/selfheal-runner\.sh\)</string>.*|\1|p' "$tmp/$LABEL.plist" | head -1)"

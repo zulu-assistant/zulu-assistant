@@ -190,7 +190,7 @@ export function demoBeats(prevNow, now) {
   if (crossed(INPUT_AT)) out.push({ kind: 'bad', text: 'fix-weekly-export NEEDS INPUT: re-run the export against production?' });
   if (crossed(CLOSE_AT)) out.push({ kind: 'sys', text: 'mission-control: triage pass clean — 0 escalations', closeTask: true });
   if (crossed(GATE_AT)) out.push({ kind: 'bad', text: `guardrails: ${DEMO_GATE.agent} tried \`${DEMO_GATE.command}\` — not run, waiting on the owner`, gate: 'file' });
-  if (crossed(GATE_APPROVE_AT)) out.push({ kind: 'good', text: 'demo: the owner approved the gate on the phone → it ran once, receipt on the task', gate: 'approve' });
+  if (crossed(GATE_APPROVE_AT)) out.push({ kind: 'good', text: 'demo: the owner\'s approval released it → it ran once, receipt on the task', gate: 'approve' });   // true whether a viewer clicked RUN ONCE first or the script approved it
   return out;
 }
 
