@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup · %%BRAND%%</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  /* one readable column; depth drawn with light only */
+  body.su { padding: 16px 16px 40px; max-width: 760px; margin: 0 auto; font-size: 13px; }
+  .su header { gap: 10px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .su h1 { font-size: 15px; letter-spacing: .2em; }
+  .su h2 { font-size: 10px; letter-spacing: .18em; color: var(--ink-3); font-weight: 400; margin: 18px 0 6px; }
+  .su a { color: var(--ink-2); }
+  .su a:hover, .su a:focus-visible { color: var(--ink-bright); }
+  #su-meta { color: var(--ink-3); font-size: 10px; letter-spacing: .08em; margin-bottom: 10px; }
+  .su-head { color: var(--ink-bright); margin-bottom: 4px; }
+  .su-dim { color: var(--ink-3); }
+  .su-steps, .su-next { list-style: none; padding: 0; margin: 0; }
+  .su-step, .su-next li { background: var(--card); border: 1px solid var(--card-edge); border-radius: 4px; margin-bottom: 6px; padding: 8px 10px; overflow-wrap: anywhere; }
+  .su-step.su-todo, .su-step.su-check { border-left: 2px solid var(--accent); }
+  .su-step.su-check { border-left-color: var(--status-warning); }
+  .su-mark { font-size: 10px; letter-spacing: .1em; white-space: nowrap; }
+  .su-mark.ok { color: var(--status-ok); }
+  .su-mark.warn { color: var(--status-warning); }
+  .su-mark.dim { color: var(--ink-3); }
+  .su-mark.todo { color: var(--ink-bright); }
+  .su-title { color: var(--ink-bright); }
+  .su-detail { color: var(--ink-2); margin-top: 3px; }
+  .su-cmd { margin-top: 5px; }
+  kbd { color: var(--ink-bright); font: inherit; border: 1px solid var(--card-edge); border-radius: 3px; padding: 1px 6px; user-select: all; }
+  .su-copy {
+    background: transparent; color: var(--ink-2); border: 1px solid var(--card-edge); border-radius: 3px;
+    font: inherit; font-size: 10px; letter-spacing: .12em; padding: 1px 6px; cursor: pointer;
+  }
+  .su-copy:hover, .su-copy:focus-visible { color: var(--ink-bright); border-color: var(--accent); box-shadow: var(--glow-green); outline: none; }
+  /* the forms of mode 'write'; absent in the read-only page */
+  #su-write:empty { display: none; }
+  .sw-form { border: 1px solid var(--card-edge); border-radius: 4px; background: var(--card); padding: 8px 10px; margin-bottom: 8px; }
+  .sw-form h3 { font-size: 11px; letter-spacing: .14em; color: var(--ink-bright); margin: 0 0 6px; }
+  .sw-row { margin: 4px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sw-form input[type="text"], .sw-form select, .sw-form textarea {
+    background: transparent; color: var(--ink-bright); border: 1px solid var(--card-edge); border-radius: 3px; font: inherit; padding: 2px 6px;
+  }
+  .sw-form textarea { width: 100%; min-height: 48px; }
+  .sw-form input:focus-visible, .sw-form select:focus-visible, .sw-form textarea:focus-visible { border-color: var(--accent); outline: none; }
+  .sw-list { list-style: none; padding: 0; margin: 4px 0; max-height: 220px; overflow: auto; }
+  .sw-list li { margin: 2px 0; overflow-wrap: anywhere; }
+  .sw-btn {
+    background: transparent; color: var(--ink-2); border: 1px solid var(--card-edge); border-radius: 3px;
+    font: inherit; font-size: 10px; letter-spacing: .12em; padding: 2px 8px; cursor: pointer;
+  }
+  .sw-btn:hover, .sw-btn:focus-visible, .sw-btn.sw-armed { color: var(--ink-bright); border-color: var(--accent); box-shadow: var(--glow-green); outline: none; }
+  .sw-note { font-size: 11px; color: var(--ink-2); margin-top: 4px; overflow-wrap: anywhere; }
+  .sw-note.sw-bad { color: var(--ink-bright); }
+  .sw-btn:disabled { opacity: .45; cursor: default; box-shadow: none; }
+  .sw-out { font: inherit; font-size: 11px; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 6px 8px; border: 1px solid var(--line, currentColor); }
+  @media (max-width: 480px) { body.su { padding: 10px 10px 34px; font-size: 12px; } }
+</style>
+%%SETUP_WRITE%%
+</head>
+<body class="su">
+  <header><div class="brand"><span class="brand-mark"></span><h1>SETUP</h1></div><a href="/">← the board</a></header>
+  <div id="su-meta">loading…</div>
+  <section id="su-write"></section>
+  <main id="su-body"></main>
+  <script src="/setup.js"></script>
+</body>
+</html>

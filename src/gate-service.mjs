@@ -192,6 +192,114 @@ export const cannotWake = (agent) => /^(unregistered|headless):/.test(String(age
 // #624: the forms a Codex call with an unread folder may be restated in, and the only ones the texts name. Each is
 // read by the one rule (#551); a test files one call per form (test/gate-codex-folder.test.mjs).
 export const RESTATE_FORMS = Object.freeze(['cd /abs/path && …', 'git -C /abs/path …', 'gh … --repo owner/name']);
+// #786: an `opaque` row the agent can usually avoid, and how. Text only: the call stays held and the row stays filed.
+// A program that "runs inside a guarded folder" gets no hint (its files are the gate's to hold, by any tool); nor does
+// any other class. The edit-tool hint is for Claude Code sessions only: there the Edit and Write tools are read for the
+// file they touch, and a guarded file is held (pathGuard / pathWrite). A Codex patch is not read that way, so a Codex
+// session gets no such hint. A pending row does not expire by itself, so the agent is told to say on the task that
+// the row is not needed.
+export const OPAQUE_HINTS = Object.freeze({
+  program: (t, g) => `Before you wait: if this program only edits files, make the change with the Edit or Write tool instead: those are read for the file they touch, and a guarded file is held there too. Then withdraw this row: task.sh withdraw ${t} ${g} '<why it is not needed>'. If the program does more, wait for the owner as above.`,
+  message: (t, g) => `Before you wait: if the gated word is only in text the command passes on (a message, a note), write that text as one literal argument in single quotes instead, with no apostrophe inside, no variable and no heredoc (for a message: agent-send.sh <to> '<text>' --task <its task>). Then withdraw this row: task.sh withdraw ${t} ${g} '<why it is not needed>'. If the command does what the word says, wait for the owner as above.`,
+});
+export function opaqueHint(t, g, engine = 'claude') {
+  if (g?.cls !== 'opaque') return '';
+  const why = String(g.why || '');
+  if (/program (from a heredoc|passed on the command line) mentions a gated action/.test(why)) return engine === 'claude' ? ` ${OPAQUE_HINTS.program(t, g.id)}` : '';
+  if (/a gated pattern the parser could not attribute/.test(why)) return ` ${OPAQUE_HINTS.message(t, g.id)}`;
+  return '';
+}
+// #786 C: a new row whose text nearly matches a row on the same task (seen: g4's text again with `cd <repo> &&` in front
+// after g4 had run; the same text after the approval had been used). A note for the owner and the agent only: the
+// call is judged, held and filed exactly as without it; nothing is released and no row is merged.
+// Nearly = the same agent, the same class, the same folder and, after dropping a leading `cd <dir> &&` that names the
+// row's own folder, the same words: quotes around a word with no space or quote in it are dropped and runs of white
+// space outside quotes are one space; a quoted string with a space keeps its quotes and spacing (`'build cache'` is not
+// `build cache`). Rows of the last 24 hours that are pending, approved (and not run out) or released to run. A row
+// whose command was withheld (a secret) is never compared: its shown text is a placeholder.
+export const NEAR_COPY_HOURS = 24;
+function unquote(s) { return String(s || '').replace(/^(["'])(.*)\1$/, '$2'); }
+const trimSlash = (d) => String(d || '').replace(/\/+$/, '');
+
+// #786 C2 (the NOTE only; the verdict, the hold and the filing never read this): a trailing `2>&1` and a trailing
+// pipe into a plain text filter only change what the agent sees of the output, so `X 2>&1 | tail -20` is a near
+// copy of `X` (734 g5). Only grep/egrep/fgrep/tail/head/cat, and only when the filter's words hold no redirect and
+// nothing spelled like an output option (`-o`, `--output…`; conservative: grep -o is a read, it just gets no note).
+// Never tee, a shell, an interpreter or a writer. The scan reads quotes, backslashes, `$(…)` and backticks: a `|`
+// inside any of them is not a pipe.
+export const NEAR_TAIL_FILTERS = new Set(['grep', 'egrep', 'fgrep', 'tail', 'head', 'cat']);
+/** Index of the last top-level `|` that is a pipe (not `||`, not `|&`), or -1. */
+function lastPipe(s) {
+  let q = null; let depth = 0; let last = -1;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '\\' && q !== "'") { i += 1; continue; }
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '$' && s[i + 1] === '(') { depth += 1; i += 1; continue; }
+    if (c === '(') { depth += 1; continue; }
+    if (c === ')') { depth = Math.max(0, depth - 1); continue; }
+    if (depth || c !== '|') continue;
+    if (s[i + 1] === '|' || s[i + 1] === '&') { i += 1; continue; }
+    if (s[i - 1] === '|') continue;
+    last = i;
+  }
+  return q || depth ? -1 : last;
+}
+/** Is this pipe tail a plain text filter that writes nothing? (its words, read outside quotes) */
+function plainFilter(tail) {
+  const words = tail.trim().match(/"[^"]*"|'[^']*'|\S+/g) || [];
+  if (!words.length || !NEAR_TAIL_FILTERS.has(words[0])) return false;
+  // a redirect, a here-doc, a sub-command, a background or a further command anywhere in it = not plain
+  const bare = words.filter((w) => !/^["']/.test(w));
+  if (bare.some((w) => /[<>;&`]|\$\(/.test(w))) return false;
+  // anything spelled like an output option: a short cluster with `o` in it, or `--output…`
+  if (bare.some((w) => /^-[a-zA-Z0-9]*o/.test(w) || /^--output/.test(w))) return false;
+  return true;
+}
+export function dropNearTail(command) {
+  let s = String(command || '').trim();
+  for (;;) {
+    const before = s;
+    s = s.replace(/\s+2>&1$/, '');
+    const p = lastPipe(s);
+    if (p > 0 && plainFilter(s.slice(p + 1))) s = s.slice(0, p).trimEnd();
+    if (s === before) return s;
+  }
+}
+export function nearKey(command, cwd) {
+  let s = dropNearTail(String(command || '').trim());
+  const m = s.match(/^cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*/);
+  if (m && cwd && trimSlash(unquote(m[1])) === trimSlash(cwd)) s = s.slice(m[0].length);
+  // quoted parts kept whole; outside them white space runs become one space
+  const parts = s.match(/"[^"]*"|'[^']*'|[^"']+|["']/g) || [];
+  return parts.map((p) => {
+    if (/^(["']).*\1$/s.test(p) && p.length >= 2) {
+      const inner = p.slice(1, -1);
+      return /^[^\s"'\\$`]+$/.test(inner) ? inner : `'${inner}'`;
+    }
+    return p.replace(/\s+/g, ' ');
+  }).join('').trim();
+}
+export function nearCopyOf(gates, row, now = Date.now()) {
+  if (row.commandRedacted) return null;
+  const key = nearKey(row.command, row.cwd);
+  if (!key) return null;
+  const since = now - NEAR_COPY_HOURS * 3600e3;
+  const live = (g) => g.status === 'pending' || g.status === 'executed'
+    || (g.status === 'approved' && !(g.expires_at && Date.parse(g.expires_at) <= now));
+  const hits = (gates || []).filter((g) => live(g) && !g.commandRedacted && g.cls === row.cls && g.agent === row.agent
+    && trimSlash(g.cwd) === trimSlash(row.cwd) && Date.parse(g.requested_at || '') >= since && nearKey(g.command, g.cwd) === key);
+  const g = hits[hits.length - 1];
+  if (!g) return null;
+  // released to run is not proof that it ran: `ran` only with the run's own receipt (#627's ran_at)
+  return { of: g.id, status: g.status, at: g.status === 'executed' ? (g.ran_at || g.executed_at || null) : (g.decided_at || g.requested_at || null), ...(g.status === 'executed' && g.ran_at ? { ran: true } : {}) };
+}
+export const NEAR_COPY_TEXT = {
+  approved: (t, of) => `This nearly matches ${of} on task #${t}, which the owner approved and which has not been used: run ${of}'s text exactly, once, as its own call (task.sh audit ${t} shows it).`,
+  executed: (t, of) => `This nearly matches ${of} on task #${t}, which was already released to run (an approval runs once). If a second run is on purpose, say why on task #${t}.`,
+  pending: (t, of) => `This nearly matches ${of} on task #${t}, which is already waiting for the owner.`,
+};
 export const denyText = {
   pending: (t, g, { noWake = false } = {}) => `GATE: ${g.label} — not run. Waiting on the owner, task #${t} (gate ${g.id})${g.previously ? `; it was approved before (${String(g.previously.at).slice(11, 16)}Z, ${g.previously.gate}) but expired unused, so the owner is asked again` : ''}. ${noWake
     ? `This session cannot be woken: run the same command again after the owner approves (an approval lasts ${Number(g.ttlMinutes) || 120} minutes). Do not change it or work around it.`
@@ -901,7 +1009,7 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     }
     if (prior?.g.status === 'pending') {
       await ledger.update(prior.t.id, { op: 'gate_event', actor: 'board', gate: prior.g.id, event: 'attempt' }, { gateSystem: true });
-      return { decision: 'deny', reason: denyText.waiting(prior.t.id, prior.g, { noWake: cannotWake(agent) }), task: prior.t.id, gate: prior.g.id };
+      return { decision: 'deny', reason: denyText.waiting(prior.t.id, prior.g, { noWake: cannotWake(agent) }) + opaqueHint(prior.t.id, prior.g, engine), task: prior.t.id, gate: prior.g.id };
     }
     if (prior?.g.status === 'declined') {
       const u = await ledger.update(prior.t.id, { op: 'gate_event', actor: 'board', gate: prior.g.id, event: 'rerun_declined' }, { gateSystem: true });
@@ -1019,13 +1127,19 @@ export function createGateService({ root, ledger, policyFile, identifyWs, headle
     }
 
     // 6. file the gate and wait on the owner
+    // #786 C: a note only; computed from the task as it stands, the row is filed the same either way. Read before the
+    // last deadline check, so a late read files nothing (#708 D)
+    const near = nearCopyOf((await ledger.get(where.id))?.gates || [], base, now());
+    if (near) base.nearCopy = near;
     if (late()) return { decision: 'deny', reason: denyText.late(), stale: true };   // #708: the standing check reads too
     const u = await ledger.update(where.id, { op: 'gate_request', actor: 'board', gate: base }, { gateSystem: true });
     const g = u.task.gates[u.task.gates.length - 1];
     await afterTaskChange(u.task, u, 'board');
     // held only because the landing shares its command text with something else: say how to get the auto-run
     const hint = (/not under the program go: the landing is not the whole command/.test(base.why || '') ? ` ${ALONE_HINT}` : '')
-      + (/is not bound to a (commit|head) \(run before it in the same call/.test(base.why || '') ? ` ${denyText.boundHint()}` : '');
+      + (/is not bound to a (commit|head) \(run before it in the same call/.test(base.why || '') ? ` ${denyText.boundHint()}` : '')
+      + opaqueHint(where.id, g, engine)
+      + (g.nearCopy ? ` ${NEAR_COPY_TEXT[g.nearCopy.status](where.id, g.nearCopy.of)}` : '');
     return { decision: 'deny', reason: denyText.pending(where.id, g, { noWake: cannotWake(agent) }) + hint, task: where.id, gate: g.id };
     });
   }

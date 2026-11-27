@@ -134,6 +134,49 @@ test('#624: the scrolled footer is read on the last line only, never quoted from
   assert.equal(classifyScreen(['enter/esc latest', 'user@host dir % '].join('\n')).state, 'shell');
 });
 
+// #787: Codex 0.170.0 in a narrow pane (as read from a live resident pane, read only) and on a scratch pane: the idle
+// footer keeps `← for agents` and the warnings, and drops `? for shortcuts`.
+const CODEX_NARROW = [
+  '› Ask Codex to do anything',
+  ' ',
+  '  GPT-6 high fast · ~/my-app',
+  '  /dashboard',
+  '  · [mesh] from coordinator: a queued line…',
+  '  ← for agents            ⚠ 3 warnings · f2 to view',
+].join('\n');
+// with a draft the hint is gone; only the warnings part stays (scratch pane)
+const CODEX_NARROW_DRAFT = CODEX_NARROW.replace('Ask Codex to do anything', 'Reply with the single word ok.').replace('← for agents            ⚠', '                        ⚠');
+
+test('#787: a narrow Codex 0.170.0 pane with the warnings footer is ready; a draft or a turn in it is not', () => {
+  assert.equal(classifyScreen(CODEX_NARROW).state, 'ready');
+  assert.deepEqual(classifyScreen(CODEX_NARROW_DRAFT), { state: 'draft', draft: 'Reply with the single word ok.', busy: false });
+  // a draft typed while the hint still shows is a draft all the same
+  assert.equal(classifyScreen(CODEX_NARROW.replace('Ask Codex to do anything', 'half a thought')).state, 'draft');
+  const working = `• Working (6s • esc to interrupt)\n${CODEX_NARROW}`;
+  assert.equal(classifyScreen(working).state, 'busy');
+  const approval = ['  $ node tools/report.mjs', '› 1. Yes, proceed (y)', '  3. No, and tell Codex what to do differently (esc)', '  Press enter to confirm or esc to cancel'].join('\n');
+  assert.equal(classifyScreen(`${approval}\n \n${CODEX_NARROW}`).state, 'dialog');
+  assert.equal(classifyScreen(CODEX_NARROW.replace('› Ask Codex to do anything\n', '')).state, 'unknown');   // no input line: not ready
+});
+
+test('#787: the agents hint is read on the last line only, at its start', () => {
+  const quoted = ['⏺ The footer starts with ← for agents in that view.', '', '────────────', '❯ ', '────────────', '  Context left until auto-compact: 3%'].join('\n');
+  assert.equal(classifyScreen(quoted).state, 'unknown');
+  assert.equal(classifyScreen(['  ← for agents', 'user@host dir % '].join('\n')).state, 'shell');
+  // the hint quoted mid-line on the last line does not count
+  assert.equal(classifyScreen(['› Ask Codex to do anything', ' ', '  gpt-6 · ~/my-app', '  see ← for agents in the footer'].join('\n')).state, 'unknown');
+  // a last line that only starts with the same words is not the footer (Codex reviews of e973f67, ccbfa27)
+  assert.equal(classifyScreen(['› Ask Codex to do anything', ' ', '  gpt-6 · ~/my-app', '  ← for agents is the wording I would use'].join('\n')).state, 'unknown');
+  // a placeholder-shaped draft with a blank line and more text under it (Codex review of ccbfa27)
+  assert.equal(classifyScreen(['› Write tests for the footer', '', '  unfinished reply', '  ← for agents'].join('\n')).state, 'unknown');
+  // an empty input line with a draft wrapped under it: not the placeholder, so not ready (Codex review of ab45aef)
+  assert.equal(classifyScreen(['›', '  unfinished reply', '  ← for agents'].join('\n')).state, 'unknown');
+  // a draft whose first line looks like a placeholder, wrapped onto the hint's words (Codex review of 1e335df)
+  assert.equal(classifyScreen(['› Write tests for the footer', '  ← for agents'].join('\n')).state, 'unknown');
+  // the hint alone (a pane with no warnings) is the footer; it fails on the classifier before #787
+  assert.equal(classifyScreen(['› Ask Codex to do anything', ' ', '  gpt-6 · ~/my-app', '  ← for agents'].join('\n')).state, 'ready');
+});
+
 test('dialog words far up the conversation do not block delivery', () => {
   const old = ['Do you want to proceed? (from an old answer)', ...Array(20).fill('⏺ some output')].join('\n');
   assert.equal(classifyScreen(old + '\n' + CLAUDE_READY).state, 'ready');
@@ -777,4 +820,156 @@ test('reconcile never registers a demo workspace (server passes them as ignoreId
   const ignoreIds = new Set(workspaces.filter((w) => isDemoWorkspace(w)).map((w) => w.id));
   const r = reconcile(doc, { workspaces, sessionMap: {}, registry: [], ignoreIds });
   assert.deepEqual(r.changes.added.map((a) => a.workspaceId), [WIN_A]);
+});
+
+// #811: Gemini CLI 0.70.0, as read from live panes (read only) and a scratch pane. The composer is a box of ▄ / ▀ bars.
+const G_TOP = '▄'.repeat(57);
+const G_BOTTOM = '▀'.repeat(57);
+const G_EMPTY = ' >   Type your message or @path/to/file';
+const G_FOOT = [' workspace (/directory)     sandbox               /model', ' ~/my-app                   no sandbox     gemini-x'];
+const gemini = (box, above = ['✦ Done.', '', '─'.repeat(57), ' Shift+Tab to accept edits', '', '  1 GEMINI.md file']) =>
+  [...above, G_TOP, ...box, G_BOTTOM, ...G_FOOT].join('\n');
+const GEMINI_READY = gemini([G_EMPTY]);
+const cg = (screen) => classifyScreen(screen, { vendor: 'gemini' });
+
+test('#811: the Gemini rules are read only for a Gemini pane, and a Gemini pane never by the other rules', () => {
+  // a pane of another vendor (or none) showing Gemini's empty composer is not made ready by it
+  assert.equal(classifyScreen(GEMINI_READY).state, 'unknown');
+  assert.equal(classifyScreen(GEMINI_READY, { vendor: 'claude' }).state, 'unknown');
+  // a Gemini pane showing a Claude or Codex ready screen is not ready
+  assert.equal(cg(CLAUDE_READY).state, 'unknown');
+  assert.equal(cg(CODEX_READY).state, 'unknown');
+  assert.equal(cg(SHELL).state, 'shell');
+  // Gemini's dialog lines quoted in another vendor's pane do not hold it (Codex review of 27b77c5)
+  const quotedBox = ['⏺ It showed:', '│ Allow execution of [Shell]? │', '', '────────────', '❯ ', '────────────', '  ? for shortcuts'].join('\n');
+  assert.equal(classifyScreen(quotedBox).state, 'ready');
+  assert.equal(cg(quotedBox).state, 'dialog');
+});
+
+test('#811: an idle Gemini pane is ready, in a narrow pane and in a wide one with "? for shortcuts"', () => {
+  assert.equal(cg(GEMINI_READY).state, 'ready');
+  assert.equal(cg(`${GEMINI_READY}\n`).state, 'ready');
+  const wide = gemini([`${G_EMPTY}                         `], ['ℹ Skipping project agents.', '', '                 ? for shortcuts', '─'.repeat(57), ' Shift+Tab to accept edits                1 GEMINI.md file']);
+  assert.equal(cg(wide).state, 'ready');
+  // the other mode line (live pane), and a footer of one line only (cut short)
+  assert.equal(cg([' auto-accept edits Shift+Tab to plan', '', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0]].join('\n')).state, 'ready');
+  // no mode line above the box: not Gemini's composer
+  assert.equal(cg([G_TOP, G_EMPTY, G_BOTTOM, ...G_FOOT].join('\n')).state, 'unknown');
+});
+
+test('#811: a Gemini draft is a draft, one line or wrapped; any other text in the box is not ready', () => {
+  assert.deepEqual(cg(gemini([' > draft words here'])), { state: 'draft', draft: 'draft words here', busy: false });
+  assert.deepEqual(cg(gemini([' > a longer draft that wraps onto', '   the next line'])), { state: 'draft', draft: 'a longer draft that wraps onto the next line', busy: false });
+  // the placeholder words with one space (typed, not the placeholder) are a draft
+  assert.equal(cg(gemini([' > Type your message or @path/to/file'])).state, 'draft');
+  // the empty line with a second line under it is not the empty composer
+  assert.equal(cg(gemini([G_EMPTY, '   more'])).state, 'draft');
+  assert.equal(cg(gemini([' ! ls'])).state, 'unknown');
+  assert.equal(cg(gemini([' >'])).state, 'unknown');
+});
+
+test('#811: a Gemini turn, tool approval or trust prompt is never ready', () => {
+  // during a turn the empty box stays on screen; the busy line reads as a dialog first
+  const turn = gemini([G_EMPTY], ['', ' ⠋ Thinking... (esc to cancel, 1s)        ? for shortcuts', '─'.repeat(57), ' Shift+Tab to accept edits']);
+  assert.equal(cg(turn).state, 'dialog');
+  // a tool approval hides the box; the echo of the last message is a box higher up
+  const echo = [G_TOP, ' > Run the shell command date', G_BOTTOM, ''];
+  const approval = ['╭' + '─'.repeat(40) + '╮', '│ ? Shell  date                          │', '│ Allow execution of [Shell]?            │', '│                                        │', '│ ● 1. Allow once                        │', '│   2. No, suggest changes (esc)         │', '╰' + '─'.repeat(40) + '╯'];
+  assert.equal(cg([...echo, ...approval].join('\n')).state, 'dialog');
+  assert.notEqual(cg([...echo, ...approval.filter((l) => !/Allow execution/.test(l))].join('\n')).state, 'ready');
+  // the echo of an empty-looking box higher up is not the composer
+  assert.notEqual(cg([G_TOP, G_EMPTY, G_BOTTOM, '✦ OK', '', 'more text', 'and more'].join('\n')).state, 'ready');
+  const trust = ['│ Do you trust the files in this folder?   │', '│ ● 1. Trust folder (my-app)                │', '│   3. Don\'t trust                          │'].join('\n');
+  assert.equal(cg(trust).state, 'dialog');
+  // the placeholder quoted with no box is not ready
+  assert.equal(cg(['✦ The composer reads', G_EMPTY, 'in that view.'].join('\n')).state, 'unknown');
+});
+
+test('#811 (Codex review of 632dbc1): a box in a shell, a long draft and quoted dialog words', () => {
+  // a box printed in a shell, then the prompt: a shell, not a composer
+  assert.equal(cg([G_TOP, G_EMPTY, G_BOTTOM, 'host % '].join('\n')).state, 'shell');
+  assert.equal(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], 'host % '].join('\n')).state, 'shell');
+  // a box followed by anything but the footer is not taken
+  assert.notEqual(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, 'something else'].join('\n')).state, 'ready');
+  // a draft too long for the screen: the top bar is gone, so never the Claude/Codex rules
+  const long = ['  ? for shortcuts', ' > unfinished', ...Array.from({ length: 6 }, (_, i) => `   line ${i}`), '   › Ask Codex to do anything', G_BOTTOM, ...G_FOOT];
+  assert.equal(cg(long.join('\n')).state, 'unknown');
+  assert.equal(cg([long[0], ' Shift+Tab to accept edits', G_TOP, ...long.slice(1)].join('\n')).state, 'draft');
+  // (Codex review of 27b77c5) the same draft, then an unexpected status line under the bar: still never ready
+  assert.equal(cg([long[0], ' Shift+Tab to accept edits', G_TOP, ...long.slice(1, -2), 'status: something'].join('\n')).state, 'unknown');
+  // the dialog words quoted in a conversation do not block another vendor's ready pane
+  const quoted = ['⏺ The dialog says "Allow execution of [Shell]?" and "Do you trust the files in this folder?"', '', '────────────', '❯ ', '────────────', '  ? for shortcuts'].join('\n');
+  assert.equal(classifyScreen(quoted).state, 'ready');
+});
+
+test('#811: deliverNow types + enters into an idle Gemini pane', async () => {
+  const { run, calls } = fakeCmux([GEMINI_READY, GEMINI_READY]);
+  const sleep = async (ms) => { calls.push(['sleep', ms]); };
+  const r = await deliverNow({ ...AGENT, vendor: 'gemini' }, '[mesh] hi', { run, sleep });
+  assert.equal(r.delivered, true);
+  // the probed sequence: the text, a 300 ms pause, one Enter
+  const typed = calls.filter((c) => c[0] === 'send' || c[0] === 'send-key' || c[0] === 'sleep').slice(0, 3);
+  assert.deepEqual(typed, [['send', '--workspace', AGENT.workspaceId, '--', '[mesh] hi'], ['sleep', 300], ['send-key', '--workspace', AGENT.workspaceId, 'enter']]);
+  assert.equal(calls.filter((c) => c[0] === 'send-key').length, 1);
+});
+
+test('#811 (Codex review of 89ee95f): a prompt with no end mark, a blank line inside a draft', () => {
+  // a box and footer printed in a shell whose prompt has no end mark: without the mode line, and with it
+  assert.notEqual(cg([G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], '➜ my-app'].join('\n')).state, 'ready');
+  assert.notEqual(cg([G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0]].join('\n')).state, 'ready');
+  // (Codex review of ec8852c) the same with the mode line: the prompt is not a values row in columns
+  assert.notEqual(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], '➜ my-app'].join('\n')).state, 'ready');
+  assert.equal(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, ...G_FOOT].join('\n')).state, 'ready');
+  // a blank line between a draft and a bar pasted into it
+  assert.equal(cg(gemini([' > unfinished draft', '', G_TOP, G_EMPTY])).state, 'unknown');
+});
+
+test('#811 (Codex review of 62a85b7): a prompt after the footer, a bar inside a draft, dialog words at a line start', () => {
+  // with the mode line, so only the prompt check stands between these and ready (Codex review of 27b77c5)
+  assert.notEqual(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], 'user@host:~$ '].join('\n')).state, 'ready');
+  assert.notEqual(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], 'user@host:~/my-app      $ '].join('\n')).state, 'ready');
+  // (Codex review of a804465) a prompt in columns that only the prompt-end check rejects
+  assert.notEqual(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], '~/my-app     git(main) ❱'].join('\n')).state, 'ready');
+  // (Codex review of 19a56a4) a prompt in columns that does not start with a folder
+  assert.notEqual(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], '➜ my-app     git:(main)'].join('\n')).state, 'ready');
+  // the live values rows: a home folder, an absolute folder shortened by Gemini
+  assert.equal(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], ' /private/.../my-app        untrusted         Auto'].join('\n')).state, 'ready');
+  // (Codex review of b5860d6) a folder with a space in it, and the home folder alone
+  for (const row of [' ~/My Project     no sandbox     Auto', ' ~     no sandbox     Auto'])
+    assert.equal(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, G_FOOT[0], row].join('\n')).state, 'ready', row);
+  // an approval line quoted above a valid empty composer does not hold the pane
+  assert.equal(cg(GEMINI_READY.replace('✦ Done.', '│ Allow execution of [Shell]? │')).state, 'ready');
+  assert.notEqual(cg([' Shift+Tab to accept edits', G_TOP, G_EMPTY, G_BOTTOM, ...G_FOOT, 'more'].join('\n')).state, 'ready');
+  // a bar pasted into an unfinished draft, with the placeholder words under it
+  assert.equal(cg(gemini([' > unfinished draft', G_TOP, G_EMPTY])).state, 'unknown');
+  assert.equal(cg(gemini([' > unfinished draft', `   ${G_TOP}`, `   ${G_EMPTY.trim()}`])).state, 'draft');
+  // a continuation that is not indented as Gemini indents it
+  assert.equal(cg(gemini([' > a draft', 'not indented'])).state, 'unknown');
+  const said = ['Allow execution of the scheduled job.', 'Do you trust the files in this folder?', '', '────────────', '❯ ', '────────────', '  ? for shortcuts'].join('\n');
+  assert.equal(classifyScreen(said).state, 'ready');
+});
+
+// #812: the launch kick reads the pane by its engine (MC's note on 811: without it a Gemini launch timed out)
+test('#812: kickSession with vendor gemini sees an idle Gemini pane as ready and submits the brief', async () => {
+  const splash = 'Gemini CLI v0.70.0';
+  const busy = gemini([G_EMPTY], ['', ' ⠋ Thinking... (esc to cancel, 1s)', '─'.repeat(57), ' Shift+Tab to accept edits']);
+  const { run, calls } = fakeCmux([splash, GEMINI_READY, busy]);
+  let t = 0;
+  const r = await kickSession({ workspace: 'W', line: 'Read the brief: /x', name: 'g1', vendor: 'gemini', run, sleep: noSleep, now: () => (t += 1000), registry: async () => [] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(calls.find((c) => c[0] === 'send'), ['send', '--workspace', 'W', '--', 'Read the brief: /x']);
+  // without the vendor the same screens never read ready (the timeout MC found)
+  const second = fakeCmux([splash, GEMINI_READY, busy]);
+  t = 0;
+  const r2 = await kickSession({ workspace: 'W', line: 'x', name: 'g1', run: second.run, sleep: noSleep, now: () => (t += 1000), registry: async () => [], timeoutMs: 10_000 });
+  assert.equal(r2.ok, false);
+  assert.ok(!second.calls.some((c) => c[0] === 'send'), 'nothing typed');
+  // a folder-trust prompt at launch is reported, never answered
+  const trust = ['│ Do you trust the files in this folder?   │', '│ ● 1. Trust folder (my-app)                │'].join('\n');
+  const third = fakeCmux([trust]);
+  t = 0;
+  const r3 = await kickSession({ workspace: 'W', line: 'x', name: 'g1', vendor: 'gemini', run: third.run, sleep: noSleep, now: () => (t += 5000), registry: async () => [] });
+  assert.equal(r3.ok, false);
+  assert.match(r3.reason, /dialog/);
+  assert.ok(!third.calls.some((c) => c[0] === 'send' || c[0] === 'send-key'), 'no key sent to the trust prompt');
 });

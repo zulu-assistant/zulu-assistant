@@ -3,6 +3,15 @@
 One-click upgrade ships in 1.2.0 (see [VERSIONS.md](VERSIONS.md)), and 1.2.0 is the first release you can upgrade *from* this way; from 1.0.x, upgrade by hand once ([INSTALL.md](INSTALL.md) §7b). From then on an install made by `get.sh` upgrades with one click: the board's **update** card shows **⇧ UPDATE TO vX.Y.Z** when a newer release is out.
 The same steps run from a terminal with `zulu upgrade`.
 
+## Upgrading to 1.4.0
+From 1.3.x, the button (or `zulu upgrade`) is all that is needed. No rule in your rules file, no migration. Three things to know:
+
+- **An endpoint card whose service answers 5xx turns red** after the upgrade, and red reaches your alert channels. Before, any HTTP answer read as up. If one of yours goes red, the service is failing; a health address that answers 5xx on purpose can be judged by its JSON body instead (`okPath`, `okValue`, see the [changelog](../CHANGELOG.md)).
+- **If you saved a password or key holding a double quote or a backslash with `zulu setup`, enter it again** (`zulu setup --step alerts`): an earlier release saved it with backslashes added.
+- **The new pages and wakes are off until you add their keys** to your registry (`decidePage`, `readAsks`); an upgrade never changes your registry. The setup page and the conversation view are a preview and stay off.
+
+From 1.3.0 with Codex agents, read [Upgrading to 1.3.2](#upgrading-to-132) as well; from 1.2.x, also [Upgrading to 1.3](#upgrading-to-13).
+
 ## Upgrading to 1.3.2
 From 1.3.0 or 1.3.1, the button (or `zulu upgrade`) is all that is needed, with one step of yours **if your agents include Codex**:
 

@@ -38,6 +38,9 @@ export function addGate(t, g, iso) {
       ...(g.dryRun.notAsked ? { notAsked: { cls: String(g.dryRun.notAsked.cls || '').slice(0, 40), label: String(g.dryRun.notAsked.label || '').slice(0, 120) } } : {}) } : { required: false, seen_at: null, dryHash: null },
     // the same call was approved before and expired unused (shown on the row; never re-armed)
     previously: g.previously ? { gate: String(g.previously.gate || ''), task: Number(g.previously.task) || null, at: g.previously.at || null } : null,
+    // #786 C: a row on the same task with nearly the same text (a note for the owner and the agent; decides nothing)
+    ...(g.nearCopy && /^g\d+$/.test(String(g.nearCopy.of || '')) && ['pending', 'approved', 'executed'].includes(g.nearCopy.status)
+      ? { nearCopy: { of: String(g.nearCopy.of), status: g.nearCopy.status, at: g.nearCopy.at ? String(g.nearCopy.at).slice(0, 30) : null, ...(g.nearCopy.ran === true ? { ran: true } : {}) } } : {}),
     // row context (src/row-context.mjs): chip ids from a fixed table, and the agent's own description of the call
     context: cleanContext(g.context), agentReason: g.agentReason ? String(g.agentReason).slice(0, MAX_WORDS) : null,
     status, decision: null, decided_by: null, decided_at: null, via: null, reason: null, recorded_by: null,
@@ -64,7 +67,7 @@ export function findGate(t, id) {
 }
 export const pendingGates = (t) => (t.gates || []).filter((g) => g.status === 'pending')
   .map((g) => ({ id: g.id, cls: g.cls, label: g.label, why: g.why, command: g.command, commandRedacted: g.commandRedacted, bin: g.bin, cwd: g.cwd, ...(g.folderUnread ? { folderUnread: true, ...(g.repoNamed ? { repoNamed: true } : {}) } : {}), ...(g.folderUnsure ? { folderUnsure: g.folderUnsure } : {}), agent: g.agent, tool: g.tool, requested_at: g.requested_at, dryRun: g.dryRun, previously: g.previously || null,
-    context: g.context || [], agentReason: g.agentReason || null, ref: g.ref || null,
+    context: g.context || [], agentReason: g.agentReason || null, ref: g.ref || null, ...(g.nearCopy ? { nearCopy: g.nearCopy } : {}),
     ...(openProposal(g) ? { proposal: openProposal(g) } : {}) }));
 
 // ── pane answers (SETTINGS.paneAnswers 'confirm') ───────────────────────────
@@ -151,6 +154,31 @@ export function decideGate(t, { gate, decision, reason }, { iso, via, by, record
   if (p && decision === 'decline') g.proposal = { ...p, overruled_at: iso };
   else if (p && via === 'board') g.proposal = { ...p, confirmed_at: iso };
   else if (p) delete g.proposal;
+  return g;
+}
+
+/**
+ * #786 B: the agent a pending row was filed for withdraws it (the call was not needed after all).
+ * Adds only: withdrawing decides, releases and mints nothing. Only a PENDING row (never approved,
+ * declined, released or expired), only by the agent it was filed for (`by` is checked by the caller,
+ * src/tasks.mjs). The row reads `withdrawn` from then on: decideGate, proposeGate and gateEvent all
+ * refuse it (they want pending or approved), the chain gives it a `withdrawn` line of its own, and a
+ * later run of the same call files a new row. A pane answer or typed approval waiting on it is
+ * dropped: it can never be confirmed afterwards.
+ */
+export const WITHDRAW_REASON = 300;
+export function withdrawGate(t, { gate, reason }, { iso, by }) {
+  const g = findGate(t, gate);
+  if (g.status !== 'pending') throw new GateError(409, `gate ${g.id} on #${t.id} is ${g.status}: only a pending row can be withdrawn`);
+  if (!by || g.agent !== by) throw new GateError(403, `gate ${g.id} on #${t.id} was filed for ${g.agent}: only that agent can withdraw it`);
+  const why = String(reason ?? '').trim();
+  if (!why) throw new GateError(400, 'withdraw needs a reason: why the call is not needed');
+  g.status = 'withdrawn';
+  g.withdrawn_at = iso;
+  g.withdrawn_by = by;
+  g.withdraw_reason = why.slice(0, WITHDRAW_REASON);
+  const p = openProposal(g);
+  if (p) g.proposal = { ...p, overruled_at: iso, withdrawn: true };
   return g;
 }
 
@@ -250,6 +278,7 @@ export function auditRows(t) {
     if (g.not_seen_at) rows.push({ at: g.not_seen_at, gate: g.id, event: 'no run seen', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: `no result from the call within ${RUN_SEEN_MINUTES} min of the release` });
     if (g.ran_at) rows.push({ at: g.ran_at, gate: g.id, event: g.ran_late ? 'ran (seen late)' : 'ran', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: 'the call\'s own result (PostToolUse)' });
     if (g.status === 'disputed') rows.push({ at: g.disputed_at, gate: g.id, event: 'DISPUTED: a grant with no approval in the receipt chain (not run)', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: '' });
+    if (g.status === 'withdrawn') rows.push({ at: g.withdrawn_at, gate: g.id, event: 'withdrawn by the agent (not a decision)', cls: g.cls, command: g.command, cwd: g.cwd, actor: g.withdrawn_by, via: g.withdraw_reason || '' });
     if (g.status === 'expired') rows.push({ at: g.expires_at, gate: g.id, event: 'expired', cls: g.cls, command: g.command, cwd: g.cwd, actor: 'gate', via: g.note || '' });
     if (g.rerunsAfterDecline) rows.push({ at: g.decided_at, gate: g.id, event: `re-attempted ×${g.rerunsAfterDecline} after decline`, cls: g.cls, command: g.command, cwd: g.cwd, actor: g.agent, via: '' });
   }

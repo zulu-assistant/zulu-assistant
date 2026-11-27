@@ -1,5 +1,5 @@
 {
-  "_doc": "Which engine runs each role (claude | codex) and which models. `zulu setup --step engines` writes `engine`; scripts/engine.mjs reads it (resident falls back to worker; default claude). Claude models: master/worker/workerFallback. Codex: codex.model (Mission Control) / codex.workerModel (workers, residents, triage) \u2014 empty = Codex's own default from ~/.codex/config.toml.",
+  "_doc": "Which engine runs each role (claude | codex) and which models. `zulu setup --step engines` writes `engine`; scripts/engine.mjs reads it (resident falls back to worker; default claude). Claude models: master/worker/workerFallback. Codex: codex.model (Mission Control) / codex.workerModel (workers, residents, triage) \u2014 empty = Codex's own default from ~/.codex/config.toml. Interactive Codex roles: codex.approval on-request (default) | never, and codex.addDirs, extra writable folders (absolute or ~/\u2026; the home itself, / and .. paths are skipped). The sandbox stays workspace-write with network.",
   "engine": {
     "master": "claude",
     "worker": "claude",
@@ -20,6 +20,8 @@
   },
   "codex": {
     "model": "",
-    "workerModel": ""
+    "workerModel": "",
+    "approval": "on-request",
+    "addDirs": []
   }
 }

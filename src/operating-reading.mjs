@@ -71,6 +71,7 @@ export function gateOutcome(g) {
   if (g.via === 'standing') return 'auto';
   if (g.status === 'executed' || g.status === 'approved') return 'approved';
   if (g.status === 'declined') return 'declined';
+  if (g.status === 'withdrawn') return 'withdrawn';   // #786 B: the agent said the call was not needed (counted apart, never judged)
   if (g.status === 'expired') return 'expired';
   if (g.status === 'dry_required') return 'dry';
   return 'pending';
@@ -93,6 +94,8 @@ export function windowMetrics(tasks, w, { owner = 'owner' } = {}) {
   const released = gates.filter((g) => g.executed_at);
   const act = released.filter((g) => g.decided_at).map((g) => ms(g.executed_at) - ms(g.decided_at));
   const total = released.map((g) => ms(g.executed_at) - ms(g.requested_at));
+  // #786 B: how long a row the agent withdrew sat on the owner's strip first
+  const onStrip = gates.filter((g) => g.status === 'withdrawn' && g.withdrawn_at).map((g) => ms(g.withdrawn_at) - ms(g.requested_at));
   const fp = (outcomes.get('declined') || 0) + (outcomes.get('expired') || 0);
   const judged = fp + (outcomes.get('approved') || 0);
   const wt = { created: 0, removed: 0, refused: 0, left: 0 };
@@ -120,6 +123,7 @@ export function windowMetrics(tasks, w, { owner = 'owner' } = {}) {
       requested: gates.length,
       approved: outcomes.get('approved') || 0, auto: outcomes.get('auto') || 0, declined: outcomes.get('declined') || 0,
       expired: outcomes.get('expired') || 0, dry: outcomes.get('dry') || 0, pending: outcomes.get('pending') || 0,
+      withdrawn: outcomes.get('withdrawn') || 0, withdrawnOnStrip: stats(onStrip),
       falsePositive: fp, judged,
       decide: stats(decide), act: stats(act), total: stats(total),
     },
@@ -167,7 +171,7 @@ export function readingText(r) {
     `Blocked on the owner: ${plural(c.ownerWaits.n, 'wait')} ended, median ${fmtDur(c.ownerWaits.median)}, p90 ${fmtDur(c.ownerWaits.p90)}`
       + ` (prev median ${fmtDur(p.ownerWaits.median)}, n ${p.ownerWaits.n})${c.waitingNow != null ? ` · ${c.waitingNow} waiting now` : ''}`,
     `Gates: ${g.requested} requested (prev ${pg.requested}) — approved ${g.approved}, auto (program go) ${g.auto}, declined ${g.declined},`
-      + ` expired unused ${g.expired}, dry run first ${g.dry}, pending ${g.pending}`,
+      + ` expired unused ${g.expired}, dry run first ${g.dry}, pending ${g.pending}${g.withdrawn ? `, withdrawn by the agent ${g.withdrawn} (on the strip median ${fmtDur(g.withdrawnOnStrip.median)}, p90 ${fmtDur(g.withdrawnOnStrip.p90)})` : ''}`,
     `  false-positive proxy (declined + expired unused of judged): ${g.falsePositive}/${g.judged} = ${pct(g.falsePositive, g.judged)}`
       + ` (prev ${pg.falsePositive}/${pg.judged} = ${pct(pg.falsePositive, pg.judged)})`,
     `  requested → decided: ${tm(g.decide)}`,

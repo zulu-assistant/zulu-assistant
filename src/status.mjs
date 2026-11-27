@@ -56,6 +56,22 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
+
+/**
+ * One endpoint card from an httpChecks result. Not reached (timeout, refusal) = down. #814: a 5xx is the server
+ * saying it failed = down, whatever the body says (a readable healthy body never softens it); 1xx–4xx keep their
+ * meaning (a redirect or a login wall on a site root is not a failure); then the body judge (`okFlag`).
+ */
+export function endpointCard(ep) {
+  return {
+    label: `endpoint:${ep.id}`, name: ep.name, domain: 'cloud',
+    schedule: 'http check', logAvailable: false,
+    status: !ep.up ? 'down' : ep.code >= 500 ? 'down' : ep.okFlag === false ? 'down' : 'ok',
+    detail: !ep.up ? `unreachable (${ep.err || 'timeout'})`
+      : `HTTP ${ep.code}${ep.note ? ` · ${ep.note}` : ''}`,
+  };
+}
+
 /**
  * An always-on service that keeps a network link (JOBS `linkStatus: { file, warnMin, redMin }`):
  * a running pid is not enough — the service's own status file must show the link alive (#340).
@@ -438,15 +454,7 @@ export async function snapshot() {
     }
   }
 
-  for (const ep of endpoints) {
-    jobs.push({
-      label: `endpoint:${ep.id}`, name: ep.name, domain: 'cloud',
-      schedule: 'http check', logAvailable: false,
-      status: !ep.up ? 'down' : ep.okFlag === false ? 'down' : 'ok',
-      detail: !ep.up ? `unreachable (${ep.err || 'timeout'})`
-        : `HTTP ${ep.code}${ep.note ? ` · ${ep.note}` : ''}`,
-    });
-  }
+  for (const ep of endpoints) jobs.push(endpointCard(ep));
 
   jobs.push({
     label: 'disk:/', name: DISK.name || 'Disk', domain: 'infra',

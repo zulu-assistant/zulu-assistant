@@ -15,6 +15,13 @@
 //   info.model_context_window (input_tokens already INCLUDES cached tokens —
 //   don't add cached_input_tokens again). Codex writes a fresh token_count
 //   right after its `compacted` event, so no estimate is needed there.
+// Gemini CLI (#812): `~/.gemini/tmp/<dir>/chats/session-*.jsonl`, one JSON line per event; a `type:"gemini"` line
+//   carries `tokens { input, cached, output, thoughts, tool, total }` and `model`. ctx = tokens.input (the prompt
+//   sent, cached part included). A `$patch` line may remove earlier messages (`removeIds`): those never count.
+//   `<dir>/.project_root` holds the folder, so a session is matched by the agent's folder (there is no cmux hook
+//   map for Gemini); a session last written before the agent's `added_at` is not its own. The window comes ONLY from models.json `contextWindows` (a key the model id starts with,
+//   never `default`): an unknown model shows no gauge. Two Gemini agents in one folder, or two session files there
+//   written in the last 10 minutes, show no gauge rather than possibly the wrong one.
 import { open, stat, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +30,8 @@ import { CONTEXT, resolve as resolveConfig } from './config.mjs';
 const CLAUDE_MAP = path.join(os.homedir(), '.cmuxterm', 'claude-hook-sessions.json');
 const CODEX_MAP = path.join(os.homedir(), '.cmuxterm', 'codex-hook-sessions.json');
 const CODEX_SESSIONS = path.join(os.homedir(), '.codex', 'sessions');
+const GEMINI_TMP = path.join(os.homedir(), '.gemini', 'tmp');
+export const GEMINI_BOTH_LIVE_MS = 10 * 60_000;   // two session files written this recently in one folder = no gauge
 
 // ---- pure parsers (tested with fixture tails) ------------------------------------
 
@@ -90,6 +99,32 @@ export function parseCodexTail(text) {
     return { tokens, window: info.model_context_window, at: j.timestamp ? Date.parse(j.timestamp) : null };
   }
   return null;
+}
+
+/** Last counted Gemini turn in a session tail: { tokens, model, at } or null. */
+export function parseGeminiTail(text) {
+  const lines = String(text).split('\n');
+  const removed = new Set();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (!l.includes('"removeIds"') && !(l.includes('"gemini"') && l.includes('"tokens"'))) continue;
+    let j; try { j = JSON.parse(l); } catch { continue; }      // a tail's first line is usually partial
+    for (const id of j.$patch?.removeIds || []) removed.add(id);
+    if (j.type !== 'gemini' || removed.has(j.id)) continue;
+    const tokens = j.tokens?.input;
+    if (!(tokens > 0)) continue;
+    return { tokens, model: typeof j.model === 'string' ? j.model : null, at: j.timestamp ? Date.parse(j.timestamp) : null };
+  }
+  return null;
+}
+
+/** A Gemini model's window from the config map only: the longest key the id starts with; no default, no guess. */
+export function geminiWindowFor(model, windows = {}) {
+  const m = String(model || '');
+  if (!m) return null;
+  const keys = Object.keys(windows).filter((k) => k !== 'default' && m.startsWith(k)).sort((a, b) => b.length - a.length);
+  const w = keys.length ? windows[keys[0]] : null;
+  return Number.isFinite(w) && w > 0 ? w : null;
 }
 
 /** Context window for a Claude model id (prefix match in the config map). */
@@ -185,16 +220,50 @@ async function codexByCwd(cwd, days = 3) {
 }
 
 /**
- * Gauge per workspace for every Claude/Codex agent in the directory.
+ * The newest Gemini session file for a folder, or null: no project for it, no session, or two session files
+ * written within GEMINI_BOTH_LIVE_MS of now (two live sessions in one folder).
+ */
+export async function geminiSessionFor(folder, { tmp = GEMINI_TMP, now = Date.now(), since = 0 } = {}) {
+  let dirs = [];
+  try { dirs = await readdir(tmp); } catch { return null; }
+  const want = path.resolve(folder);
+  const files = [];
+  for (const d of dirs) {
+    let root;
+    try { root = (await readFile(path.join(tmp, d, '.project_root'), 'utf8')).trim(); } catch { continue; }
+    if (path.resolve(root) !== want) continue;
+    const chats = path.join(tmp, d, 'chats');
+    let names = [];
+    try { names = await readdir(chats); } catch { continue; }
+    for (const n of names.filter((x) => /^session-.*\.jsonl$/.test(x))) {
+      try { files.push({ p: path.join(chats, n), mtime: (await stat(path.join(chats, n))).mtimeMs }); } catch { /* gone */ }
+    }
+  }
+  files.sort((a, b) => b.mtime - a.mtime);
+  if (!files.length) return null;
+  if (files.length > 1 && now - files[1].mtime < GEMINI_BOTH_LIVE_MS) return null;
+  // a session last written before the agent was registered is a previous session's
+  if (files[0].mtime < since) return null;
+  return files[0].p;
+}
+
+/**
+ * Gauge per workspace for every Claude/Codex/Gemini agent in the directory.
  * Returns Map(workspaceId → gauge). Time-bounded by the caller's poll.
  */
-export async function collectContext(entries) {
+export async function collectContext(entries, { geminiTmp = GEMINI_TMP, models: givenModels = null } = {}) {
   const [claudeMap, codexMap, models] = await Promise.all([
-    readJson(CLAUDE_MAP), readJson(CODEX_MAP), readJson(resolveConfig('config/models.json'))]);
+    readJson(CLAUDE_MAP), readJson(CODEX_MAP), givenModels || readJson(resolveConfig('config/models.json'))]);
   const windows = models.contextWindows || {};
   const out = new Map();
   const codexCwds = new Map();
   for (const a of entries) if (a.vendor === 'codex' && a.status !== 'closed') codexCwds.set(a.cwd, (codexCwds.get(a.cwd) || 0) + 1);
+  const home = (p) => (p ? path.resolve(p.replace(/^~(?=\/|$)/, os.homedir())) : null);
+  const geminiFolders = new Map();
+  for (const a of entries) {
+    const f = a.vendor === 'gemini' && a.status !== 'closed' ? home(a.cwd || a.repo) : null;
+    if (f) geminiFolders.set(f, (geminiFolders.get(f) || 0) + 1);
+  }
 
   await Promise.all(entries.map(async (a) => {
     if (!a.workspaceId || a.status === 'closed') return;
@@ -212,6 +281,15 @@ export async function collectContext(entries) {
         if (!tp) return;
         const r = await measure(tp, parseCodexTail);
         if (r) out.set(a.workspaceId, gauge({ tokens: r.tokens, window: r.window, source: 'codex', at: r.at }));
+      } else if (a.vendor === 'gemini') {
+        const f = home(a.cwd || a.repo);
+        if (!f || geminiFolders.get(f) !== 1) return;              // two Gemini agents in one folder: no gauge
+        const since = Date.parse(a.added_at || '') || 0;
+        const tp = await geminiSessionFor(f, { tmp: geminiTmp, since });
+        if (!tp) return;
+        const r = await measure(tp, parseGeminiTail);
+        const w = r && geminiWindowFor(r.model, windows);
+        if (w) out.set(a.workspaceId, gauge({ tokens: r.tokens, window: w, model: r.model, source: 'gemini', at: r.at }));
       }
     } catch { /* transcript rotated/missing — no gauge this poll */ }
   }));

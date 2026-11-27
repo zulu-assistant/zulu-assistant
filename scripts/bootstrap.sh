@@ -258,6 +258,20 @@ do_install() {
     [[ -f "$VAULT/.scripts/claude-global/CLAUDE.md" ]] && place "$VAULT/.scripts/claude-global/CLAUDE.md" "$HOME/.claude/CLAUDE.md" "global ~/.claude/CLAUDE.md" \
       || step skip "vault has no .scripts/claude-global/CLAUDE.md (zulu setup --step vault adds it)"
   fi
+  # Gemini CLI (#812): its global file (the owner's, from the vault), and the setting that makes it read each
+  # repo's AGENTS.md too (the vault's block, else the generic one in examples/gemini/)
+  if ! has gemini; then step skip "gemini not installed (no ~/.gemini files placed)"
+  else
+    [[ -f "$VAULT/.scripts/gemini-global/GEMINI.md" ]] && place "$VAULT/.scripts/gemini-global/GEMINI.md" "$HOME/.gemini/GEMINI.md" "global ~/.gemini/GEMINI.md" \
+      || step skip "vault has no .scripts/gemini-global/GEMINI.md (write one, then re-run)"
+    local gw gl gv grc=0
+    gw="$VAULT/.scripts/gemini-global/settings.context.json"
+    [[ -f "$gw" ]] || gw="$ROOT/examples/gemini/settings.context.json"
+    gl=$(node "$ROOT/scripts/gemini-context.mjs" "$gw" --home "$HOME" $( ((DRY)) || echo --apply) 2>&1) || grc=$?
+    gv=${gl%% *}
+    if ((grc)); then step FAIL "gemini context: $gl"
+    else case $gv in would|done|skip|kept) step "$gv" "${gl#* }" ;; *) step FAIL "gemini context: $gl" ;; esac; fi
+  fi
   if ! has graphify; then
     if ! has uv; then step skip "graphify: install uv first (brew install uv), then re-run"
     elif ((DRY)); then step would "uv tool install 'graphifyy[mcp]==$GRAPHIFY_PIN'"

@@ -75,6 +75,16 @@
     return contextTexts(ids).map((t) => `<span class="chip ctx-chip">${t}</span>`).join('');
   }
 
+  /** #786 C: the row nearly repeats another row on the same task. A note only: this row is decided as usual.
+   *  Every word is the board's; the gate id and time come from the ledger and are escaped. */
+  const NEAR_STATUS = { pending: 'still waiting for you', approved: 'you approved it and it has not been used', executed: 'it was released to run' };
+  function nearCopyHtml(n, esc) {
+    if (!n || !/^g\d+$/.test(String(n.of || '')) || !NEAR_STATUS[n.status]) return '';
+    const at = n.at ? ` at ${esc(String(n.at).slice(11, 16))}Z` : '';
+    const what = n.status === 'executed' && n.ran === true ? 'it ran' : NEAR_STATUS[n.status];
+    return `<div class="gate-meta gate-near"><span aria-hidden="true">≈</span> near copy of ${esc(n.of)} on this task (${what}${n.status === 'executed' ? at : ''})</div>`;
+  }
+
   /** A pane answer an agent recorded (SETTINGS.paneAnswers 'confirm'): a line that says who typed it
    *  and that it does not count until the owner confirms it here. '' when none is waiting.
    *  The words are the agent's record of what the owner said — always escaped, never markup. */
@@ -134,6 +144,7 @@
     <div class="gate-meta">${esc(g.agent)} · ${g.folderUnread ? `folder not told by Codex (session in ${esc(g.cwd)}): ${g.repoNamed ? 'the repository is named in the command' : 'repository not read'}` : g.folderUnsure ? `runs in ${g.folderUnsure.map(esc).join(' or ')} (a folder change may not apply): repository not read` : esc(g.cwd)} · ${esc(g.tool)} · ${o.age} ago${g.commandRedacted ? ' · command withheld (contains a secret)' : ''}</div>
     ${/^(unregistered|headless):/.test(String(g.agent || '')) ? '<div class="gate-meta gate-nowake">this session is not woken after you decide: it runs the same command again itself</div>' : ''}
     ${g.previously ? `<div class="gate-meta gate-again">↻ you approved this exact call at ${esc(String(g.previously.at).slice(11, 16))}Z (${esc(g.previously.gate)}); it expired before it ran</div>` : ''}
+    ${nearCopyHtml(g.nearCopy, esc)}
     ${dry}
     ${proposalHtml(g.proposal, esc)}
     <div class="task-actions">${o.actions}</div>
@@ -147,7 +158,19 @@
     return '<div class="nothing-watched">nothing watched yet. Pick LaunchAgents, containers, cron lines and endpoints from a scan of this Mac: <code>zulu setup --step watch</code></div>';
   }
 
-  const api = { nothingWatchedHtml, ARM_MS, CMD_LINES, CMD_CHARS, armClick, decisionOutcome, staleBoot, decisionsState, dockLayout, foldCommand, gateRowHtml, proposalHtml, HEARD_LABELS, heardLabels, armedLabel, decisionBody, CHIP_TEXT, contextTexts, contextChips };
+  /** #788: the owner agent's workspace, as cmux titles it, and one OPEN WORKSPACE button (one click:
+   *  it changes only what is in front, never any state). No live workspace = "no workspace", no button.
+   *  On a phone-width page the button says where it opens: on the Mac's screen.
+   *  ws = { title, open } from the board; agent = the directory name the board resolves itself. */
+  function workspaceHtml(ws, agent, o) {
+    const { esc } = o;
+    if (!ws || !ws.open || !ws.title || !agent) return '<span class="ws-none">no workspace</span>';
+    const res = o.results && o.results.get(`ws:${agent}`);
+    const label = res ? res.text : o.phone ? '⧉ OPEN ON THE MAC' : '⧉ OPEN WORKSPACE';
+    return `<span class="ws-title" title="cmux workspace">${esc(ws.title)}</span><button class="act act-open-ws" data-open-ws="${esc(agent)}"${res && res.pending ? ' disabled' : ''}>${esc(label)}</button>`;
+  }
+
+  const api = { workspaceHtml, nearCopyHtml, nothingWatchedHtml, ARM_MS, CMD_LINES, CMD_CHARS, armClick, decisionOutcome, staleBoot, decisionsState, dockLayout, foldCommand, gateRowHtml, proposalHtml, HEARD_LABELS, heardLabels, armedLabel, decisionBody, CHIP_TEXT, contextTexts, contextChips };
   root.BoardDecide = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

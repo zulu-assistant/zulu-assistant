@@ -100,6 +100,23 @@ an "undelivered" comment and the ticker a red line). `--wake` additionally
 allows delivery into a busy session (Claude/Codex queue it for the next
 turn). Every delivery and queue lands in the board ticker.
 
+**Gemini panes** (directory `vendor: 'gemini'`) are read by their own rules only:
+ready = Gemini's empty composer box, exactly; anything typed there is a draft,
+and a turn (`esc to cancel`), a tool approval or the folder-trust prompt reads
+as a dialog, so `--wake` does not land in a busy Gemini pane. The launch kick
+reads a new pane by its engine too (`mesh-cli.mjs kick … --vendor gemini`).
+
+**Gemini sessions are outside Guardrails.** The owner's gate hook runs only in
+Claude Code and Codex, so a Gemini agent's merges, pushes, deploys, sends and
+deletes are neither held nor receipted. A Gemini resident runs with Gemini's
+own approval prompts on (`--approval-mode default`, never yolo) and puts any
+such command on its task for Mission Control instead of running it.
+
+**Project files:** each repo's `AGENTS.md` is the shared project file for Codex
+and Gemini (Gemini reads it through `context.fileName` in its settings, next to
+`GEMINI.md`); `CLAUDE.md` stays the Claude file. Rules every engine must follow
+belong in `AGENTS.md` (or both files).
+
 Stale wakes are dropped, not retried (ticker line per drop): a queued wake
 whose task reached done/cancelled *after* it was queued (e.g. "Task #5
 assigned" for a since-cancelled task), a wake whose task no longer exists,
@@ -210,6 +227,25 @@ the generated summary, STALE) and the gate receipts (id, class, label, asked/dec
 only the ledger's task records and never writes. Gate command text is never included, and every shown field passes the ledger's
 secret-text refusal (a match is replaced whole by `[withheld: looks like a secret]`). `off` = no page and a 404 from the API.
 The Dock seed (`system/cmux/dock.json`) carries an "Evidence" browser control; installing it is the owner's.
+
+## Conversation view (read-only)
+`SETTINGS.conversationView = { mode: 'off'|'on' }` (`src/conversation.mjs`, page `public/conversation.html` at
+`/?conversation=<session id>`, linked from each agent tile as READ ▸). The last turns of one Claude Code session, from the end
+of its own transcript: what was said to the agent (a mesh message is marked), what it answered, and one line per tool call.
+`GET /api/conversation?session=<id>` is the data (same source guard as the rest); it never writes and nothing can be sent
+from the page.
+- **Shown for a tool call:** the tool's name and the agent's own short description when the call carries one. Never the
+  command, a file's contents, any other input, or the tool's result. Thinking, helper-agent threads and the harness's own
+  reminder blocks are left out. A compaction is one notice; its summary is not shown.
+- **Secrets:** each paragraph and each description passes the ledger's secret-text check; a match is replaced by
+  `[withheld: looks like a secret]` and the rest of the message stays.
+- **How much:** the newest 40 entries, from the last megabyte of the file, widened to at most 16 MB when that holds too few
+  turns. The page says when earlier turns are not shown.
+- **The text is untrusted** (an agent wrote it, or a page it read did): the view escapes it, shows it as plain text with no
+  links, and lives on a page of its own that carries no decision token.
+- **The path** comes from this machine's session records (the cmux session map, else Claude Code's own registry) and must
+  resolve inside `~/.claude/projects`; the request names a session id and never a path.
+- Codex sessions are not shown yet. `off` = no page, no link and a 404 from the API.
 
 ## Worktree per task
 `SETTINGS.worktrees = { mode: 'off'|'observe'|'on', workers: true, residents: false, only: [] }` (`src/worktree.mjs`).

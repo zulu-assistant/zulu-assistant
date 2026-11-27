@@ -8,7 +8,7 @@ import { readFile, writeFile, mkdir, stat as fsStat } from 'node:fs/promises';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, ENDPOINTS, CONTEXT, SETTINGS, DOMAINS, OWNER, isOwner, isPrincipal, resolve as resolveConfig, loadSecrets, REGISTRY_FILE, PRINCIPALS, writePrivate, PROFILE, CMUX_PRESENT } from './src/config.mjs';
+import { JOBS, DOCKER_CONTAINERS, PROCESSES, CRON, ENDPOINTS, CONTEXT, SETTINGS, DOMAINS, OWNER, isOwner, isPrincipal, resolve as resolveConfig, loadSecrets, SECRETS_FILE, REGISTRY_FILE, PRINCIPALS, writePrivate, PROFILE, CMUX_PRESENT } from './src/config.mjs';
 import { publishLines, chatFileProblem, loadChannels, isChatTask } from './src/intake.mjs';
 import { snapshot, logPathsFor } from './src/status.mjs';
 import { noteGuardrailsSeen } from './src/setup.mjs';
@@ -16,11 +16,14 @@ import { tailFile, getAgentFeed } from './src/collect.mjs';
 import { processAlerts, sendDigest, notify as realNotify, cmuxPassword } from './src/alerts.mjs';
 import { maybeRemediate } from './src/remediate.mjs';
 import { maybeHealCmuxBridge } from './src/heal-cmux.mjs';
-import { maybeHealFailedRestores } from './src/heal-restore.mjs';
+import { maybeHealFailedRestores, cmuxAppStart } from './src/heal-restore.mjs';
+import { reloadDockOnce } from './src/dock-reload.mjs';
 import { syncDemoCmux } from './src/demo-cmux.mjs';
 import { recordEvent, getEvents } from './src/events.mjs';
 import { maybeCiCostWatch } from './src/ci-cost-watch.mjs';
-import { maybeOperatingReading } from './src/operating-reading.mjs';
+import { maybeOperatingReading, computeReading } from './src/operating-reading.mjs';
+import { readAsksMode, findAsks, askText, noteSent, settleState, readAsksState } from './src/read-asks.mjs';
+import { decideMode, decideRows, pushView, openRefusal, openWorkspace } from './src/decide-page.mjs';
 import { maybeRepoStats } from './src/repo-stats.mjs';
 import { maybeReleaseDrift } from './src/release-drift.mjs';
 import { maybeBrain, verifyClose } from './src/brain.mjs';
@@ -30,18 +33,24 @@ import { maybeChannelDiscovery } from './src/channel-discovery.mjs';
 import { maybeViewWatch } from './src/view-watch.mjs';
 import { maybeParserWatch } from './src/parser-watch.mjs';
 import { evidenceMode, evidenceRows, CLOSED_DAYS } from './src/evidence.mjs';
+import { setupPageMode, createSetupReader, demoSetupReader } from './src/setup-page.mjs';
+import { runStep as runSetupStep, demoStep as demoSetupStep, scanWatch, restartPlan, SetupRefused, stepsFor, DEMO_SCAN } from './src/setup-write.mjs';
+import { alertsOffered } from './src/setup-alerts.mjs';
+import { buttonsOffered, browserProven, createButtons, demoButton, buttonList, lastRun as lastButtonRun, ButtonRefused } from './src/setup-buttons.mjs';
+import { conversationMode, createConversations, demoConversation, validSessionId, WHY as CONVERSATION_WHY } from './src/conversation.mjs';
 import { allowedSource, localOnly } from './src/guard.mjs';
 import { isWrite, writeRefusal, senderTrust } from './src/request-guard.mjs';
 import { createCallerEvidence, callerSettings, doorVerdict, isLocalSource, nameVerdict, jobSenders, jobSenderVerdict } from './src/caller.mjs';
 import { createLedger, MeshError, summarize, wakeMessage, outsideTask, sourceLabel, holdOpen } from './src/tasks.mjs';
 import { triageReading } from './src/triage-reading.mjs';
 import { planAsk } from './src/triage-ask.mjs';
+import { loadOptional } from './src/optional-module.mjs';
 import { createGateService } from './src/gate-service.mjs';
 import { createGateIntegrity, integritySettings, gatePaths, gateDirs, remoteTarget, remoteTargetReads, READ_BUDGET_MS, readRemoteRef, registrationProblems, portProblem, integrityCard, settingsProblem, settingsNote, PROJECT_SETTINGS, startSettingsScan, needsCwd, failOpenEntries, OWN_FILES, isHookCommand, hookEntries, CONFIG_HOOK, readChild, createBudget, RanOut } from './src/gate-integrity.mjs';
 import { DEFAULT_POLICY as GATE_DEFAULT_POLICY, repoSlug as gateRepoSlug } from './src/gates.mjs';
 import { decisionSurface } from './src/gate-ledger.mjs';
 import {
-  liveDirectory, resolveTarget, deliverNow, enqueue, drainOutbox, dropFromOutbox, readOutbox, formatWake, validateMessage,
+  liveDirectory, resolveTarget, deliverNow, enqueue, drainOutbox, dropFromOutbox, readOutbox, formatWake, validateMessage, unreadableNotices,
   reconcile, mutateAgents, listWorkspaces, readSessionMap, readRegistry, nameDrift, ensureSessionName,
   slugTitle, kickSession, classifyScreen, listGroups, generatedAnchorIds, writeJsonAtomic, OUTBOX_FILE,
   acrossWindows, isDemoWorkspace, demoWorkspaceIds, cmux,
@@ -94,6 +103,9 @@ async function heartbeat() {
 }
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+// Ask back office (#755) is a private lane (#797, the manifest's `withheld` list): present here, absent in the public
+// edition. Absent = its route answers 404; a file that is there and fails to load stops the board as any import would.
+const BACKOFFICE = await loadOptional(path.join(ROOT, 'src', 'backoffice.mjs'));
 const PUBLIC = path.join(ROOT, 'public');
 const HISTORY_FILE = path.join(ROOT, 'data', 'history.json');
 
@@ -251,7 +263,11 @@ async function gateIntegrityCard() {
 let workCache = summarize([]);
 let dirCache = [];
 let contextCache = new Map();      // workspaceId → context gauge (src/context.mjs)
-const refreshWork = async () => { workCache = await ledger.summary(); await refreshAttention().catch((e) => console.error('[attention]', e.message)); };
+const refreshWork = async () => {
+  workCache = await ledger.summary();
+  await refreshAttention().catch((e) => console.error('[attention]', e.message));
+  await refreshDecide().catch((e) => console.error('[decide]', e.message));
+};
 // Attention ring (SETTINGS.attention, src/attention.mjs): owner snoozes on WAITING ON YOU items.
 // 'off' = the state is never read or written and the strip is today's. Expiry runs on every
 // ledger refresh: an item whose snooze ran out returns to the strip with a "back" marker.
@@ -268,9 +284,42 @@ async function refreshAttention() {
   for (const id of r.expired) recordEvent('sys', `attention: snooze ran out, ${id} is back on the strip`).catch(() => {});
 }
 const attentionView = () => buildAttention(waitingTasks(), attentionState, { mode: snoozeMode(SETTINGS.attention), isOwner });
+// Daily decision page (#788, SETTINGS.decidePage, src/decide-page.mjs): the strip's items ordered by
+// the cost of waiting, read-only. Rebuilt on every ledger refresh (full tasks for priority and the
+// blocking question; the directory for each owner's workspace title). The page push carries the
+// one-line questions only (pushView); GET /api/decide carries the full text.
+let decideCache = null;
+// The header's p90 is the weekly reading's wait on the owner. computeReading walks the whole ledger
+// (a few milliseconds over a ledger of several hundred tasks, on the event loop), so it is kept
+// for P90_KEEP_MS rather than run on every ledger change.
+const P90_KEEP_MS = 10 * 60e3;
+let p90Kept = { at: 0, h: null };
+async function waitP90H() {
+  if (Date.now() - p90Kept.at < P90_KEEP_MS) return p90Kept.h;
+  const p90ms = computeReading(await ledger.list(), { owner: OWNER.id }).cur?.ownerWaits?.p90;
+  p90Kept = { at: Date.now(), h: Number.isFinite(p90ms) ? p90ms / 3600e3 : null };
+  return p90Kept.h;
+}
+async function refreshDecide() {
+  if (decideMode(SETTINGS.decidePage) !== 'on') { decideCache = null; return; }
+  const view = attentionView();
+  const ids = [...new Set((view.groups || []).map((g) => g.task))];
+  const full = new Map();
+  for (const id of ids) { const t = await ledger.get(id); if (t) full.set(id, t); }
+  decideCache = decideRows(view, full, { directory: dirCache, outside: outsideTask, waitP90H: await waitP90H() });
+}
 // Guardrails-only profile (SETTINGS.profile 'guardrails', src/profile.mjs): the ledger, the gate and
 // the waiting rows. No cmux call is ever made: no directory, no mesh delivery, no heal.
 const GUARDRAILS_ONLY = !DEMO && PROFILE === 'guardrails';
+// setup page (src/setup-page.mjs): read-only; a demo board reads nothing of this machine's setup
+const setupOn = setupPageMode(SETTINGS.setupPage) !== 'off';
+// mode 'write' (src/setup-write.mjs): three steps can be answered on the page. The owner's own browser on
+// this Mac only: the routes below ask for the loopback address, the decision door and the decision token.
+const setupWrite = setupPageMode(SETTINGS.setupPage) === 'write';
+const setupReader = DEMO ? demoSetupReader() : createSetupReader({ secrets: () => loadSecrets(), profile: PROFILE });
+// conversation view (src/conversation.mjs): the last turns of one session from its transcript tail, read-only
+const conversationOn = conversationMode(SETTINGS.conversationView) === 'on';
+const conversations = createConversations({ cmuxMap: SETTINGS.cmuxSessionsFile });
 const refreshDir = async () => {
   dirCache = DEMO ? demoDirectory() : GUARDRAILS_ONLY ? [] : await liveDirectory().catch(() => dirCache);
   return dirCache;
@@ -322,6 +371,12 @@ async function identify(who, { req = null } = {}) {
 // configured switches; 'mode,tripwire' (say 'on,browser') = those two, for the tests of each setting.
 const demoCaller = (v) => (!v ? null : v === '1' ? SETTINGS.callerEvidence : { ...(SETTINGS.callerEvidence || {}), mode: String(v).split(',')[0], tripwire: String(v).split(',')[1] });
 const CALLER = callerSettings(DEMO ? demoCaller(process.env.MC_DEMO_CALLER) : SETTINGS.callerEvidence);
+// the alerts form of the setup page (src/setup-alerts.mjs) writes the secrets file: offered only with its own key
+// AND a decision door that refuses a sender that is not a browser
+const setupAlerts = alertsOffered(SETTINGS.setupPage, CALLER.tripwire);
+// buttons on the setup page (src/setup-buttons.mjs): their own key, the same door rule, and one runner per board
+const setupButtonsOn = setupWrite && buttonsOffered(SETTINGS.setupPage, CALLER.tripwire);
+const setupButtons = createButtons();
 const callerEvidence = createCallerEvidence({
   readSessions: async () => ({ claude: await readSessionMap().catch(() => ({})), codex: await readJsonQuiet(path.join(os.homedir(), '.cmuxterm', 'codex-hook-sessions.json')).catch(() => ({})) }),
   jobs: CALLER.jobs, browsers: CALLER.browsers,
@@ -692,12 +747,63 @@ function queueIntake(prev, task) {
 }
 
 /** Wake/notify one agent: type it now if its pane is ready, else queue. */
+// Asks nobody sees (#787 part 3, src/read-asks.mjs, SETTINGS.readAsks): an owner agent's comment that
+// asks for a read or a go, with no message to Mission Control after it, wakes Mission Control once
+// after 10 min. State in data/read-asks-state.json (the board is the only writer, one chain).
+// A demo board keeps it in memory only: demo boards started together share data/, and a file there
+// would carry one board's records into another.
+const READ_ASKS_FILE = DEMO ? null : path.join(ROOT, 'data', 'read-asks-state.json');
+let readAsks = null;                       // { told, sent, seeded } once loaded
+let readAsksChain = Promise.resolve();
+const readAsksStep = (fn) => { const p = readAsksChain.then(fn, fn); readAsksChain = p.catch(() => {}); return p; };
+async function loadReadAsks() { readAsks ||= READ_ASKS_FILE ? await readAsksState(READ_ASKS_FILE) : { told: {}, sent: {}, seeded: true }; return readAsks; }
+const saveReadAsks = (st) => (READ_ASKS_FILE ? writeJsonAtomic(READ_ASKS_FILE, { told: st.told, sent: st.sent }) : Promise.resolve());
+function noteAskSent(taskId, from) {
+  if (readAsksMode(SETTINGS.readAsks) !== 'on') return Promise.resolve();
+  return readAsksStep(async () => {
+    const st = await loadReadAsks();
+    readAsks = { ...noteSent(st, { task: Number(taskId), from, at: new Date().toISOString() }), seeded: st.seeded };
+    await saveReadAsks(readAsks);
+  });
+}
+function readAsksPass() {
+  return readAsksStep(async () => {
+    const st = await loadReadAsks();
+    const tasks = await ledger.list();
+    const mcNames = new Set(['mission-control', ...dirCache.filter((a) => a.kind === 'mission-control').map((a) => a.name)]);
+    const notAgent = (n) => mcNames.has(n) || n === 'board' || isOwner(n) || isPrincipal(n);
+    const { wake } = findAsks(tasks, st, { notAgent });
+    const liveIds = new Set(tasks.filter((t) => !['done', 'cancelled'].includes(t.status)).map((t) => t.id));
+    const at = new Date().toISOString();
+    if (!st.seeded) {
+      // first pass with no state file: the asks already on the ledger are old news; mark them, wake nobody
+      readAsks = { ...settleState(st, { told: wake.map((w) => w.key), liveIds, at }), seeded: true };
+      await saveReadAsks(readAsks);
+      // (the board has no record of messages sent before this pass, so it cannot tell whether they were answered;
+      // the ids are named so Mission Control can look)
+      if (wake.length) recordEvent('sys', `read asks: first pass, ${wake.length} ask(s) already on the ledger marked, nobody woken: ${wake.map((w) => `#${w.task}`).join(' ')}`).catch(() => {});
+      return;
+    }
+    for (const w of wake) {
+      recordEvent('bad', `read asks: ${askText(w)}`).catch(() => {});
+      await meshDeliver('mission-control', askText(w), { from: 'board', taskId: w.task, kind: 'read-ask' }).catch((e) => console.error('[read-asks] wake:', e.message));
+    }
+    const next = { ...settleState(st, { told: wake.map((w) => w.key), liveIds, at }), seeded: true };
+    const changed = wake.length || Object.keys(next.told).length !== Object.keys(st.told).length || Object.keys(next.sent).length !== Object.keys(st.sent).length;
+    readAsks = next;
+    if (changed) await saveReadAsks(readAsks);
+  });
+}
+
 async function meshDeliver(to, text, { from = 'board', fromLabel = null, taskId = null, wake = false, kind = 'message', ref = null } = {}) {
   const dir = await refreshDir();
   const r = resolveTarget(to, dir);
   if (!r.agent) return { ok: false, msg: r.error, candidates: r.candidates };
   const agent = r.agent;
   if (agent.name === from) return { ok: true, msg: 'not delivering to self', skipped: true };
+  // #787 part 3: an agent that messages Mission Control about a task has asked in a way that wakes it.
+  // Recorded before delivery is tried (delivered or queued, the ask was sent), and on a demo board too.
+  if (taskId && from !== 'board' && agent.kind === 'mission-control') await noteAskSent(taskId, from).catch((e) => console.error('[read-asks]', e.message));
   if (DEMO) {
     recordEvent('sys', `demo: would type into ${agent.name}: ${String(text).slice(0, 80)}`).catch(() => {});
     return { ok: true, demo: true, to: agent.name };
@@ -952,7 +1058,15 @@ async function poll() {
       taskStatus: async (id) => (await ledger.get(id))?.status || null,
       holdOpen: async (m) => (m.taskId && m.ref ? holdOpen(await ledger.get(m.taskId), m.ref) : undefined),
     })
-      .then(async ({ delivered, expired, dropped }) => {
+      .then(async ({ delivered, expired, dropped, unreadable = [] }) => {
+        // #787 part 2: a pane the board has not been able to read for 5 min: told once per episode,
+        // a ticker line always, and Mission Control told unless it is Mission Control's own pane
+        // (that notice would queue behind the very screen it is about)
+        const mcName = unreadable.length ? resolveTarget('mission-control', dirCache).agent?.name || 'mission-control' : null;
+        for (const n of unreadableNotices(unreadable, { mcName, nameOf: (x) => resolveTarget(x, dirCache).agent?.name || null })) {
+          await recordEvent('bad', `mesh: ${n.text}`);
+          if (n.tellMc) await meshDeliver('mission-control', n.text, { from: 'board', kind: 'unreadable' }).catch((e) => console.error('[mesh] unreadable notice:', e.message));
+        }
         for (const m of dropped) await recordEvent('sys', `mesh: dropped stale wake for ${m.to} — ${m.dropReason}`);
         for (const m of delivered) await recordEvent('sys', `mesh: delivered queued message to ${m.to}${m.taskId ? ` (#${m.taskId})` : ''}`);
         for (const m of expired) {
@@ -961,6 +1075,7 @@ async function poll() {
         }
       }));
     await stages.run('work', () => refreshWork());
+    if (readAsksMode(SETTINGS.readAsks) === 'on' && !DEMO) await stages.run('read-asks', () => readAsksPass());
     await stages.run('events', async () => { eventsCache = await getEvents(30); });
     const diskJob = snap.jobs.find((j) => j.label === 'disk:/');
     if (diskJob) maybeRemediate(diskJob.status, notifyLog).catch((e) => console.error('[remediate]', e.message));
@@ -1070,9 +1185,11 @@ function payloadFor() {
     // caller evidence (src/caller.mjs): the switches, lookups and failures, and what the decision door did
     caller: { mode: CALLER.mode, tripwire: CALLER.tripwire, ...callerEvidence.stats, ...callerStats, ...gates.callerReadings() },
     ...(snoozeMode(SETTINGS.attention) === 'on' ? { attention: attentionView() } : {}),
+    ...(decideCache ? { decide: pushView(decideCache) } : {}),
     sessions: (current.sessions || []).map((s) => ({ ...s, ctx: contextCache.get(s.workspaceId) || s.ctx || null })),   // s.ctx: a session with no cmux workspace carries its own gauge
     directory: Object.fromEntries(dirCache.filter((a) => a.workspaceId).map((a) => [a.workspaceId, {
       name: a.name, kind: a.kind, vendor: a.vendor, owns: a.owns || [], status: a.status,
+      title: a.title || null, workspaceOpen: a.workspaceOpen ?? null,   // #788: the strip names each owner's workspace
       liveName: a.live?.liveName || null, nameOk: a.live ? a.live.nameOk : null,
       ctx: contextCache.get(a.workspaceId) || null,
       // the tiles show the taxonomy only when it is 'on' for this agent (observe = API + ticker only)
@@ -1321,6 +1438,36 @@ const server = http.createServer(async (req, res) => {
       for (const c of sseClients) c.write(`data: ${JSON.stringify(payloadFor())}\n\n`);
       return sendJson(res, 200, { ok: true, items: r.items, until: r.until || null, attention: attentionView() });
     }
+    // daily decision page (#788, src/decide-page.mjs): read-only; the buttons on it are the strip's
+    if (url.pathname === '/api/decide' && req.method === 'GET') {
+      if (decideMode(SETTINGS.decidePage) !== 'on') return sendJson(res, 404, { ok: false, msg: 'decision page is off (SETTINGS.decidePage)' });
+      await refreshDecide();
+      return sendJson(res, 200, decideCache);
+    }
+    // OPEN WORKSPACE (#788): brings an agent's workspace to the front on this Mac. The owner's click
+    // only (decision token + no agent or intake identity, through the decision door, as a snooze);
+    // the workspace id comes from the board's own directory, never from the request.
+    if (url.pathname === '/api/workspace/open' && req.method === 'POST') {
+      const b = await readBody(req);
+      await decisionDoor(req, 'open workspace');
+      const no = openRefusal({ decider: isDecider(req), intake: isIntake(req), body: b, headers: req.headers });
+      const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+      const agent = String(b.agent || '').slice(0, 120);
+      console.log(`[decide] open workspace ${agent} from ${ip} ${no ? 'REFUSED' : 'ok'}`);
+      if (no) return sendJson(res, no.status, { ok: false, msg: no.msg });
+      if (decideMode(SETTINGS.decidePage) !== 'on') return sendJson(res, 409, { ok: false, msg: 'decision page is off (SETTINGS.decidePage)' });
+      if (DEMO || GUARDRAILS_ONLY || !CMUX_PRESENT) return sendJson(res, 409, { ok: false, msg: DEMO ? 'demo: would open the workspace' : 'cmux is not available on this board' });
+      const r = await openWorkspace(agent, { directory: dirCache.length ? dirCache : await refreshDir(), run: (a) => cmux(a) });
+      if (!r.ok) return sendJson(res, r.status || 502, { ok: false, msg: r.msg });
+      recordEvent('sys', `workspace opened: ${agent} (by the owner)`).catch(() => {});
+      return sendJson(res, 200, { ok: true, agent, workspaceId: r.workspaceId });
+    }
+    // asks nobody sees (#787 part 3): the board's record, read-only (task ids, agent names, times; no comment text)
+    if (url.pathname === '/api/read-asks' && req.method === 'GET') {
+      if (readAsksMode(SETTINGS.readAsks) !== 'on') return sendJson(res, 404, { ok: false, msg: 'read asks are off (SETTINGS.readAsks)' });
+      const st = await readAsksStep(() => loadReadAsks());
+      return sendJson(res, 200, { mode: 'on', told: st.told, sent: st.sent });
+    }
     if (url.pathname === '/api/tasks/summary' && req.method === 'GET') {
       return sendJson(res, 200, await ledger.summary());
     }
@@ -1344,6 +1491,42 @@ const server = http.createServer(async (req, res) => {
       if (task?.owner) await afterTaskChange(task, { wake: [task.owner] }, 'board');
       recordEvent('sys', `triage: asked Mission Control for a worker (#${task.id}, ${b.label})`).catch(() => {});
       return sendJson(res, 200, { ok: true, id: task.id });
+    }
+    // Ask back office (#755): the poller's escalations and the owner's per-question line. This machine only; every
+    // word of the task and the line is fixed by src/backoffice.mjs (no model text reaches the ledger, C5).
+    if (url.pathname === '/api/backoffice/escalate' && req.method === 'POST') {
+      if (!localOnly(req)) return sendJson(res, 403, { ok: false, msg: 'localhost only' });
+      if (!BACKOFFICE) return sendJson(res, 404, { ok: false, refused: 'no back office lane on this install' });
+      const { planEscalation, noticeLine } = BACKOFFICE;
+      if (!SETTINGS.backoffice?.mode || SETTINGS.backoffice.mode === 'off') return sendJson(res, 409, { ok: false, refused: 'the back office is off' });
+      const b = await readBody(req);
+      if (b.kind === 'notice') {
+        const line = noticeLine(b);
+        if (!line) return sendJson(res, 400, { ok: false, refused: 'no question id' });
+        recordEvent('sys', `back office: ${line}`).catch(() => {});
+        await notify('Back office', OWNER.name || 'owner', line).catch(() => {});
+        return sendJson(res, 200, { ok: true });
+      }
+      const mc = resolveTarget('mission-control', dirCache).agent;
+      const plan = planEscalation(b, { mc: mc?.name || null, ownerId: OWNER.id });
+      if (plan.refused) return sendJson(res, 400, { ok: false, refused: plan.refused });
+      const task = await ledger.create({ ...plan.input, owner_ws: mc?.workspaceId || null });
+      // the owner's hold is put on whenever it is missing, so a retried escalation repairs a hold that failed to write
+      const live = await ledger.get(task.id);
+      if (live && !['done', 'cancelled'].includes(live.status) && !(live.blocked_on || []).includes(OWNER.id)) {
+        // block replaces blocked_on: keep every wait already on the task and add the owner's
+        try { await ledger.update(task.id, { ...plan.block, blocked_on: [...new Set([...(live.blocked_on || []), ...plan.block.blocked_on])] }); } catch (e) { return sendJson(res, 500, { ok: false, msg: `the owner's hold was not written: ${String(e.message).slice(0, 120)}` }); }
+      }
+      // a repeat on the day's mismatch task is one fixed line, never a new task or notice (the lane caps how many)
+      if (task.existing && plan.comment) await ledger.update(task.id, { op: 'comment', actor: 'board', text: plan.comment }).catch(() => {});
+      if (!task.existing) {
+        if (task.owner) await afterTaskChange(await ledger.get(task.id), { wake: [task.owner] }, 'board');
+        recordEvent('sys', `back office: ${b.kind} on question #${Number(b.question)} → task #${task.id}`).catch(() => {});
+        if (b.kind === 'stopped') await notify('Back office', 'lane stopped', `cap hit twice today (task #${task.id})`).catch(() => {});
+        if (b.kind === 'mismatch') await notify('Back office', 'question refused', `its chat is not the asker's (task #${task.id})`).catch(() => {});
+        if (b.kind === 'startup') await notify('Back office', 'start-up check refused the pass', `questions are refused until it is fixed (task #${task.id})`).catch(() => {});
+      }
+      return sendJson(res, 200, { ok: true, id: task.id, existing: Boolean(task.existing) });
     }
     if (url.pathname === '/api/tasks' && req.method === 'POST') {
       const b = await readBody(req);
@@ -1460,6 +1643,102 @@ const server = http.createServer(async (req, res) => {
       const q = url.searchParams;
       const out = evidenceRows(await ledger.list(), { limit: q.get('limit'), task: q.get('task'), q: q.get('q') || '' });
       return sendJson(res, 200, { ok: true, days: CLOSED_DAYS, ...out });
+    }
+    // setup page (src/setup-page.mjs, SETTINGS.setupPage): the guided setup's checklist with live checks. Read-only:
+    // answered from the last reading (the checks start child processes and never run inside a request).
+    if (url.pathname === '/api/setup' && req.method === 'GET') {
+      if (!setupOn) return sendJson(res, 404, { ok: false, msg: 'the setup page is off (SETTINGS.setupPage)' });
+      return sendJson(res, 200, { ok: true, ...(await setupReader.peek()), write: setupWrite ? { steps: stepsFor({ alerts: setupAlerts }), ...(setupButtonsOn ? { buttons: buttonList() } : {}) } : null });
+    }
+    // Buttons on the setup page (src/setup-buttons.mjs): four fixed command lines. The body is the button's id
+    // and nothing else is read from it. The door is stricter than the forms': the board must have SEEN a browser
+    // behind the request; a lookup that failed or a sender that has left is refused here, never passed.
+    if (url.pathname === '/api/setup/button' && (req.method === 'POST' || req.method === 'GET')) {
+      if (!setupButtonsOn) return sendJson(res, 404, { ok: false, msg: 'buttons on the setup page are off (SETTINGS.setupPage)' });
+      if (!localOnly(req)) return sendJson(res, 403, { ok: false, msg: 'open the setup page on this Mac, at localhost' });
+      if (req.method === 'GET') {            // the last Guardrails run's output, read after the board is back
+        if (!isDecider(req)) return sendJson(res, 403, { ok: false, msg: 'decision token rejected: reload the setup page' });
+        return sendJson(res, 200, { ok: true, running: setupButtons.running(), last: DEMO ? null : await lastButtonRun() });
+      }
+      const b = await readBody(req);
+      const id = String(b.id || '').slice(0, 40);
+      const what = `setup button ${id.replace(/[^a-z-]/g, '')}`;
+      const door = await decisionDoor(req, what);
+      if (isIntake(req) || b.actor || req.headers['x-mesh-intake'] || req.headers['x-mesh-agent'])
+        throw new MeshError(403, 'setup buttons are the owner\'s, on the board page only (no agent or intake identity)');
+      if (!isDecider(req)) {
+        recordEvent('sys', `${what} REJECTED (decision token)`).catch(() => {});
+        throw new MeshError(403, 'decision token rejected: reload the setup page and click again');
+      }
+      if (!browserProven(door.ev)) {
+        console.log(`${new Date().toISOString()} [door] refused (no evidence of a browser): ${what} [${door.ev?.kind ?? 'none'}: ${String(door.ev?.why || '').slice(0, 140)}]`);
+        recordEvent('bad', `decision door: ${what} REFUSED — the board could not see a browser behind the request`).catch(() => {});
+        return sendJson(res, 403, { ok: false, msg: 'refused: the board could not see that this click came from a browser on this Mac. Reload the setup page and click again.' });
+      }
+      try {
+        if (DEMO) return sendJson(res, 200, demoButton(id));
+        const up = readUpgradeState();
+        const r = await setupButtons.run(id, { busy: up?.running ? 'an upgrade is running' : null });
+        recordEvent(r.ok ? 'sys' : 'bad', `setup: "${what}" ${r.started ? 'started (the board restarts)' : r.ok ? 'ran' : r.timedOut ? 'ran out of time' : `ended with exit ${r.code}`}`).catch(() => {});
+        console.log(`${new Date().toISOString()} [setup] ${what}: ${r.started ? `started, log ${r.log}` : `exit ${r.code}${r.timedOut ? ' (time limit)' : ''}`}`);
+        return sendJson(res, 200, r);
+      } catch (e) {
+        if (e instanceof ButtonRefused) return sendJson(res, e.status, { ok: false, msg: e.message });
+        console.error(`${new Date().toISOString()} [setup] ${what} failed: ${e.message}`);
+        return sendJson(res, 500, { ok: false, msg: 'the button could not be run; the board log says why' });
+      }
+    }
+    // setup writes (src/setup-write.mjs, SETTINGS.setupPage mode 'write'). The scan the watch step ticks from:
+    // read-only, this Mac only, behind the decision token.
+    if (url.pathname === '/api/setup/scan' && req.method === 'GET') {
+      if (!setupWrite) return sendJson(res, 404, { ok: false, msg: 'setup from the page is off (SETTINGS.setupPage)' });
+      if (!localOnly(req)) return sendJson(res, 403, { ok: false, msg: 'open the setup page on this Mac, at localhost' });
+      if (!isDecider(req)) return sendJson(res, 403, { ok: false, msg: 'decision token rejected: reload the setup page' });
+      return sendJson(res, 200, { ok: true, scan: DEMO ? DEMO_SCAN : await scanWatch() });
+    }
+    // One step answered on the page. The owner's, like a card action: this Mac, the decision door, no agent or
+    // intake identity, the decision token. What may be written is src/setup-write.mjs's to decide.
+    if (url.pathname === '/api/setup/step' && req.method === 'POST') {
+      if (!setupWrite) return sendJson(res, 404, { ok: false, msg: 'setup from the page is off (SETTINGS.setupPage)' });
+      if (!localOnly(req)) return sendJson(res, 403, { ok: false, msg: 'open the setup page on this Mac, at localhost' });
+      const b = await readBody(req);
+      const step = String(b.step || '').slice(0, 20);
+      await decisionDoor(req, `setup step ${step}`);
+      if (isIntake(req) || b.actor || req.headers['x-mesh-intake'] || req.headers['x-mesh-agent'])
+        throw new MeshError(403, 'setup steps are saved from the owner\'s board only (no agent or intake identity)');
+      if (!isDecider(req)) {
+        recordEvent('sys', `setup step ${step.replace(/[^a-z]/g, '')} REJECTED (decision token)`).catch(() => {});
+        throw new MeshError(403, 'decision token rejected: reload the setup page and save again');
+      }
+      try {
+        if (DEMO) {
+          const r = demoSetupStep(step, b.answers, { alerts: setupAlerts });
+          recordEvent('sys', r.saved).catch(() => {});
+          return sendJson(res, 200, r);
+        }
+        const up = readUpgradeState();
+        const r = await runSetupStep(step, b.answers, { busy: up?.running ? 'an upgrade is running' : null, alerts: setupAlerts, alertsFile: SECRETS_FILE });
+        const restart = restartPlan(step, { demo: DEMO, label: `${labelPrefix(ROOT)}.master-console` });
+        recordEvent('sys', `setup: the ${step} step was saved from the setup page${restart === 'self' ? '; the board restarts to show it' : ''}`).catch(() => {});
+        console.log(`${new Date().toISOString()} [setup] ${step} step saved from the page (restart: ${restart})`);
+        // restart A: the board ends itself once the answer is out; its own LaunchAgent starts it again
+        if (restart === 'self') res.once('finish', () => setTimeout(() => process.exit(0), 400));
+        return sendJson(res, 200, { ...r, restart });
+      } catch (e) {
+        if (e instanceof SetupRefused) return sendJson(res, e.status, { ok: false, msg: e.message });
+        // never a file's text or a path in the answer: the log has the reason
+        console.error(`${new Date().toISOString()} [setup] ${step} step failed: ${e.message}`);
+        return sendJson(res, 500, { ok: false, msg: 'the step could not be saved; the board log says why' });
+      }
+    }
+    // conversation view (src/conversation.mjs, SETTINGS.conversationView): what was said to one agent session and what
+    // it answered, from the transcript's tail. Read-only. The session id is the only input; a path is never taken.
+    if (url.pathname === '/api/conversation' && req.method === 'GET') {
+      if (!conversationOn) return sendJson(res, 404, { ok: false, msg: 'the conversation view is off (SETTINGS.conversationView)' });
+      const id = url.searchParams.get('session') || '';
+      if (!validSessionId(id)) return sendJson(res, 400, { ok: false, msg: CONVERSATION_WHY['bad-id'] });
+      const r = DEMO ? demoConversation(id) : await conversations.read(id);
+      return r.ok ? sendJson(res, 200, r) : sendJson(res, r.why === 'bad-id' ? 400 : 404, { ok: false, msg: CONVERSATION_WHY[r.why] || 'not found' });
     }
     const am = url.pathname.match(/^\/api\/tasks\/(\d+)\/audit$/);
     if (am && req.method === 'GET') {
@@ -1687,18 +1966,25 @@ const server = http.createServer(async (req, res) => {
     }
     // static
     const evidenceOn = evidenceMode(SETTINGS.evidencePanel) === 'on';
-    const file = url.pathname === '/' ? (evidenceOn && url.searchParams.has('evidence') ? 'evidence.html' : 'index.html') : url.pathname.slice(1);
+    const file = url.pathname === '/' ? (evidenceOn && url.searchParams.has('evidence') ? 'evidence.html' : setupOn && url.searchParams.has('setup') ? 'setup.html' : conversationOn && url.searchParams.has('conversation') ? 'conversation.html' : 'index.html') : url.pathname.slice(1);
     const safe = path.normalize(file).replace(/^(\.\.[/\\])+/, '');
     if (!evidenceOn && safe === 'evidence.html') { res.writeHead(404); return res.end('not found'); }
+    if (!setupOn && (safe === 'setup.html' || safe === 'setup.js')) { res.writeHead(404); return res.end('not found'); }
+    if (!setupWrite && safe === 'setup-write.js') { res.writeHead(404); return res.end('not found'); }
+    if (!conversationOn && (safe === 'conversation.html' || safe === 'conversation.js')) { res.writeHead(404); return res.end('not found'); }
     const full = path.join(PUBLIC, safe);
     if (!full.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
     let body = await readFile(full).catch(() => null);
     if (!body) { res.writeHead(404); return res.end('not found'); }
-    if (safe === 'evidence.html') body = String(body).replaceAll('%%BRAND%%', esc(SETTINGS.brand || 'Zulu Assistant'));
+    if (safe === 'evidence.html' || safe === 'setup.html' || safe === 'conversation.html') body = String(body).replaceAll('%%BRAND%%', esc(SETTINGS.brand || 'Zulu Assistant'));
+    // the setup page carries the decision token and the forms' script only in mode 'write'
+    if (safe === 'setup.html') body = String(body).replace('%%SETUP_WRITE%%', setupWrite ? `<meta name="mesh-decision" content="${decisionToken}">\n<meta name="board-boot" content="${BOOT_ID}">\n<script src="/setup-write.js" defer></script>` : '');
     if (safe === 'index.html') {
       body = String(body).replace('%%MESH_DECISION%%', decisionToken).replace('%%BOOT_ID%%', BOOT_ID)
         .replaceAll('%%BRAND%%', esc(SETTINGS.brand || 'Zulu Assistant'))
-        .replace('%%EVIDENCE%%', evidenceOn ? 'on' : 'off');      // row context: a dry run's time links to the task's receipts
+        .replace('%%EVIDENCE%%', evidenceOn ? 'on' : 'off')       // row context: a dry run's time links to the task's receipts
+        .replace('%%SETUP_PAGE%%', setupOn ? 'on' : 'off')       // the setup card links to /?setup=1
+        .replace('%%CONVERSATION%%', conversationOn ? 'on' : 'off');   // agent tiles link to /?conversation=<session>
     }
     // no-cache: a reload always revalidates, so a fixed app.js can't hide behind a stale copy
     res.writeHead(200, { 'content-type': MIME[path.extname(full)] || 'application/octet-stream', 'cache-control': 'no-cache' });
@@ -1725,4 +2011,14 @@ server.listen(SETTINGS.port, '0.0.0.0', () => {
   console.log(`[ops-board] http://localhost:${SETTINGS.port} (+ tailnet, source-guarded)${DEMO ? ' — DEMO MODE (synthetic data)' : ''}`);
   recordEvent('sys', DEMO ? 'Ops Board started in demo mode — synthetic fleet, nothing real is touched' : 'Ops Board started').catch(() => {});
   poll();
+  // #705: after a cold start the Dock's board page may have loaded before this port was open. Reload
+  // the board's own Dock pages once (exact addresses only); never adds, switches or retries a reload.
+  if (!DEMO && !GUARDRAILS_ONLY && CMUX_PRESENT) {
+    reloadDockOnce({
+      port: SETTINGS.port,
+      run: async (args) => sh(SETTINGS.cmuxBin, args, { CMUX_SOCKET_PASSWORD: await cmuxPassword(), CMUX_QUIET: '1' }),
+      appStart: cmuxAppStart,
+      log: (text) => recordEvent('sys', text),
+    }).catch((e) => console.error('[dock-reload]', e.message));
+  }
 });

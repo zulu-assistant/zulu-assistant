@@ -246,8 +246,8 @@ const runningSessionIds = () => new Promise((resolve) => {
   });
 });
 
-// When did the running cmux app start? (ms, or 0 if not found)
-const cmuxAppStart = () => new Promise((resolve) => {
+// When did the running cmux app start? (ms, or 0 if not found). Also read by src/dock-reload.mjs (#705).
+export const cmuxAppStart = () => new Promise((resolve) => {
   execFile('ps', ['-axo', 'lstart=,command='], { timeout: 5000, maxBuffer: 8 << 20 }, (e, so) => {
     if (e) return resolve(0);
     const line = String(so).split('\n').find((l) => /\/cmux\.app\/Contents\/MacOS\/cmux\s*$/.test(l));

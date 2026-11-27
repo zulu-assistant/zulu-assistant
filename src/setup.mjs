@@ -154,6 +154,33 @@ export async function engineStatus() {
 
 export function readJson(file) { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } }
 
+/**
+ * The example values the secrets template carried in its keys until they were moved into comments. An
+ * install made before that has them in data/secrets.env (the full install copies the template, and an
+ * upgrade never touches data/), so a key that still holds one is not a channel the owner set up.
+ */
+export const TEMPLATE_EXAMPLES = {
+  SMTP_HOST: 'smtp.example.com', SMTP_USER: 'alerts@example.com', ALERT_EMAIL_TO: 'you@example.com',
+  SMS_WEBHOOK_URL: 'https://sms.example.com/api/sms', SMS_ALERT_TO: '+15555550100',
+  HEARTBEAT_URL: 'https://<project-ref>.supabase.co/rest/v1/ops_heartbeat?id=eq.1',
+};
+/**
+ * Which alert channels are on, from the secrets: a channel counts when the board would send through it,
+ * the same keys its senders ask for (src/alerts.mjs sendEmail and sendSms, server.mjs heartbeat), and a
+ * key that still holds the template's example value counts as empty.
+ * → { tiers: ['email' | 'sms' | 'heartbeat'], examples: [<key that still holds an example value>] }
+ */
+export function alertTiers(env = {}) {
+  const examples = Object.keys(TEMPLATE_EXAMPLES).filter((k) => env[k] === TEMPLATE_EXAMPLES[k]);
+  const set = (k) => Boolean(env[k]) && !examples.includes(k);
+  const tiers = [
+    set('SMTP_HOST') && set('SMTP_USER') && set('SMTP_PASS') && 'email',
+    set('SMS_WEBHOOK_URL') && set('SMS_WEBHOOK_KEY') && set('SMS_ALERT_TO') && 'sms',
+    set('HEARTBEAT_URL') && set('HEARTBEAT_KEY') && 'heartbeat',
+  ].filter(Boolean);
+  return { tiers, examples };
+}
+
 /** Live check per step → { ok, detail }. `ctx` carries resolved paths (tests inject). */
 export async function checkStep(id, ctx = {}) {
   const overlay = ctx.overlay || path.join(ROOT, 'overlay');
@@ -179,9 +206,9 @@ export async function checkStep(id, ctx = {}) {
       return { ok: Boolean(local.dropExamples), detail: local.dropExamples ? `${n} item(s) from this Mac on the board` : 'still showing the example placeholders' };
     }
     case 'alerts': {
-      const env = ctx.secrets || {};
-      const tiers = [env.SMTP_HOST && env.ALERT_EMAIL_TO && 'email', env.SMS_WEBHOOK_URL && 'sms', env.HEARTBEAT_URL && 'heartbeat'].filter(Boolean);
-      return { ok: tiers.length > 0, detail: tiers.length ? `on: ${tiers.join(', ')}` : 'no alert channel (cmux notifications only)' };
+      const { tiers, examples } = alertTiers(ctx.secrets || {});
+      const left = examples.length ? ` · still the template's example value: ${examples.join(', ')}` : '';
+      return { ok: tiers.length > 0, detail: `${tiers.length ? `on: ${tiers.join(', ')}` : 'no alert channel (cmux notifications only)'}${left}` };
     }
     case 'vault': {
       const v = ctx.vault || (await shellEnv()).vault;

@@ -34,6 +34,7 @@ const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o?.[k] != null).
 export function inScope(agent, cfg = {}) {
   if (!cfg || !['observe', 'on'].includes(cfg.mode)) return false;
   if (!agent?.workspaceId || agent.status === 'closed') return false;
+  // never Gemini (#812): its compaction is `/compress`, never seen board-typed; the gauge alone is shown
   if (!['claude', 'codex'].includes(agent.vendor)) return false;
   if (agent.profile) return false;                                   // Codex --profile (local model): its own launcher
   if (Array.isArray(cfg.exclude) && cfg.exclude.includes(agent.name)) return false;

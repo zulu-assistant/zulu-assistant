@@ -16,7 +16,8 @@ import readline from 'node:readline';
 import path from 'node:path';
 import { STEPS, ROOT, readState, writeState, markStep, summarize, checkStep, engineStatus, shellEnv, readJson, run } from '../src/setup.mjs';
 import { parseSelection, scanLaunchAgents, scanDocker, scanCron, scanRepos } from '../src/setup-scan.mjs';
-import { parseEnv, writePrivate } from '../src/config.mjs';
+import { parseEnv } from '../src/config.mjs';
+import { applyOwner, applyWatch, applyEngines, upsertSecrets } from '../src/setup-actions.mjs';
 
 const HOME = process.env.HOME;
 const OVERLAY = process.env.MC_OVERLAY || path.join(ROOT, 'overlay');
@@ -49,20 +50,9 @@ const askSecret = async (q) => {
 const sh = (cmd, args, opts = {}) => spawnSync(cmd, args, { stdio: 'inherit', cwd: ROOT, ...opts }).status === 0;
 const say = (tag, msg) => console.log(`${tag.padEnd(6)} ${msg}`);
 const json = async (f, d = {}) => readJson(f) || d;
-const save = async (f, doc) => { await mkdir(path.dirname(f), { recursive: true }); await writeFile(f, JSON.stringify(doc, null, 2) + '\n'); };
 
-async function upsertSecrets(pairs) {
-  const text = await readFile(SECRETS, 'utf8').catch(async () => readFile(path.join(ROOT, 'secrets.env.example'), 'utf8'));
-  let lines = text.split('\n');
-  for (const [k, v] of Object.entries(pairs)) {
-    if (v === undefined || v === '') continue;
-    const i = lines.findIndex((l) => l.replace(/^export\s+/, '').startsWith(`${k}=`));
-    const line = `${k}=${JSON.stringify(v)}`;
-    if (i >= 0) lines[i] = line; else lines.push(line);
-  }
-  await mkdir(path.dirname(SECRETS), { recursive: true });
-  await writePrivate(SECRETS, lines.join('\n'));
-}
+// What the owner, watch, engines and alerts steps WRITE lives in src/setup-actions.mjs (answers in, files out),
+// shared with any other caller; this file asks the questions and does what only a terminal can.
 
 // ---- steps ----------------------------------------------------------------------------
 const DO = {
@@ -84,24 +74,15 @@ const DO = {
       say('info', `logging in to ${n} with its own flow (subscription or API key — your choice there)`);
       if (n === 'claude') sh('claude', ['auth', 'login']); else sh('codex', ['login']);
     }
-    const models = await json(MODELS, await json(path.join(ROOT, 'examples/config/models.json')));
-    await save(MODELS, { ...models, engine });
-    const st = (await readState()) || { steps: {}, answers: {} };
-    st.answers = { ...(st.answers || {}), enginesChosen: true };
-    await writeState(st);
+    await applyEngines(engine, { overlay: OVERLAY });
   },
 
   async owner() {
     const local = await json(LOCAL);
     const name = await ask('Your name (shown as the approver on the board; agents say "needs <name>\'s approval")', local.owner?.name || '');
-    if (!name) return;
-    local.owner = { id: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'owner', name };
-    await save(LOCAL, local);
-    for (const rel of ['POLICY.md', 'MISSION-CONTROL.md', 'config/TRIAGE.md']) {
-      const f = path.join(OVERLAY, rel);
-      const t = await readFile(f, 'utf8').catch(() => null);
-      if (t && t.includes('<OWNER>')) { await writeFile(f, t.replaceAll('<OWNER>', name).replaceAll('<UID>', String(process.getuid()))); say('done', `filled your name into overlay/${rel}`); }
-    }
+    const done = await applyOwner(name, { overlay: OVERLAY });
+    if (!done) return;
+    for (const rel of done.filled) say('done', `filled your name into overlay/${rel}`);
     await restartBoard();
     say('info', `overlay/POLICY.md decides what agents may do without you (paid / outward / destructive always escalate).`);
     if (await yes('Open POLICY.md now to adjust it?')) sh('open', ['-t', path.join(OVERLAY, 'POLICY.md')]);
@@ -109,7 +90,6 @@ const DO = {
 
   async watch() {
     const { prefix } = await shellEnv();
-    const local = await json(LOCAL);
     const pickFrom = async (title, items, show) => {
       if (!items.length) { say('skip', `${title}: none found`); return []; }
       console.log(`\n${title}:`);
@@ -120,13 +100,7 @@ const DO = {
     const docker = await pickFrom('Docker containers', await scanDocker(), (c) => `${c.name}  (${c.status})`);
     const cron = await pickFrom('crontab lines', await scanCron(), (c) => `${c.schedule}  ${c.command.slice(0, 70)}`);
     const urls = (await ask('\nHTTP endpoints to check (comma-separated URLs, Enter for none)', '')).split(',').map((s) => s.trim()).filter(Boolean);
-    local.domains = [{ id: 'mine', name: 'My Jobs', accent: '#00e5e5' }];
-    local.jobs = jobs.map((j) => ({ label: j.label, name: j.name, domain: 'mine' }));
-    local.docker = docker.map((c) => ({ name: c.name, display: `Docker: ${c.name}`, domain: 'mine' }));
-    local.cron = cron.map((c) => ({ id: c.id, name: c.match, domain: 'mine', schedule: c.schedule, match: c.match, quietOk: true }));
-    local.endpoints = urls.map((u, i) => ({ id: `ep${i + 1}`, name: u.replace(/^https?:\/\//, ''), url: u, everyPolls: 5 }));
-    local.dropExamples = true;
-    await save(LOCAL, local);
+    await applyWatch({ jobs, docker, cron, urls }, { overlay: OVERLAY });
     say('done', `${jobs.length} LaunchAgent(s), ${docker.length} container(s), ${cron.length} cron line(s), ${urls.length} endpoint(s) → overlay/config/local.json`);
     say('info', 'cron cards are judged by crontab presence; add a `log` path in local.json to judge each run.');
     await restartBoard();
@@ -147,7 +121,7 @@ const DO = {
       p.HEARTBEAT_URL = await ask('  heartbeat PATCH URL (PostgREST row)'); p.HEARTBEAT_KEY = await askSecret('  heartbeat key (hidden):');
       say('info', 'then: copy .github/workflows/deadman.example.yml into a repo of yours and run scripts/bootstrap.sh install --deadman (docs/INSTALL.md)');
     }
-    await upsertSecrets(p);
+    await upsertSecrets(p, { secretsFile: SECRETS });
     say('done', `saved to ${tilde(SECRETS)} (600) — the board re-reads it, no restart`);
   },
 

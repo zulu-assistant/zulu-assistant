@@ -93,6 +93,9 @@ test('scope: off/observe/on, only/exclude, vendors, closed panes, local-model pr
   assert.equal(inScope(a, { mode: 'on', only: ['res-a'] }), true);
   assert.equal(inScope(a, { mode: 'on', exclude: ['res-a'] }), false);
   assert.equal(inScope({ ...a, status: 'closed' }, { mode: 'on' }), false);
+  // #812: a Gemini agent is never in scope, even when named on `only`
+  assert.equal(inScope({ ...a, vendor: 'gemini' }, { mode: 'on' }), false);
+  assert.equal(inScope({ ...a, vendor: 'gemini' }, { mode: 'on', only: ['res-a'] }), false);
   assert.equal(inScope({ ...a, vendor: 'shell' }, { mode: 'on' }), false);
   assert.equal(inScope({ ...a, workspaceId: null }, { mode: 'on' }), false);
   assert.equal(inScope({ ...a, profile: 'local' }, { mode: 'on' }), false);

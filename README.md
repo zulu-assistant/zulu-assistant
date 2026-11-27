@@ -198,7 +198,7 @@ Config is resolved `overlay/` → core → `examples/`. Adding coverage takes on
 
 ## Roadmap
 
-- Latest release: **1.3.2** ([tested versions](docs/VERSIONS.md), [changelog](CHANGELOG.md)).
+- Latest release: **1.4.0** ([tested versions](docs/VERSIONS.md), [changelog](CHANGELOG.md)).
   It has the board, demo mode, Mission Control, the Agent Mesh, the brain templates, the installer,
   Slack team-chat intake and Guardrails; since 1.2: one-click upgrade, a Guardrails-only install,
   push notices to your phone (a self-hosted ntfy relay), GitHub intake, the evidence panel and the

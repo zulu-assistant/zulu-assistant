@@ -215,6 +215,47 @@ Zulu never stores a credential. Redo one step with `zulu setup --step <id>`.
 | `residents` | pick repos to give a long-lived resident agent |
 | `verify` | `zulu check`, board answer, start Mission Control on your chosen engine |
 
+**The same checklist in the browser:** `http://localhost:3210/?setup=1` shows every step with its live check, and for each open
+step the command above that does it. It only shows where setup stands: it changes nothing, and each step is still done in a
+terminal. The board's setup card links to it. It is on when your registry has `setupPage: { mode: 'on' }` under `SETTINGS`
+(the examples ship it `'off'`, and no key reads as off: set `'on'` to try it).
+
+**Answering three steps on the page (opt-in):** with `setupPage: { mode: 'write' }` the page also has a small form for the
+`owner`, `watch` and `engines` steps. Each SAVE needs a second click.
+- **Who can save:** your own browser on this Mac, at `localhost`. A phone on your tailnet can read the page and cannot save.
+  An agent session cannot save, and neither can anything without the board's decision token.
+- **What is written:** `overlay/config/local.json` (your name; what the board watches), `overlay/config/models.json` (the
+  engine choice) and the setup record. Nothing else. The page does not put your name into the policy text: if it still
+  names a placeholder, `zulu setup --step owner` fills it.
+- **What you can choose:** a name of letters, digits, spaces and `. ' -`; items from a scan of this Mac that the board runs
+  itself; up to 10 `http` or `https` addresses; Claude Code or Codex per role (logging in stays each tool's own step).
+- **After a save** of your name or the watch list the board restarts itself to show it, when it runs as its LaunchAgent.
+  Started by hand, it shows after you restart it.
+- **Not on a board set up by hand** (one with no setup record), and not while an upgrade runs: the page says to use the terminal.
+- Every other step is still done in a terminal.
+
+**Buttons on the page (their own opt-in):** `setupPage: { mode: 'write', buttons: true }`, with `callerEvidence.tripwire`
+`'browser'`, adds four buttons. Each takes two clicks and says what it does first.
+- **Check what Guardrails would change:** the installer's dry run. Nothing is written.
+- **Turn Guardrails on:** what `./install.sh --guardrails --yes` does. Your rules file gets the enforce default when it has
+  none, the gate hook is added to the Claude Code settings file (a backup is taken first), and the board restarts. It opens
+  only after a check, and runs only when a fresh check reads the same as the one you read. On an install that runs the
+  full board it refuses, as the terminal command does. Restart your Claude Code sessions afterwards.
+- **Back up now:** `zulu backup`, without secrets, into `data/backups/`.
+- **Check the newest backup:** `zulu restore <newest archive>` as a dry run. Nothing is written.
+- **Still a terminal command:** the full install, removing or switching Guardrails, the Codex hook, a restore itself, a
+  backup with secrets, a rollback.
+
+**The alerts step on the page (a second opt-in):** `setupPage: { mode: 'write', alerts: true }` adds a form for the alert
+channels. It is the one form that writes `data/secrets.env`, so it is offered only when both are true: the key is set, and
+`callerEvidence.tripwire` is `'browser'` (a save that does not come from a browser is refused).
+- **Fields:** the ten alert keys of the secrets file and no other. Passwords and keys are typed hidden.
+- **Nothing is shown back:** the form starts empty every time, a stored value is never sent to the page, and an answer
+  names the keys that were saved, never a value. Nothing is sent as a test.
+- **An empty field keeps what is stored.** The page cannot clear a value; edit the file for that.
+- **A channel is saved whole:** email needs host, user and password; SMS its address, key and a number; the heartbeat its
+  address and key, counting what is already stored. Addresses are `https` (`http` only to this machine).
+
 Problems? [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists what usually goes wrong and what to do. `zulu doctor` writes a redacted diagnostic file to `data/` (never uploaded) for an issue. Which model runs each role: [MODELS.md](MODELS.md).
 
 ## 3c. Optional: team chat intake (Slack)

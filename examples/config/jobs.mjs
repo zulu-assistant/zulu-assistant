@@ -18,8 +18,10 @@ export const DOMAINS = [
   { id: 'cloud',     name: 'Cloud / Endpoints', accent: '#00e5e5' },
 ];
 
-// External/HTTP surfaces. Any HTTP response (even 401/403) counts as UP —
-// only network errors and timeouts are DOWN. Checked every `everyPolls` polls.
+// External/HTTP surfaces. Any HTTP response below 500 (even 401/403, a redirect) counts as UP;
+// network errors, timeouts and any 5xx are DOWN. Checked every `everyPolls` polls.
+// A health URL can also be judged by its JSON body: `okPath: 'tabs.ok'` (must be true), or
+// `okPath: 'status', okValue: 'healthy'` (must equal), with `detailPath` quoted in the detail.
 export const ENDPOINTS = [
   { id: 'site', name: 'Website example.com', url: 'https://example.com', everyPolls: 5, example: true },
   { id: 'api-health', name: 'Local API /health :8080', url: 'http://localhost:8080/health', everyPolls: 2, example: true },
@@ -204,6 +206,28 @@ export const SETTINGS = {
   // the gate and the waiting rows only (no cmux, no collector). `./install.sh --guardrails` sets it in config/local.json.
   profile: 'full',
   evidencePanel: { mode: 'on' },
+  // setup page (src/setup-page.mjs, page /?setup=1 + GET /api/setup): the guided setup's checklist with its live
+  // checks, read-only: it shows where setup stands and the terminal command for each open step. 'off' = no page, no API.
+  // 'write' (opt-in, src/setup-write.mjs) = the same page plus forms for the owner, watch and engines steps, saved only
+  // from the owner's own browser on this Mac (localhost, the decision token, no agent session). It writes
+  // config/local.json, config/models.json and the setup record, nothing else.
+  // alerts: true (a second opt-in, src/setup-alerts.mjs) adds the alert channels form, the one that writes data/secrets.env.
+  // It is offered only with mode 'write', this key, AND callerEvidence.tripwire 'browser'. Not set here.
+  // buttons: true (its own opt-in, src/setup-buttons.mjs) adds four buttons under the same three conditions: the Guardrails
+  // installer's dry run and its write form, a backup without secrets, a restore's dry run. Not set here.
+  // Shipped off: 'on' to try the read-only page.
+  setupPage: { mode: 'off' },
+  // conversation view (src/conversation.mjs, page /?conversation=<session id> + GET /api/conversation): the last
+  // turns of one Claude Code session from its transcript, read-only: what was said to the agent, what it answered,
+  // and one line per tool call (name and the agent's own description; never a command or a result). 'off' = no page, no API.
+  // Shipped off: 'on' to try it.
+  conversationView: { mode: 'off' },
+  // daily decision page (src/decide-page.mjs): /?decide=1, everything waiting on the owner ordered by the
+  // cost of waiting, with the strip's own buttons and an OPEN WORKSPACE button per row. 'on' to try it.
+  decidePage: { mode: 'off' },
+  // asks nobody sees (src/read-asks.mjs): an agent's task comment that asks Mission Control for a read or a go,
+  // with no mesh message after it, wakes Mission Control once after 10 min. 'on' to use it.
+  readAsks: { mode: 'off' },
   // worktree-per-task (src/worktree.mjs): each spawned worker codes in its own git worktree,
   // <repo-parent>/wt-<task> on branch task/<task>-<slug>; ignored files (data/, .env*) are never copied in.
   // `task.sh worktree-clean N` removes one only when nothing would be lost. residents: true adds the
@@ -239,6 +263,10 @@ export const SETTINGS = {
   //             e.g. { 'com.example.mission-control-triage': 'headless:triage' }
   // A request from another device (your phone) and a failed lookup are never refused by the door.
   callerEvidence: { mode: 'observe', tripwire: 'agent', jobs: {} },
+  // Two lanes kept in the source repository only (the publish manifest's `withheld` list); an edition without their
+  // files ignores these keys. null = off.
+  improvementLoop: null,
+  backoffice: null,
   // Gate integrity (src/gate-integrity.mjs, docs/GUARDRAILS.md): compare the gate's own files in this
   // checkout with what has landed on the remote's default branch (a release install: with its tag),
   // and check that the hook is still registered exactly as installed. The result is part of the

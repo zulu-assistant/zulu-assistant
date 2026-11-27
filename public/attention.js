@@ -52,6 +52,7 @@
     const body = open && t ? (() => { const v = visibleTask(t, g); return o.taskRow(v.task, { hideAsk: v.hideAsk }); })() : '';
     return `<div class="att-row${open ? ' is-open' : ''}${back ? ' is-back' : ''}" data-att-task="${g.task}">
     <button class="att-head" data-att-toggle="${g.task}"${decision ? ' data-att-decision="1"' : ''} aria-expanded="${open}"><span class="att-caret" aria-hidden="true">${open ? '▾' : '▸'}</span><span class="task-id">#${g.task}</span><span class="task-title">${o.esc(g.title)}</span><span class="att-items">${o.esc(chips)}</span><span class="chip att-n">${g.items.length}</span>${back ? '<span class="chip att-back" title="a snooze ran out; this is waiting again"><span aria-hidden="true">↺</span>BACK</span>' : ''}</button>
+    ${o.workspace && g.owner ? `<div class="att-ws">${o.esc(g.owner)} · ${o.workspace(g.owner)}</div>` : ''}
     ${open || o.picking.has(String(g.task)) || o.results.has(`snooze:${g.task}`) ? snoozeControl(g.task, o) : ''}
     ${body}
   </div>`;

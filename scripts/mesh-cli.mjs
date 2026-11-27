@@ -138,6 +138,10 @@ const HELP = `usage:
                           board's decision token. An agent running this is itself gated (class self).
   task.sh audit <id> [--json] [--verify]   (guardrails: every gate request, decision and run on the task;
                 --verify recomputes the receipt chain and compares it with the task's gates, exit 1 on a difference)
+  task.sh withdraw <id> <gate> "<why the call is not needed>"
+                                     the agent the row was filed for only: a PENDING gate row leaves the owner's
+                                     list as "withdrawn". Not a decision: nothing runs, nobody is woken, and running
+                                     the same call again files a new row.
   task.sh gate-approved <id> <gate> "<what the owner said, where>" [--decline]
                                      mission-control only: record a gate answer the owner gave in a pane. An
                                      approval is a proposal: the gate stays pending and nothing is released
@@ -263,6 +267,13 @@ async function task(sub, pos, flags) {
       // typed in a terminal on a board that takes decisions from its page only: kept as a row to confirm
       if (r.proposed) return console.log(`#${id} ${gate}: NOT approved yet. Your typed approval was kept as a row: confirm it on the board page with one click. Nothing runs until then.`);
       return console.log(`#${id} ${gate}: ${g?.status || decision}${g?.expires_at && decision === 'approve' ? ` (runs once, by ${String(g.expires_at).slice(11, 16)}Z)` : ''}`);
+    }
+    case 'withdraw': {
+      // #786 B: the agent a pending row was filed for says the call is not needed (not a decision)
+      if (!pos[1] || !note(2)) die('usage: task.sh withdraw <task> <gate> "<why the call is not needed>"');
+      const r = await patch({ op: 'gate_withdraw', gate: pos[1], reason: note(2) });
+      const g = (r.task.gates || []).find((x) => x.id === pos[1]);
+      return console.log(`#${id} ${pos[1]}: ${g?.status || 'withdrawn'}. Nothing ran; running the same call again files a new row.`);
     }
     case 'gate-approved': {
       if (!pos[1]) die('gate-approved needs the gate id: task.sh gate-approved <task> <gate> "<what the owner said>" [--decline]');
@@ -629,10 +640,11 @@ async function main() {
 
   if (cmd === 'kick') {
     const { flags } = parse([sub, ...rest].filter(Boolean));
-    if (!flags.workspace || !flags.file) die('kick needs --workspace <uuid> --file <promptfile> [--name <session name>]');
+    if (!flags.workspace || !flags.file) die('kick needs --workspace <uuid> --file <promptfile> [--name <session name>] [--vendor claude|codex|gemini]');
     await readFile(flags.file, 'utf8');                        // must exist
     const line = `Read the brief at "${flags.file}" and execute it in full (it is your task; the report-back protocol is at the end).`;
-    const r = await kickSession({ workspace: flags.workspace, line, name: flags.name });
+    // --vendor: the pane's engine, so a Gemini pane's ready screen is read by its own rules (#811, #812)
+    const r = await kickSession({ workspace: flags.workspace, line, name: flags.name, vendor: flags.vendor || undefined });
     console.log(r.ok ? `kicked: prompt submitted (attempt ${r.attempt}${r.note ? `, ${r.note}` : ''})` : `KICK FAILED: ${r.reason}`);
     process.exit(r.ok ? 0 : 3);
   }

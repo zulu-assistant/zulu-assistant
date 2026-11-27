@@ -222,41 +222,69 @@ export async function getSessions() {
   } catch { return []; }
 }
 
-// ---- HTTP endpoint checks (any HTTP response = up; error/timeout = down) ----
+// ---- HTTP endpoint checks (an HTTP response = reached; error/timeout = down) ----
+// A reached endpoint that answers 5xx is DOWN (src/status.mjs, #814); 1xx–4xx are up.
 // An entry may add `okPath` (dotted path into a JSON body, e.g. 'tabs.ok'):
 // the card then also goes DOWN when that field is false, with the optional
-// `detailPath` (e.g. 'tabs.failed') quoted in the detail. A body that is not
-// JSON or lacks the path is reported, never treated as a failure.
-const pathGet = (obj, dotted) => String(dotted || '').split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
+// `detailPath` (e.g. 'tabs.failed') quoted in the detail. With `okValue` (#814,
+// e.g. okPath 'status', okValue 'healthy') the field must EQUAL that value instead.
+// A body that is not JSON or lacks the path is reported, never treated as a failure.
+// own fields only: a path never resolves to something inherited (`constructor`, `toString` …)
+const pathGet = (obj, dotted) => String(dotted || '').split('.')
+  .reduce((o, k) => (o != null && typeof o === 'object' && Object.hasOwn(o, k) ? o[k] : undefined), obj);
+const showValue = (v) => {
+  let s;
+  try { s = typeof v === 'string' ? v : JSON.stringify(v); } catch { s = null; }
+  return String(s ?? typeof v).slice(0, 40);
+};
 export function judgeBody(ep, text) {
   if (!ep.okPath) return { okFlag: null, note: '' };
   let body;
   try { body = JSON.parse(text); } catch { return { okFlag: null, note: `${ep.okPath} unreadable (body not JSON)` }; }
   const v = pathGet(body, ep.okPath);
-  if (v === undefined || v === null) return { okFlag: null, note: `${ep.okPath} absent` };
-  if (v === true) return { okFlag: true, note: `${ep.okPath} true` };
+  // absent = a note; a null is "not run yet" for a true/false field, but a value like any other under okValue
+  if (v === undefined || (v === null && ep.okValue === undefined)) return { okFlag: null, note: `${ep.okPath} absent` };
+  const want = ep.okValue !== undefined ? ep.okValue : true;
+  const shown = showValue(v);
+  if (v === want) return { okFlag: true, note: `${ep.okPath} ${shown}` };
   const why = ep.detailPath ? pathGet(body, ep.detailPath) : null;
-  const list = Array.isArray(why) ? why.join(', ') : (why && typeof why === 'object' ? Object.keys(why).join(', ') : (why ?? ''));
-  return { okFlag: false, note: `${ep.okPath} false${list ? ` (${String(list).slice(0, 80)})` : ''}` };
+  // every part through showValue: an odd value in the detail never throws (the status code already read must stand)
+  const list = Array.isArray(why) ? why.map(showValue).join(', ')
+    : (why && typeof why === 'object' ? Object.keys(why).join(', ') : (why == null ? '' : showValue(why)));
+  return { okFlag: false, note: `${ep.okPath} ${ep.okValue !== undefined ? shown : 'false'}${list ? ` (${String(list).slice(0, 80)})` : ''}` };
 }
 const epCache = new Map(); // id -> { polls, result }
-export async function httpChecks(pollCount) {
+export async function httpChecks(pollCount, endpoints = ENDPOINTS, { timeoutMs = 15000, cache = epCache } = {}) {
   const results = [];
-  for (const ep of ENDPOINTS) {
-    const cached = epCache.get(ep.id);
+  for (const ep of endpoints) {
+    const cached = cache.get(ep.id);
     if (cached && pollCount % ep.everyPolls !== 0) { results.push(cached.result); continue; }
     let result;
     try {
       const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), 15000);
-      const res = await fetch(ep.url, { method: 'GET', redirect: 'manual', signal: ctl.signal })
-        .finally(() => clearTimeout(t));
-      const judged = ep.okPath ? judgeBody(ep, await res.text().catch(() => '')) : { okFlag: null, note: '' };
+      // one 15 s limit for the headers AND the body read (a body that never ends cannot stall the poll; the
+      // status code already read still decides: a 5xx stays down). A judged body cut off by the limit is DOWN
+      // (a health URL that cannot say it is healthy in time is not); a body that arrives but is not JSON stays a note.
+      const t = setTimeout(() => ctl.abort(), timeoutMs);
+      let res, judged;
+      try {
+        res = await fetch(ep.url, { method: 'GET', redirect: 'manual', signal: ctl.signal });
+        if (!ep.okPath) {
+          judged = { okFlag: null, note: '' };
+          res.body?.cancel().catch(() => {});                 // the body is not read: let the connection go
+        } else {
+          let text = null, bodyErr = null;
+          try { text = await res.text(); } catch (e) { bodyErr = e; }
+          judged = text !== null ? judgeBody(ep, text)
+            : { okFlag: false, note: ctl.signal.aborted ? `body not read within ${Math.round(timeoutMs / 1000)} s`
+              : `body unreadable (${bodyErr?.cause?.code || bodyErr?.name || 'error'})` };
+        }
+      } finally { clearTimeout(t); }
       result = { ...ep, up: true, code: res.status, ...judged };
     } catch (err) {
       result = { ...ep, up: false, code: null, err: err.cause?.code || err.name };
     }
-    epCache.set(ep.id, { polls: pollCount, result });
+    cache.set(ep.id, { polls: pollCount, result });
     results.push(result);
   }
   return results;

@@ -35,7 +35,11 @@ export function classify(files, manifest) {
   const pub = manifest.public.map(globRe); const priv = manifest.private.map(globRe);
   const root = manifest.publicRoot ? `${manifest.publicRoot.replace(/\/+$/, '')}/` : null;
   const out = { public: [], private: [], unclassified: [], both: [], mapped: [], shadowed: [] };
+  // `withheld`: exact paths that a public pattern covers and that stay private all the same (#797: a private lane
+  // inside src/, test/ or examples/). Exact paths only, so a pattern can never withhold more than it names.
+  const held = new Set(manifest.withheld || []);
   for (const f of files) {
+    if (held.has(f)) { out.private.push(f); continue; }
     if (root && f.startsWith(root)) { out.mapped.push({ from: f, to: f.slice(root.length) }); continue; }
     const a = pub.some((r) => r.test(f)); const b = priv.some((r) => r.test(f));
     (a && b ? out.both : a ? out.public : b ? out.private : out.unclassified).push(f);

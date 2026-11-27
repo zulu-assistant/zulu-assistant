@@ -9,7 +9,7 @@ import { readFile, writeFile, readdir, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { containsSecret } from './secret-text.mjs';
 import { OWNER, isOwner, isPrincipal as isListedPrincipal, PRINCIPALS, SETTINGS } from './config.mjs';
-import { addGate, decideGate, gateEvent, pendingGates, settleAfterGates, gatesResolved, findGate, openProposal, newProposal, proposeGate, rejectProposal, proposalWhat, RUN_SEEN_MINUTES } from './gate-ledger.mjs';
+import { addGate, decideGate, gateEvent, pendingGates, settleAfterGates, gatesResolved, findGate, openProposal, newProposal, proposeGate, rejectProposal, proposalWhat, withdrawGate, RUN_SEEN_MINUTES } from './gate-ledger.mjs';
 import { cleanStamp, addStamp, buildPacket, packetText, packetBrief } from './completion-packet.mjs';
 
 export const STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'needs_approval', 'done', 'cancelled'];
@@ -515,6 +515,20 @@ export function applyPatch(prev, patch, ctx = {}) {
       note = `${OWNER.name} rejected ${proposalWhat(heard)} for ${what}: ${typedOne ? 'not typed by the owner' : 'not what was said'}. ${restored ? `Nothing was approved; #${t.id} is back to ${t.status}.` : 'Still waiting; do not act on it.'}`;
       break;
     }
+    case 'gate_withdraw': {
+      // #786 B: the agent a pending row was filed for says the call is not needed. Never a decision:
+      // the owner's board, Mission Control, the intake, a headless or unregistered session cannot do it,
+      // and nothing is released, minted or woken. A later run of the same call files a new row.
+      if (ctx.decider || ctx.intake) throw new MeshError(403, `a gate row is withdrawn by the agent it was filed for, not decided: ${OWNER.name} declines it on the board`);
+      if (isMC) throw new MeshError(403, 'Mission Control does not withdraw rows: the agent the row was filed for does, or the owner declines it');
+      if (!registered(actor) || human(actor)) throw new MeshError(403, `"${actor}" cannot withdraw a gate row: only the registered agent it was filed for can`);
+      if (TERMINAL.has(t.status)) throw new MeshError(409, `task #${t.id} is ${t.status}: nothing to withdraw`);
+      const g = withdrawGate(t, { gate: String(patch.gate ?? ''), reason: cleanText(patch.reason ?? patch.text ?? '', 'reason') }, { iso, by: actor });
+      comment(`GATE ${g.id} withdrawn by ${actor} (not a decision; nothing ran): ${g.withdraw_reason}`, 'board', { gate: { id: g.id, event: 'withdrawn' } });
+      events.push(`task #${t.id} GATE ${g.id} withdrawn by ${actor}: ${g.label}`);
+      settleAfterGates(t, OWNER.id);
+      break;
+    }
     case 'gate_event': {                       // executed / expired / rerun_declined / attempt (gate service only)
       const g = gateEvent(t, patch, iso);
       // "executed" = released to run once: the board let the call through; it never sees the result
@@ -735,7 +749,7 @@ export function applyPatch(prev, patch, ctx = {}) {
       events.push(`task #${t.id} reopened by ${actor}`);
       break;
     default:
-      bad(`unknown op "${op}" (claim|start|assign|comment|block|unblock|answer|plan|request_approval|record_decision|gate_decide|gate_record|proposal_reject|revoke_go|set_requester|request_confirm|checklist|link|test_stamp|close|cancel|reopen)`);
+      bad(`unknown op "${op}" (claim|start|assign|comment|block|unblock|answer|plan|request_approval|record_decision|gate_decide|gate_record|gate_withdraw|proposal_reject|revoke_go|set_requester|request_confirm|checklist|link|test_stamp|close|cancel|reopen)`);
   }
   // a pending gate keeps the task waiting on the owner, whatever op moved its status (#421: an
   // unblock restored in_progress and g2 #408 left WAITING ON YOU for 10 hours). Blocked stays

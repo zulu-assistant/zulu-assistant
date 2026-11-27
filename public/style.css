@@ -90,6 +90,8 @@ h1 {
 .agent-state { font-weight: 700; font-size: 10px; letter-spacing: .12em; }
 .agent-name { font-size: 12px; font-weight: 700; color: var(--ink-bright); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-cwd { font-size: 10px; color: var(--ink-3); }
+.agent-read { font-size: 10px; letter-spacing: .12em; color: var(--ink-2); text-decoration: none; }
+.agent-read:hover, .agent-read:focus-visible { color: var(--ink-bright); text-shadow: var(--glow-green); outline: none; }
 .agent-note { font-size: 10px; color: var(--ink-2); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-tile.l-running { border-color: #0d5f5f; }
 .agent-tile.l-running .agent-state { color: #00e5e5; }
@@ -536,7 +538,7 @@ body.dock .agents-row { display: block; margin-bottom: 10px; }
 body.dock .agents-grid { flex-direction: column; gap: 4px; }
 body.dock .agent-tile.ctx-quiet { display: none; }
 body.dock .agent-tile { min-width: 0; padding: 5px 8px; }
-body.dock .agent-cwd, body.dock .agent-note, body.dock .agent-owns, body.dock .agent-addr { display: none; }
+body.dock .agent-read, body.dock .agent-cwd, body.dock .agent-note, body.dock .agent-owns, body.dock .agent-addr { display: none; }
 body.dock .work-counts { display: block; margin: 3px 0 0; }
 body.dock .task-last { white-space: normal; }
 
@@ -573,3 +575,31 @@ body.dock .task-last { white-space: normal; }
 @keyframes star-in { from { opacity: 0; transform: translateY(8px); } }
 body.tv .star-toast, body.dock .star-toast, body.tv .share-link, body.dock .share-link { display: none; }
 @media (prefers-reduced-motion: reduce) { .star-toast { animation: none; } }
+
+/* ---- daily decision page (#788, ?decide=1): the list alone, by cost of waiting ---- */
+body.decide .decisions, body.decide .timeline-row, body.decide .attention, body.decide .agents-row,
+body.decide .work-row, body.decide main, body.decide .tiles, body.decide .star-toast, body.decide .share-link { display: none !important; }
+.decide-page { border: 1px solid var(--card-edge); background: var(--card); padding: 12px 14px; margin-bottom: 14px; }
+.decide-page h2 { margin: 0 0 10px; }
+.dp-row { border-top: 1px solid var(--card-edge); padding: 10px 0; }
+.dp-row:first-child { border-top: 0; }
+.dp-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.dp-cost { color: var(--ink-bright); min-width: 4.5em; font-variant-numeric: tabular-nums; }
+.dp-gate .dp-cost { color: var(--status-warning); }
+.dp-age { color: var(--ink-2); min-width: 3.5em; font-variant-numeric: tabular-nums; }
+.dp-owner { color: var(--ink-2); }
+.dp-title { flex: 1 1 260px; color: var(--ink-bright); overflow-wrap: anywhere; }
+.dp-body { margin: 6px 0 0 4.5em; }
+.dp-body .task { margin: 0; }
+.dp-q { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--ink); font: inherit; cursor: pointer; padding: 2px 0; }
+.dp-q-out { color: var(--ink-3); cursor: default; }
+.dp-q-full { display: block; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-bright); margin-top: 4px; }
+.dp-hint { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+.dp-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 11px; color: var(--ink-3); border-top: 1px solid var(--card-edge); padding-top: 8px; }
+.ws-title { color: var(--ink-bright); border: 1px solid var(--ink-3); padding: 0 6px; margin-right: 6px; font-size: 11px; letter-spacing: .06em; }
+.ws-none { color: var(--ink-3); font-size: 11px; }
+.att-ws { font-size: 11px; color: var(--ink-2); margin: 2px 0 4px 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+@media (max-width: 600px) {
+  .dp-body { margin-left: 0; }
+  .dp-title { flex-basis: 100%; }
+}

@@ -266,33 +266,109 @@ const DIALOG = [
   /^\s*[›❯»>]\s*1\.\s+\S/m,                // numbered choice with the cursor on it
   /\(y\)\s*$/m, /\[y\/n\]/i,
 ];
+// Gemini CLI 0.70.0 (#811), in its box; read for a Gemini pane only
+const GEMINI_DIALOG = [/^\s?│\s*Allow execution of\b/m, /^\s?│\s*Do you trust the files in this folder\?/m];
 const BUSY = [/esc to interrupt/i, /\bWorking \(\d/i, /^\s*[✻✶✳✢·*]\s+\S+…\s*\(/m];
 const READY_FOOTER = [/\? for shortcuts/i, /shift\+tab to cycle/i, /manual mode on/i, /accept edits on/i, /auto mode on/i, /bypass permissions on/i, /plan mode on/i];
 // `enter/esc latest`: a Codex pane left scrolled up (0.162.1: "↓ Back to bottom", sometimes "New activity · Earlier
 // messages available"). Probed on a scratch Codex pane (#624): typed text stays in the composer and one Enter submits
 // it and jumps to the bottom, so the view is ready. Before, it read as not recognised and messages expired unread.
 // Read on the footer line (the last line) only: the conversation above may quote the phrase (MC's read of 48a2875).
+// #787: `← for agents` starting the footer: Codex 0.170.0 with an empty composer. In a narrow pane it drops
+// `? for shortcuts` and keeps only `← for agents   ⚠ 3 warnings · f2 to view`, so the pane read "not recognised" and
+// messages to it queued until the owner nudged it. Probed on a scratch Codex 0.170.0 pane: with a
+// draft the hint is gone (only the warnings part stays), during a turn the busy line wins, and typed text + one Enter
+// submits. Dialog, busy and draft are all decided before this line is read. The whole last line must be the hint,
+// alone or with the warnings part, so a wrapped draft whose next line starts with the same words is not taken for it,
+// and it counts only when the input line is exactly the empty-composer text both probed panes showed, with a blank
+// line right under it (Codex's layout: input, blank, status, hint). A plain screen read cannot see that placeholder
+// text is dimmed, so the other placeholder shapes (`Write tests for …`) are not taken here: a draft could start so.
+const CODEX_EMPTY = 'Ask Codex to do anything';
 const READY_LAST_LINE = [/\benter\/esc latest\b/i];
+const CODEX_AGENTS_HINT = /^\s*← for agents(\s+⚠ \d+ warnings? · f2 to view)?\s*$/;
 const PLACEHOLDER = /^(Ask Codex to do anything|Try ".*"|Implement \{feature\}|Find and fix a bug.*|Summarize recent commits|Write tests for .*|Explain this codebase|Improve documentation.*|Run \/review.*)$/i;
 const SHELL = /(?:^|\s)[%$#]\s*$/;
+// #811: Gemini CLI 0.70.0 draws its composer as a box: a bar of ▄, the input line (` > text`), a bar of ▀, then a
+// footer of one or two lines (`workspace (/directory) … sandbox … /model` and its values). Empty, the input line is
+// ` >   Type your message or @path/to/file` (three spaces; a draft has one). `>` is not in the prompt set below, so
+// both Gemini panes read "not recognised" and every message expired queued. Probed on a scratch pane (11-23): typed
+// text, 300 ms, one Enter submits; during a turn the empty box stays on screen under `⠋ Thinking... (esc to cancel,
+// 1s)`, which DIALOG reads first; a tool approval (`Allow execution of [Shell]?`) hides the box, and the box then
+// lowest on screen is the echo of the last message. So the box counts only when its ▀ bar is within the last 3
+// lines and is followed by nothing or by the footer's `workspace` line (never a shell prompt: a box printed in a shell
+// is not a composer), and ready only for the exact empty line alone in it. Any other text in it is a draft; a bottom
+// bar with no top bar above it (a long draft) or any other shape, unknown. A plain screen read cannot see that the
+// placeholder is dimmed, so a draft typed as two spaces and the placeholder's words reads as empty (as for Codex).
+// All of it is read only for a pane the directory names `vendor: 'gemini'` (`classifyScreen(s, { vendor })`, passed
+// by deliverNow), and such a pane is never read by the Claude/Codex ready rules: no other pane can be made ready by
+// a screen that looks like Gemini's, and no Gemini pane by text that looks like another vendor's (Codex reviews).
+const GEMINI_EMPTY = /^ ?> {3}Type your message or @path\/to\/file$/;
+const GEMINI_TOP = /^▄{10,}$/;
+const GEMINI_BOTTOM = /^▀{10,}$/;
+const GEMINI_INPUT = /^ ?> (.*)$/;
+const GEMINI_FOOTER = /^\s*workspace \(\/directory\)/;
+const GEMINI_CONTENT = /^ ?> |^ {3}\S/;   // an input line, or a draft's continuation (indented 3)
+const PROMPT_END = /[%$#>❯❱➜λ]\s*$/;        // a shell prompt such as `user@host:~$` or `~/my-app git(main) ❱`
+const GEMINI_MODE = /^\s*(?:auto-accept edits\s+)?Shift\+Tab to (?:accept edits|plan)\b/;
+function geminiComposer(lines) {
+  let b = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 3); i--) if (GEMINI_BOTTOM.test(lines[i])) { b = i; break; }
+  if (b < 0) return null;
+  const after = lines.slice(b + 1);
+  if (after.length > 2 || (after.length && !GEMINI_FOOTER.test(after[0]))) return null;
+  if (after.some((l) => SHELL.test(l) || PROMPT_END.test(l))) return null;
+  // the second footer line is the values row: the workspace folder first, then columns
+  // (` ~/my-app     no sandbox     model`), never a prompt
+  // (a folder may hold spaces, or be `~` alone)
+  if (after.length === 2 && !(/^ ?[~/]/.test(after[1]) && /\S\s{3,}\S/.test(after[1]))) return null;
+  let a = -1;
+  for (let i = b - 1; i >= 0; i--) if (GEMINI_TOP.test(lines[i])) { a = i; break; }
+  if (a < 0 || a === b - 1) return { unknown: true };
+  // a bar typed into a draft is not the top: the first non-blank line above the real top is never box content
+  let up = a - 1;
+  while (up >= 0 && !lines[up].trim()) up--;
+  if (up >= 0 && GEMINI_CONTENT.test(lines[up])) return { unknown: true };
+  // and Gemini's own mode line (`Shift+Tab to accept edits`, `auto-accept edits Shift+Tab to plan`) sits just above
+  if (!lines.slice(Math.max(0, a - 5), a).some((l) => GEMINI_MODE.test(l))) return { unknown: true };
+  const box = lines.slice(a + 1, b);
+  if (box.length === 1 && GEMINI_EMPTY.test(box[0])) return { empty: true };
+  const m = box[0].match(GEMINI_INPUT);
+  if (!m || box.slice(1).some((l) => l && !/^ {3}/.test(l))) return { unknown: true };
+  const draft = [m[1], ...box.slice(1)].map((l) => l.trim()).filter(Boolean).join(' ');
+  return draft ? { draft } : { unknown: true };
+}
 
 /** 'dialog' | 'busy' | 'draft' | 'ready' | 'shell' | 'unknown' — plus the draft text. */
-export function classifyScreen(screen) {
+export function classifyScreen(screen, { vendor } = {}) {
   const lines = String(screen || '').split('\n').map((l) => l.replace(/\s+$/, ''));
   while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
   const tail = lines.slice(-14).join('\n');
   if (DIALOG.some((re) => re.test(tail))) return { state: 'dialog' };
+  if (vendor === 'gemini') {
+    // the composer first: a Gemini approval hides it, so a composer at the bottom means any approval words above are
+    // quoted text (a turn's `esc to cancel` was read by DIALOG above)
+    const g = geminiComposer(lines);
+    const gBusy = BUSY.some((re) => re.test(tail));
+    if (g?.draft) return { state: 'draft', draft: g.draft, busy: gBusy };
+    if (g?.empty) return { state: gBusy ? 'busy' : 'ready' };
+    if (GEMINI_DIALOG.some((re) => re.test(tail))) return { state: 'dialog' };
+    if (lines.length && SHELL.test(lines[lines.length - 1])) return { state: 'shell' };
+    return { state: 'unknown' };
+  }
 
   // the input line: last "❯ " (Claude) or "› " / "» " (Codex) line
   let input = null;
+  let inputAt = -1;
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - 12); i--) {
     const m = lines[i].match(/^\s*[❯›»]\s?(.*)$/);
-    if (m) { input = m[1].trim(); break; }
+    if (m) { input = m[1].trim(); inputAt = i; break; }
   }
   const busy = BUSY.some((re) => re.test(tail));
   if (input !== null && input && !PLACEHOLDER.test(input)) return { state: 'draft', draft: input, busy };
   if (busy) return { state: 'busy' };
-  if (input !== null && (READY_FOOTER.some((re) => re.test(tail)) || READY_LAST_LINE.some((re) => re.test(lines[lines.length - 1]))))
+  const last = lines[lines.length - 1];
+  if (input !== null && (READY_FOOTER.some((re) => re.test(tail)) || READY_LAST_LINE.some((re) => re.test(last))
+    || (input === CODEX_EMPTY && !String(lines[inputAt + 1] ?? 'x').trim() && CODEX_AGENTS_HINT.test(last))))
     return { state: 'ready' };
   if (lines.length && SHELL.test(lines[lines.length - 1])) return { state: 'shell' };
   return { state: 'unknown' };
@@ -309,7 +385,7 @@ export function deliveryDecision(state, { wake = false } = {}) {
   if (state === 'dialog') return { queue: 'target is showing a dialog/permission prompt — not typing into it' };
   if (state === 'draft') return { queue: 'target has a half-typed draft in its input box' };
   if (state === 'shell') return { queue: 'target pane is a bare shell (agent not running)' };
-  return { queue: 'target screen not recognised' };
+  return { queue: UNREAD_REASON };   // the drain's unread clock (#787 part 2) keys on this exact reason
 }
 
 export function formatWake({ from, text, taskId }) {
@@ -491,7 +567,7 @@ export async function deliverNow(agent, line, { wake = false, run = cmux, sleep 
   const ws = agent.workspaceId;
   const screen = await run(['read-screen', '--workspace', ws]);
   if (screen.err) return { queued: `read-screen failed: ${screen.err.slice(0, 100)}` };
-  const cls = classifyScreen(screen.out);
+  const cls = classifyScreen(screen.out, { vendor: agent.vendor });
   let { state } = cls;
   // an idle Claude pane's "draft" may be a prompt suggestion: typing replaces it, so it is ready
   if (state === 'draft' && !cls.busy && agent.vendor === 'claude' && mayProbe(seen, ws, cls.draft, now)) {
@@ -515,7 +591,7 @@ export async function deliverNow(agent, line, { wake = false, run = cmux, sleep 
   // Enter), press Enter once more
   await sleep(1500);
   const after = await run(['read-screen', '--workspace', ws]);
-  const c = classifyScreen(after.out);
+  const c = classifyScreen(after.out, { vendor: agent.vendor });
   if (c.state === 'draft' && line.startsWith(c.draft.slice(0, 20))) {
     await run(['send-key', '--workspace', ws, 'enter']);
   }
@@ -550,6 +626,49 @@ export function staleReason(m, currentStatus, now = Date.now()) {
   if (TERMINAL_TASK.has(currentStatus) && now - m.queuedAt > DONE_NOTICE_TTL_MS) return `task #${m.taskId} ${currentStatus} notice older than 2h`;
   return null;
 }
+
+// #787 part 2: a pane the board cannot read. A message queued with "target screen not recognised"
+// carries `unreadSince` (when that reason began for it; any other reason clears it and `toldAt`).
+// Once a target's oldest such message is UNREAD_TELL_MS old, the drain reports the target ONCE
+// (`toldAt` on its messages marks the episode told). The episode ends when the pane reads as
+// anything else, or its messages deliver, expire or are dropped; the next one is told again.
+export const UNREAD_REASON = 'target screen not recognised';
+export const UNREAD_TELL_MS = 5 * 60e3;
+
+/** The message after a drain attempt, with its unread clock kept, started or cleared (pure). */
+export function markUnread(m, now) {
+  if (m.lastReason === UNREAD_REASON) return { ...m, unreadSince: m.unreadSince ?? now };
+  if (m.unreadSince == null && m.toldAt == null) return m;
+  const { unreadSince, toldAt, ...rest } = m;
+  return rest;
+}
+
+/** Targets to tell about now (pure): unread for at least UNREAD_TELL_MS, not told this episode.
+ *  → [{ to, minutes, count }] */
+export function unreadableTargets(msgs, now) {
+  const by = new Map();
+  for (const m of msgs) {
+    if (m.unreadSince == null) continue;
+    const g = by.get(m.to) || { to: m.to, since: m.unreadSince, count: 0, told: false };
+    g.since = Math.min(g.since, m.unreadSince);
+    g.count += 1;
+    if (m.toldAt != null) g.told = true;
+    by.set(m.to, g);
+  }
+  return [...by.values()]
+    .filter((g) => !g.told && now - g.since >= UNREAD_TELL_MS)
+    .map((g) => ({ to: g.to, minutes: Math.floor((now - g.since) / 60e3), count: g.count }));
+}
+
+/** Who hears about an unreadable target (pure): the ticker always; Mission Control too, unless the
+ *  target IS Mission Control (its notice would queue behind the very screen it is about).
+ *  `nameOf(x)` resolves an address to its directory name (null = unknown, then the address counts). */
+export function unreadableNotices(unreadable, { mcName, nameOf = () => null }) {
+  return (unreadable || []).map((u) => ({ text: unreadableText(u), tellMc: (nameOf(u.to) || u.to) !== mcName }));
+}
+
+/** The words of the notice (pure; the board's own, no message text). */
+export const unreadableText = (u) => `${u.to} has not been readable for ${u.minutes} min; ${u.count} message(s) waiting; check its pane`;
 
 // Every read-modify-write of an outbox file goes through ONE promise chain per
 // file (like the ledger's writer): a message queued while a drain is typing into
@@ -599,7 +718,11 @@ export async function drainOutbox({ file = OUTBOX_FILE, now = Date.now(), resolv
         if (r.delivered) { delivered.push(m); gone.add(outboxKey(m)); continue; }
         next = { ...m, attempts: (m.attempts || 0) + 1, lastReason: r.queued };
       }
-      updated.set(outboxKey(m), next);
+      updated.set(outboxKey(m), markUnread(next, now));
+    }
+    const unreadable = unreadableTargets([...updated.values()], now);
+    for (const u of unreadable) {
+      for (const [k, m] of updated) if (m.to === u.to && m.unreadSince != null) updated.set(k, { ...m, toldAt: now });
     }
     const kept = await withOutbox(file, async () => {
       const cur = await readOutbox(file);
@@ -608,7 +731,7 @@ export async function drainOutbox({ file = OUTBOX_FILE, now = Date.now(), resolv
       return out;
     });
     for (const m of kept) still.push(m);
-    return { delivered, expired, dropped, still };
+    return { delivered, expired, dropped, still, unreadable };
   } finally { draining.delete(file); }
 }
 
@@ -654,12 +777,14 @@ const READY_TIMEOUT_MS = 120_000;
  * pointer to the brief and verify it started working. Never answers dialogs
  * (trust-folder etc.) — reports them instead.
  */
-export async function kickSession({ workspace, line, name, run = cmux, sleep = delay, now = () => Date.now(), registry = readRegistry, timeoutMs = READY_TIMEOUT_MS }) {
+export async function kickSession({ workspace, line, name, vendor, run = cmux, sleep = delay, now = () => Date.now(), registry = readRegistry, timeoutMs = READY_TIMEOUT_MS }) {
   const t0 = now();
   let state = 'unknown';
+  // the pane's engine (#812): a Gemini pane is read by the Gemini rules only (#811)
+  const read = (out) => classifyScreen(out, { vendor });
   while (now() - t0 < timeoutMs) {
     const s = await run(['read-screen', '--workspace', workspace]);
-    state = s.err ? 'unknown' : classifyScreen(s.out).state;
+    state = s.err ? 'unknown' : read(s.out).state;
     if (state === 'ready') break;
     if (state === 'dialog' && now() - t0 > 15_000) {
       return { ok: false, reason: 'dialog on screen at launch (trust-folder / permission prompt) — needs a human', state };
@@ -678,7 +803,7 @@ export async function kickSession({ workspace, line, name, run = cmux, sleep = d
     const regs = name ? await registry() : [];
     const mine = regs.find((r) => r.name === name);
     const s = await run(['read-screen', '--workspace', workspace]);
-    const c = classifyScreen(s.out);
+    const c = read(s.out);
     if (mine?.status === 'busy' || c.state === 'busy' || (c.state === 'draft' && c.busy)) return { ok: true, attempt };
     if (c.state === 'dialog') return { ok: true, attempt, note: 'working (already at a permission prompt)' };
     if (c.state === 'ready' && attempt > 1) {

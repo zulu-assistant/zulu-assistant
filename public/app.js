@@ -36,6 +36,9 @@ if (tvMode) document.body.classList.add('tv');
 // name+status chips, WORK stacks, ticker stays; no boot sequence
 const dockMode = new URLSearchParams(location.search).has('dock');
 if (dockMode) { document.body.classList.add('dock'); BoardDecide.dockLayout(document); }   // #450
+// ?decide=1 — the daily decision page (#788): only the list of what waits on the owner, by cost
+const decidePageMode = new URLSearchParams(location.search).has('decide');
+if (decidePageMode) document.body.classList.add('decide');
 
 function chip(status) {
   const s = STATUS[status] || STATUS.ok;
@@ -47,9 +50,19 @@ function strip(states) {
   return `<div class="strip" aria-hidden="true">${cells}</div>`;
 }
 
+const setupPageOn = typeof document !== 'undefined' && document.querySelector('meta[name="setup-page"]')?.content === 'on';
+// conversation view (read-only page of its own, so a plain link): only for a session id the page can name
+const conversationOn = typeof document !== 'undefined' && document.querySelector('meta[name="conversation-view"]')?.content === 'on';
+const conversationLink = (s) => (conversationOn && /^[A-Za-z0-9][A-Za-z0-9-]{3,63}$/.test(String(s.id || ''))
+  ? `<a class="agent-read" href="/?conversation=${encodeURIComponent(s.id)}" title="what was said to this agent and what it answered (read-only)">READ ▸</a>` : '');
 function actionButtons(job) {
   // the setup card is finished in a terminal, not by an agent
-  if (job.label === 'setup:') return job.status === 'ok' ? '' : '<div class="card-actions"><span class="hint">run in a terminal: <kbd>zulu setup</kbd></span></div>';
+  // (with the setup page on, the card also links to it: a read-only page, so a plain link)
+  if (job.label === 'setup:') {
+    const page = setupPageOn ? '<a class="act" href="/?setup=1">SETUP PAGE</a>' : '';
+    const hint = job.status === 'ok' ? '' : '<span class="hint">run in a terminal: <kbd>zulu setup</kbd></span>';
+    return page || hint ? `<div class="card-actions">${page}${hint}</div>` : '';
+  }
   // the one-click upgrade (#346): only a release install's card carries `upgrade`; the owner's click is the approval
   if (job.label === 'update') {
     if (!job.upgrade) return '';
@@ -280,6 +293,7 @@ function render(data) {
       ${owns ? `<span class="agent-owns">${esc(owns)}</span>` : ''}
       ${s.note ? `<span class="agent-note">${esc(s.note)}</span>` : ''}
       ${ctxMeter(s.ctx)}
+      ${conversationLink(s)}
     </div>`;
   }).join('');
   renderWork(data.work);
@@ -452,6 +466,7 @@ function renderWork(work) {
     // closed in the last 24h — shown only when one carries a completion packet (the evidence is the point)
     + ((w.closed24h || []).some((t) => t.evidence) ? col('CLOSED 24H · EVIDENCE', w.closed24h.filter((t) => t.evidence), '') : '');
   renderDecisions(w);
+  renderDecidePage(w);
 }
 
 // Guardrails: the owner's decisions pinned at the top (same rows and buttons as WORK, oldest first),
@@ -528,6 +543,7 @@ function renderAttention(w, view) {
   const r = BoardAttention.renderStrip(view, tasks, {
     esc, taskRow, dock: dockMode, expanded: attExpanded, collapsed: attCollapsed, picking: attPicking, results: attResults,
     armed: attArmed, now: Date.now(), foldOpen: attFoldOpen, blocksOpen: attBlocksOpen,
+    workspace: lastData?.decide ? wsHtml : null,   // #788: the owner's workspace + OPEN WORKSPACE, while the page is on
   });
   const count = dockMode ? r.decisionItems : r.count;   // the Dock's title counts decisions only; its blocks have their own section
   document.title = count ? `(${count}) ${BASE_TITLE}` : BASE_TITLE;
@@ -560,6 +576,80 @@ function onAttentionClick(e) {
 }
 $('decisions-list').addEventListener('click', onAttentionClick);
 $('decisions-fold').addEventListener('click', onAttentionClick);
+// Daily decision page (#788, ?decide=1, public/decide-page.js): the strip's items by cost of waiting.
+// Its gate and approval buttons are taskRow's own, so onDecideClick handles them as everywhere else.
+const dpQuestions = new Set();            // block rows whose full question is unfolded (this tab only)
+const dpFull = new Map();                 // row id -> full question text, from GET /api/decide
+const wsResults = new Map();              // 'ws:<agent>' -> { text, pending } after an OPEN WORKSPACE click
+const phoneWidth = () => window.matchMedia('(max-width: 600px)').matches;
+/** The owner agent's workspace from the payload's directory (the board's own, never the row's words). */
+function workspaceFor(agent) {
+  const a = Object.values(lastData?.directory || {}).find((d) => d.name === agent);
+  return a && a.status !== 'closed' && a.workspaceOpen !== false && a.title ? { title: a.title, open: true } : { title: null, open: false };
+}
+const wsHtml = (agent) => BoardDecide.workspaceHtml(workspaceFor(agent), agent, { esc, results: wsResults, phone: phoneWidth() });
+function renderDecidePage(w) {
+  const view = lastData?.decide;
+  $('decide-page').classList.toggle('hidden', !decidePageMode || !view);
+  if (!decidePageMode || !view) return;
+  const tasks = new Map([...(w?.needsApproval || []), ...(w?.blocked || [])].map((t) => [t.id, t]));
+  const r = BoardDecidePage.renderPage(view, tasks, {
+    esc, taskRow, openQuestions: dpQuestions, fullText: dpFull, results: wsResults, phone: phoneWidth(),
+    workspaceHtml: (ws, agent, o) => BoardDecide.workspaceHtml(ws, agent, o),
+  });
+  $('decide-header').textContent = r.header;
+  $('decide-list').innerHTML = r.html;
+  document.title = r.count ? `(${r.count}) ${BASE_TITLE}` : BASE_TITLE;
+}
+function onDecidePageClick(e) {
+  const q = e.target.closest('[data-dp-q]');
+  if (!q) return;
+  const id = q.dataset.dpQ;
+  // folding drops the text read, so a task blocked again with a new question is read again
+  if (dpQuestions.has(id)) { dpQuestions.delete(id); dpFull.delete(id); } else dpQuestions.add(id);
+  renderWork(lastWork);
+  const row = (lastData?.decide?.rows || []).find((r) => r.id === id);
+  if (dpQuestions.has(id) && row?.more && !dpFull.has(id)) loadFullQuestions();
+}
+// the full question texts: read once per unfold from GET /api/decide (a read; the push carries one line)
+async function loadFullQuestions() {
+  const v = await fetch('/api/decide', { cache: 'no-store' }).then((x) => (x.ok ? x.json() : null)).catch(() => null);
+  for (const r of v?.rows || []) if (r.questionFull) dpFull.set(r.id, r.questionFull);
+  for (const id of dpQuestions) if (!dpFull.has(id)) dpFull.set(id, '(the full question could not be read: reload)');
+  renderWork(lastWork);
+}
+$('decide-list').addEventListener('click', onDecideClick);
+$('decide-list').addEventListener('click', onCommandToggle);
+$('decide-list').addEventListener('click', onDecidePageClick);
+
+// OPEN WORKSPACE (#788): one click (it only changes what is in front on the Mac); the board finds the
+// workspace from its own directory. Refused without the page's token or with an agent behind the call.
+async function openWorkspaceClick(e) {
+  const b = e.target.closest('button[data-open-ws]');
+  if (!b) return;
+  e.stopPropagation();
+  const agent = b.dataset.openWs;
+  const key = `ws:${agent}`;
+  wsResults.set(key, { text: '… OPENING', pending: true });
+  renderWork(lastWork);
+  const token = document.querySelector('meta[name="mesh-decision"]')?.content || '';
+  let status = 0; let body = null;
+  try {
+    const res = await fetch('/api/workspace/open', {
+      method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json', 'x-mesh-decision': token },
+      body: JSON.stringify({ agent }),
+    });
+    status = res.status;
+    body = await res.json().catch(() => null);
+  } catch { /* status 0 = never reached the board */ }
+  const out = BoardDecide.decisionOutcome(status, body);
+  wsResults.set(key, { text: out.ok ? (phoneWidth() ? '✓ OPEN ON THE MAC' : '✓ OPENED') : out.text, pending: false });
+  renderWork(lastWork);
+  showNotice(`${agent}: ${out.ok ? `workspace in front${phoneWidth() ? ' on the Mac' : ''}` : out.text}`, out.ok ? 'ok' : 'bad', out.reload);
+  setTimeout(() => { wsResults.delete(key); renderWork(lastWork); }, 4000);
+}
+for (const id of ['decide-list', 'decisions-list', 'decisions-fold']) $(id).addEventListener('click', openWorkspaceClick, true);
+
 $('decisions-fold').addEventListener('toggle', (e) => { if (e.target.classList.contains('att-blocks')) attBlocksOpen = e.target.open; else attFoldOpen = e.target.open; }, true);
 
 async function sendSnooze(key, op, items, choice) {

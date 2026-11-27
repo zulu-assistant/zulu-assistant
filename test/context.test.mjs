@@ -2,9 +2,9 @@
 import './temp-root.mjs';   // first: one temp folder per test process, removed at exit (#665)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseClaudeTail, parseCodexTail, windowFor, band, gauge, codexTranscriptFor } from '../src/context.mjs';
+import { parseClaudeTail, parseCodexTail, windowFor, band, gauge, codexTranscriptFor, parseGeminiTail, geminiWindowFor, geminiSessionFor, GEMINI_BOTH_LIVE_MS, collectContext } from '../src/context.mjs';
 import { withContext, withInput, ownerPill, applyPills } from '../src/chrome.mjs';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, utimes } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -142,4 +142,70 @@ test('applyPills writes each part only when it changes, and clears only what it 
   calls.length = 0;
   await applyPills(entries, [], { run, file, ctx: new Map() });
   assert.deepEqual(calls, ['clear-status ctx', 'clear-progress'], 'gauge gone → clear what we set');
+});
+
+// #812: Gemini CLI 0.70.0 session lines (shapes from a scratch session, 11-23; values neutral)
+const GEMINI_TAIL = [
+  '{"sessionId":"s1","projectHash":"h","startTime":"2026-11-23T23:35:59.749Z","kind":"main"}',
+  '{"id":"u1","timestamp":"2026-11-23T23:35:59.749Z","type":"user","content":[{"text":"hi"}]}',
+  '{"id":"g1","timestamp":"2026-11-23T23:37:00.080Z","type":"gemini","content":"OK","tokens":{"input":10684,"output":1,"cached":0,"thoughts":119,"tool":0,"total":10804},"model":"gemini-x-flash"}',
+  '{"$set":{"lastUpdated":"2026-11-23T23:37:00.080Z"}}',
+  '{"id":"g2","timestamp":"2026-11-23T23:37:27.790Z","type":"gemini","content":"","tokens":{"input":20699,"output":26,"cached":8641,"thoughts":211,"tool":0,"total":20936},"model":"gemini-x-flash"}',
+].join('\n');
+
+test('#812: the last Gemini turn gives the gauge; a turn a $patch removed does not count', () => {
+  assert.deepEqual(parseGeminiTail(GEMINI_TAIL), { tokens: 20699, model: 'gemini-x-flash', at: Date.parse('2026-11-23T23:37:27.790Z') });
+  const removed = `${GEMINI_TAIL}\n{"$patch":{"updates":[],"removeIds":["g2"]}}`;
+  assert.equal(parseGeminiTail(removed).tokens, 10684);
+  assert.equal(parseGeminiTail('{"partial'), null);
+  assert.equal(parseGeminiTail(GEMINI_TAIL.split('\n').slice(0, 2).join('\n')), null);   // no Gemini turn yet
+});
+
+test('#812: a Gemini window comes from models.json only: no default, no guess', () => {
+  const windows = { default: 1_000_000, 'gemini-x': 500_000, 'gemini-x-pro': 2_000_000, 'claude-opus-5': 1_000_000 };
+  assert.equal(geminiWindowFor('gemini-x-flash', windows), 500_000);
+  assert.equal(geminiWindowFor('gemini-x-pro-2', windows), 2_000_000);
+  assert.equal(geminiWindowFor('gemini-unknown', windows), null);
+  assert.equal(geminiWindowFor(null, windows), null);
+  assert.equal(geminiWindowFor('gemini-x-flash', { 'gemini-x': 'big' }), null);
+});
+
+test('#812: the Gemini session is found by folder; two live sessions in one folder give none', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'gemini-tmp-'));
+  const mk = async (dir, root, files) => {
+    await mkdir(path.join(tmp, dir, 'chats'), { recursive: true });
+    await writeFile(path.join(tmp, dir, '.project_root'), root);
+    for (const [name, ageMs] of files) {
+      const p = path.join(tmp, dir, 'chats', name);
+      await writeFile(p, GEMINI_TAIL);
+      const t = (Date.now() - ageMs) / 1000;
+      await utimes(p, t, t);
+    }
+  };
+  await mk('app', '/work/app', [['session-a.jsonl', 60 * 60_000], ['session-b.jsonl', 1000]]);
+  await mk('other', '/work/other', [['session-c.jsonl', 1000], ['session-d.jsonl', GEMINI_BOTH_LIVE_MS / 2]]);
+  await mk('quiet', '/work/quiet', [['notes.txt', 1000]]);
+  assert.equal(await geminiSessionFor('/work/app', { tmp }), path.join(tmp, 'app', 'chats', 'session-b.jsonl'));
+  assert.equal(await geminiSessionFor('/work/other', { tmp }), null, 'two sessions written in the last minutes');
+  assert.equal(await geminiSessionFor('/work/quiet', { tmp }), null);
+  assert.equal(await geminiSessionFor('/work/none', { tmp }), null);
+  assert.equal(await geminiSessionFor('/work/app', { tmp: path.join(tmp, 'missing') }), null);
+
+  // the poll's collector: one Gemini agent in the folder gets the gauge; two in one folder get none
+  const models = { contextWindows: { default: 1_000_000, 'gemini-x': 100_000 } };
+  const one = [{ name: 'g', workspaceId: 'W1', vendor: 'gemini', cwd: '/work/app', status: 'active' }];
+  const g = (await collectContext(one, { geminiTmp: tmp, models })).get('W1');
+  assert.equal(g.ctxTokens, 20699);
+  assert.equal(g.pct, 21);
+  assert.equal(g.source, 'gemini');
+  const two = [...one, { name: 'g2', workspaceId: 'W2', vendor: 'gemini', repo: '/work/app', status: 'active' }];
+  assert.equal((await collectContext(two, { geminiTmp: tmp, models })).size, 0);
+  // a closed second agent does not count
+  assert.equal((await collectContext([...one, { ...two[1], status: 'closed' }], { geminiTmp: tmp, models })).size, 1);
+  // a session last written before the agent was registered is not its gauge
+  assert.equal(await geminiSessionFor('/work/app', { tmp, since: Date.now() + 60_000 }), null);
+  const later = [{ ...one[0], added_at: new Date(Date.now() + 60_000).toISOString() }];
+  assert.equal((await collectContext(later, { geminiTmp: tmp, models })).size, 0);
+  // a model with no window in models.json: no gauge (not the default)
+  assert.equal((await collectContext(one, { geminiTmp: tmp, models: { contextWindows: { default: 1_000_000 } } })).size, 0);
 });
